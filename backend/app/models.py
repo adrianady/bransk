@@ -90,9 +90,14 @@ class TimelineResponse(BaseModel):
 
 
 # ── Chat models ──
+class ChatMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant|system)$")
+    content: str
+
+
 class ChatRequest(BaseModel):
-    message: str
-    history: list[dict[str, str]] = []
+    message: str = Field(..., min_length=1, max_length=10000)
+    history: list[ChatMessage] = []
 
 
 class ChatResponse(BaseModel):

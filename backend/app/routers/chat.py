@@ -140,7 +140,7 @@ async def _call_llm_stream(
 
     messages = [{"role": "system", "content": system_prompt}]
     for h in history[-10:]:
-        messages.append(h)
+        messages.append({"role": h.role, "content": h.content})
     messages.append({"role": "user", "content": message})
 
     headers = {"Content-Type": "application/json"}
@@ -185,7 +185,7 @@ async def _call_llm_nonstream(
 
     messages = [{"role": "system", "content": system_prompt}]
     for h in history[-10:]:
-        messages.append(h)
+        messages.append({"role": h.role, "content": h.content})
     messages.append({"role": "user", "content": message})
 
     headers = {"Content-Type": "application/json"}
