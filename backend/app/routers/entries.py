@@ -10,7 +10,7 @@ router = APIRouter()
 
 
 @router.get("/entries", response_model=list[EntryResponse])
-async def list_entries(
+def list_entries(
     archived: bool = False,
     tag: Optional[str] = Query(None),
     limit: int = Query(100, le=500),
@@ -33,7 +33,7 @@ async def list_entries(
 
 
 @router.get("/entries/{entry_id}", response_model=EntryResponse)
-async def get_entry(entry_id: int):
+def get_entry(entry_id: int):
     conn = get_db()
     try:
         row = conn.execute("SELECT * FROM entries WHERE id = ?", [entry_id]).fetchone()
@@ -45,7 +45,7 @@ async def get_entry(entry_id: int):
 
 
 @router.post("/entries", response_model=EntryResponse, status_code=201)
-async def create_entry(data: EntryCreate):
+def create_entry(data: EntryCreate):
     conn = get_db()
     try:
         cur = conn.execute(
@@ -61,7 +61,7 @@ async def create_entry(data: EntryCreate):
 
 
 @router.put("/entries/{entry_id}", response_model=EntryResponse)
-async def update_entry(entry_id: int, data: EntryUpdate):
+def update_entry(entry_id: int, data: EntryUpdate):
     conn = get_db()
     try:
         existing = conn.execute("SELECT * FROM entries WHERE id = ?", [entry_id]).fetchone()
@@ -94,7 +94,7 @@ async def update_entry(entry_id: int, data: EntryUpdate):
 
 
 @router.delete("/entries/{entry_id}", status_code=204)
-async def delete_entry(entry_id: int):
+def delete_entry(entry_id: int):
     conn = get_db()
     try:
         cur = conn.execute("DELETE FROM entries WHERE id = ?", [entry_id])

@@ -1,6 +1,8 @@
 """
 ChronoKG — FastAPI Application
 """
+import logging
+import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,11 +13,22 @@ from app.routers import (
     chat, tags, spaced_repetition, todos, reminders, thoughts
 )
 
+# Structured Python Logging Configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("chronokg")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Initializing ChronoKG Database Schema & FTS5 Index...")
     init_db()
+    logger.info("ChronoKG Backend Startup Complete.")
     yield
+    logger.info("ChronoKG Backend Shutting Down.")
 
 
 app = FastAPI(
@@ -24,15 +37,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Restrict CORS methods and headers to required set
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
-# Register routers
+# Register API Routers
 app.include_router(entries.router, prefix="/api", tags=["entries"])
 app.include_router(search.router, prefix="/api", tags=["search"])
 app.include_router(timeline.router, prefix="/api", tags=["timeline"])

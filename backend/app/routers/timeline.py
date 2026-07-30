@@ -10,7 +10,7 @@ router = APIRouter()
 
 
 @router.get("/timeline", response_model=TimelineResponse)
-async def get_timeline(
+def get_timeline(
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
     tags: Optional[str] = Query(None),
@@ -66,7 +66,7 @@ async def get_timeline(
 
 
 @router.get("/timeline/stats")
-async def timeline_stats():
+def timeline_stats():
     """Get timeline date range and counts for the UI."""
     conn = get_db()
     try:

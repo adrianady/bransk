@@ -1,18 +1,33 @@
 import type { Entry, Relationship, Tag, TimelineEntry, TimelineStats, GraphData, SpacedRepetitionItem, TodoItem, Reminder, Thought } from './types';
 
-const BASE = '/api';
+// Dynamic API Base URL resolution with fallback to relative /api proxy
+const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/api';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    ...options,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err.error || err.message || `HTTP ${res.status}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s network timeout
+
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      headers: { 'Content-Type': 'application/json', ...options?.headers },
+      signal: options?.signal || controller.signal,
+      ...options,
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ message: res.statusText }));
+      throw new Error(err.detail || err.error || err.message || `HTTP ${res.status}`);
+    }
+    if (res.status === 204) return undefined as T;
+    return res.json();
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error('Request timed out after 30 seconds');
+    }
+    throw err;
   }
-  if (res.status === 204) return undefined as T;
-  return res.json();
 }
 
 export const api = {

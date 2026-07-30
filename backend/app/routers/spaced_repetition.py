@@ -33,7 +33,7 @@ def _sm2_calc(quality: int, ease_factor: float, interval: int, repetitions: int)
 
 
 @router.get("/spaced-repetition/items", response_model=list[SpacedRepetitionItem])
-async def list_items():
+def list_items():
     conn = get_db()
     try:
         rows = conn.execute("SELECT * FROM spaced_repetition ORDER BY next_review IS NULL, next_review ASC").fetchall()
@@ -43,7 +43,7 @@ async def list_items():
 
 
 @router.get("/spaced-repetition/queue", response_model=list[SpacedRepetitionItem])
-async def get_review_queue():
+def get_review_queue():
     """Get items due for review."""
     conn = get_db()
     try:
@@ -56,7 +56,7 @@ async def get_review_queue():
 
 
 @router.post("/spaced-repetition/items/{entry_id}", response_model=SpacedRepetitionItem)
-async def add_item(entry_id: int):
+def add_item(entry_id: int):
     conn = get_db()
     try:
         entry = conn.execute("SELECT id FROM entries WHERE id = ?", [entry_id]).fetchone()
@@ -80,7 +80,7 @@ async def add_item(entry_id: int):
 
 
 @router.delete("/spaced-repetition/items/{entry_id}", status_code=204)
-async def remove_item(entry_id: int):
+def remove_item(entry_id: int):
     conn = get_db()
     try:
         cur = conn.execute("DELETE FROM spaced_repetition WHERE entry_id = ?", [entry_id])
@@ -92,7 +92,7 @@ async def remove_item(entry_id: int):
 
 
 @router.post("/spaced-repetition/items/{item_id}/review", response_model=SpacedRepetitionItem)
-async def submit_review(item_id: int, data: ReviewSubmit):
+def submit_review(item_id: int, data: ReviewSubmit):
     conn = get_db()
     try:
         item = conn.execute("SELECT * FROM spaced_repetition WHERE id = ?", [item_id]).fetchone()

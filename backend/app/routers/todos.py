@@ -9,7 +9,7 @@ router = APIRouter()
 
 
 @router.get("/todos", response_model=list[TodoResponse])
-async def list_todos(completed: bool | None = None, priority: str | None = None):
+def list_todos(completed: bool | None = None, priority: str | None = None):
     conn = get_db()
     try:
         where = ["1=1"]
@@ -31,7 +31,7 @@ async def list_todos(completed: bool | None = None, priority: str | None = None)
 
 
 @router.post("/entries/{entry_id}/todo", response_model=TodoResponse, status_code=201)
-async def create_todo(entry_id: int, data: TodoCreate):
+def create_todo(entry_id: int, data: TodoCreate):
     conn = get_db()
     try:
         entry = conn.execute("SELECT id FROM entries WHERE id = ?", [entry_id]).fetchone()
@@ -55,7 +55,7 @@ async def create_todo(entry_id: int, data: TodoCreate):
 
 
 @router.patch("/entries/{entry_id}/todo", response_model=TodoResponse)
-async def update_todo(entry_id: int, data: TodoUpdate):
+def update_todo(entry_id: int, data: TodoUpdate):
     conn = get_db()
     try:
         existing = conn.execute("SELECT * FROM todos WHERE entry_id = ?", [entry_id]).fetchone()
@@ -84,7 +84,7 @@ async def update_todo(entry_id: int, data: TodoUpdate):
 
 
 @router.delete("/entries/{entry_id}/todo", status_code=204)
-async def delete_todo(entry_id: int):
+def delete_todo(entry_id: int):
     conn = get_db()
     try:
         cur = conn.execute("DELETE FROM todos WHERE entry_id = ?", [entry_id])

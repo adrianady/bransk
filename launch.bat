@@ -64,8 +64,8 @@ echo.
 echo Press any key to stop all servers...
 pause >nul
 
-:: Kill background processes
-taskkill /f /fi "WINDOWTITLE eq ChronoKG Backend" >nul 2>&1
-taskkill /f /fi "WINDOWTITLE eq ChronoKG Frontend" >nul 2>&1
+:: Kill background processes with /T flag to kill process trees
+taskkill /f /t /fi "WINDOWTITLE eq ChronoKG Backend" >nul 2>&1
+taskkill /f /t /fi "WINDOWTITLE eq ChronoKG Frontend" >nul 2>&1
 
 echo Servers stopped.

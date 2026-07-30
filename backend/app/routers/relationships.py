@@ -9,7 +9,7 @@ router = APIRouter()
 
 
 @router.get("/relationships", response_model=list[RelationshipResponse])
-async def list_relationships(entry_id: int | None = None):
+def list_relationships(entry_id: int | None = None):
     conn = get_db()
     try:
         if entry_id:
@@ -25,7 +25,7 @@ async def list_relationships(entry_id: int | None = None):
 
 
 @router.get("/relationships/graph")
-async def get_graph_data():
+def get_graph_data():
     """Get full graph data (nodes + edges) for vis-network."""
     conn = get_db()
     try:
@@ -67,7 +67,7 @@ async def get_graph_data():
 
 
 @router.post("/relationships", response_model=RelationshipResponse, status_code=201)
-async def create_relationship(data: RelationshipCreate):
+def create_relationship(data: RelationshipCreate):
     if data.from_id == data.to_id:
         raise HTTPException(400, "Cannot create self-referential relationship")
     conn = get_db()
@@ -98,7 +98,7 @@ async def create_relationship(data: RelationshipCreate):
 
 
 @router.delete("/relationships/{rel_id}", status_code=204)
-async def delete_relationship(rel_id: int):
+def delete_relationship(rel_id: int):
     conn = get_db()
     try:
         cur = conn.execute("DELETE FROM relationships WHERE id = ?", [rel_id])

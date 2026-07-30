@@ -9,7 +9,7 @@ router = APIRouter()
 
 
 @router.get("/thoughts", response_model=list[ThoughtResponse])
-async def list_thoughts():
+def list_thoughts():
     conn = get_db()
     try:
         rows = conn.execute("SELECT * FROM thoughts ORDER BY name").fetchall()
@@ -19,7 +19,7 @@ async def list_thoughts():
 
 
 @router.post("/thoughts", response_model=ThoughtResponse, status_code=201)
-async def create_thought(data: ThoughtCreate):
+def create_thought(data: ThoughtCreate):
     conn = get_db()
     try:
         cur = conn.execute(
@@ -34,7 +34,7 @@ async def create_thought(data: ThoughtCreate):
 
 
 @router.get("/thoughts/{thought_id}", response_model=ThoughtResponse)
-async def get_thought(thought_id: int):
+def get_thought(thought_id: int):
     conn = get_db()
     try:
         row = conn.execute("SELECT * FROM thoughts WHERE id = ?", [thought_id]).fetchone()
@@ -46,7 +46,7 @@ async def get_thought(thought_id: int):
 
 
 @router.put("/thoughts/{thought_id}", response_model=ThoughtResponse)
-async def update_thought(thought_id: int, data: ThoughtCreate):
+def update_thought(thought_id: int, data: ThoughtCreate):
     conn = get_db()
     try:
         existing = conn.execute("SELECT * FROM thoughts WHERE id = ?", [thought_id]).fetchone()
@@ -65,7 +65,7 @@ async def update_thought(thought_id: int, data: ThoughtCreate):
 
 
 @router.delete("/thoughts/{thought_id}", status_code=204)
-async def delete_thought(thought_id: int):
+def delete_thought(thought_id: int):
     conn = get_db()
     try:
         cur = conn.execute("DELETE FROM thoughts WHERE id = ?", [thought_id])
@@ -77,7 +77,7 @@ async def delete_thought(thought_id: int):
 
 
 @router.get("/thoughts/{thought_id}/entries", response_model=list[dict])
-async def get_thought_entries(thought_id: int):
+def get_thought_entries(thought_id: int):
     """Get entries matching a thought's tag criteria."""
     conn = get_db()
     try:

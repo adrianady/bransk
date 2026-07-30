@@ -7,7 +7,8 @@ import { EntryDetail } from './components/EntryDetail'
 import { ReviewPanel } from './components/ReviewPanel'
 import { TodoList } from './components/TodoList'
 import { ThoughtsView } from './components/ThoughtsView'
-import type { Entry } from './lib/types'
+import { api } from './lib/api'
+import type { Entry, TimelineEntry } from './lib/types'
 
 type View = 'timeline' | 'graph' | 'entries' | 'review' | 'todos' | 'thoughts' | 'settings'
 
@@ -15,6 +16,7 @@ export default function App() {
   const [view, setView] = useState<View>('timeline')
   const [showEntryForm, setShowEntryForm] = useState(false)
   const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null)
+  const [loadingDetail, setLoadingDetail] = useState(false)
   const [showChat, setShowChat] = useState(false)
   const [darkMode, setDarkMode] = useState(
     () => window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -24,6 +26,20 @@ export default function App() {
     const next = !darkMode
     setDarkMode(next)
     document.documentElement.classList.toggle('dark', next)
+  }
+
+  // Async handler to fetch full Entry from Timeline/Graph selection
+  const handleSelectTimelineEntry = async (item: TimelineEntry) => {
+    setLoadingDetail(true)
+    setView('entries')
+    try {
+      const fullEntry = await api.entries.get(item.id)
+      setSelectedEntry(fullEntry)
+    } catch (err) {
+      console.error('Failed to fetch entry detail:', err)
+    } finally {
+      setLoadingDetail(false)
+    }
   }
 
   const navItems: { id: View; label: string; icon: string }[] = [
@@ -49,7 +65,10 @@ export default function App() {
             {navItems.map(item => (
               <button
                 key={item.id}
-                onClick={() => setView(item.id)}
+                onClick={() => {
+                  if (item.id === 'entries') setSelectedEntry(null)
+                  setView(item.id)
+                }}
                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
                   view === item.id
                     ? 'bg-chrono-100 text-chrono-700 dark:bg-chrono-900/30 dark:text-chrono-400'
@@ -85,13 +104,13 @@ export default function App() {
           <div className="p-4 lg:p-6">
             {view === 'timeline' && (
               <TimelineView
-                onSelectEntry={(e) => { setSelectedEntry(e); setView('entries') }}
+                onSelectEntry={handleSelectTimelineEntry}
                 onCreateEntry={() => setShowEntryForm(true)}
               />
             )}
             {view === 'graph' && (
               <GraphView
-                onSelectEntry={(e) => { setSelectedEntry(e); setView('entries') }}
+                onSelectEntry={handleSelectTimelineEntry}
               />
             )}
             {view === 'entries' && (
@@ -102,7 +121,9 @@ export default function App() {
                     + New Entry
                   </button>
                 </div>
-                {selectedEntry ? (
+                {loadingDetail ? (
+                  <div className="text-center py-12 text-gray-500">Loading entry details...</div>
+                ) : selectedEntry ? (
                   <EntryDetail
                     entry={selectedEntry}
                     onBack={() => setSelectedEntry(null)}
@@ -147,9 +168,12 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    import('./lib/api').then(({ api }) => {
-      api.entries.list().then(setEntries).finally(() => setLoading(false))
-    })
+    let isSubscribed = true
+    api.entries.list()
+      .then(data => { if (isSubscribed) setEntries(data) })
+      .catch(err => console.error("Failed to load entries:", err))
+      .finally(() => { if (isSubscribed) setLoading(false) })
+    return () => { isSubscribed = false }
   }, [])
 
   if (loading) return <div className="text-center py-8 text-gray-500">Loading...</div>

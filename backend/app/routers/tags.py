@@ -9,7 +9,7 @@ router = APIRouter()
 
 
 @router.get("/tags", response_model=list[TagResponse])
-async def list_tags():
+def list_tags():
     conn = get_db()
     try:
         rows = conn.execute("SELECT * FROM tags ORDER BY name").fetchall()
@@ -19,7 +19,7 @@ async def list_tags():
 
 
 @router.post("/tags", response_model=TagResponse, status_code=201)
-async def create_tag(data: TagCreate):
+def create_tag(data: TagCreate):
     conn = get_db()
     try:
         cur = conn.execute(
@@ -34,7 +34,7 @@ async def create_tag(data: TagCreate):
 
 
 @router.delete("/tags/{tag_id}", status_code=204)
-async def delete_tag(tag_id: int):
+def delete_tag(tag_id: int):
     conn = get_db()
     try:
         cur = conn.execute("DELETE FROM tags WHERE id = ?", [tag_id])

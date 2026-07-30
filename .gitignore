@@ -5,4 +5,6 @@ backend/data/
 !backend/.env.example
 frontend/node_modules/
 frontend/dist/
+.agents/
+CHRONOKG_DETAILED_REVIEW.md
 .DS_Store

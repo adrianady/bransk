@@ -9,7 +9,7 @@ router = APIRouter()
 
 
 @router.get("/entries/{entry_id}/reminders", response_model=list[ReminderResponse])
-async def list_reminders(entry_id: int):
+def list_reminders(entry_id: int):
     conn = get_db()
     try:
         rows = conn.execute(
@@ -22,7 +22,7 @@ async def list_reminders(entry_id: int):
 
 
 @router.get("/reminders", response_model=list[ReminderResponse])
-async def list_all_reminders(due: bool = False):
+def list_all_reminders(due: bool = False):
     """Get all reminders. If due=True, only get non-notified past reminders."""
     conn = get_db()
     try:
@@ -40,7 +40,7 @@ async def list_all_reminders(due: bool = False):
 
 
 @router.post("/entries/{entry_id}/reminders", response_model=ReminderResponse, status_code=201)
-async def create_reminder(entry_id: int, data: ReminderCreate):
+def create_reminder(entry_id: int, data: ReminderCreate):
     conn = get_db()
     try:
         entry = conn.execute("SELECT id FROM entries WHERE id = ?", [entry_id]).fetchone()
@@ -59,7 +59,7 @@ async def create_reminder(entry_id: int, data: ReminderCreate):
 
 
 @router.post("/reminders/{reminder_id}/notify", status_code=204)
-async def mark_notified(reminder_id: int):
+def mark_notified(reminder_id: int):
     conn = get_db()
     try:
         existing = conn.execute("SELECT id FROM reminders WHERE id = ?", [reminder_id]).fetchone()
@@ -72,7 +72,7 @@ async def mark_notified(reminder_id: int):
 
 
 @router.delete("/entries/{entry_id}/reminders/{reminder_id}", status_code=204)
-async def delete_reminder(entry_id: int, reminder_id: int):
+def delete_reminder(entry_id: int, reminder_id: int):
     conn = get_db()
     try:
         cur = conn.execute("DELETE FROM reminders WHERE id = ? AND entry_id = ?", [reminder_id, entry_id])

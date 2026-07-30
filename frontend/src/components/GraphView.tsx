@@ -36,14 +36,17 @@ export function GraphView({ onSelectEntry }: Props) {
   }, [])
 
   useEffect(() => {
-    if (!containerRef.current || !graphData || !visLoaded) return
+    if (!graphData) return
+    let isMounted = true
 
     const initNetwork = async () => {
       const vis = await import('vis-network/standalone')
+      if (!isMounted || !containerRef.current) return
       const { Network } = vis
 
       if (networkRef.current) {
         networkRef.current.destroy()
+        networkRef.current = null
       }
 
       const nodes = new vis.DataSet(graphData.nodes)
@@ -52,11 +55,7 @@ export function GraphView({ onSelectEntry }: Props) {
       const options = {
         nodes: {
           shape: 'dot',
-          scaling: {
-            min: 10,
-            max: 30,
-            label: { min: 8, max: 20, drawThreshold: 12 },
-          },
+          scaling: { min: 10, max: 30, label: { min: 8, max: 20, drawThreshold: 12 } },
           font: { size: 12, face: 'Inter, sans-serif' },
         },
         edges: {
@@ -65,7 +64,7 @@ export function GraphView({ onSelectEntry }: Props) {
           font: { size: 10, align: 'middle' },
         },
         physics: {
-          stabilization: { iterations: 100 },
+          stabilization: { iterations: 50 },
           solver: 'forceAtlas2Based',
           forceAtlas2Based: {
             gravitationalConstant: -40,
@@ -74,35 +73,36 @@ export function GraphView({ onSelectEntry }: Props) {
             springConstant: 0.02,
           },
         },
-        interaction: {
-          hover: true,
-          tooltipDelay: 200,
-          zoomView: true,
-          dragView: true,
-        },
+        interaction: { hover: true, tooltipDelay: 200, zoomView: true, dragView: true },
         layout: { improvedLayout: true },
       }
 
-      networkRef.current = new Network(containerRef.current, { nodes, edges }, options)
+      // Explicit null check for containerRef.current resolves TS compiler error
+      const containerElement = containerRef.current
+      if (containerElement) {
+        const net = new Network(containerElement, { nodes, edges }, options)
+        networkRef.current = net
 
-      networkRef.current.on('click', (props: { nodes: number[] }) => {
-        if (props.nodes.length > 0) {
-          const nodeId = props.nodes[0]
-          const entry = entries.find(e => e.id === nodeId)
-          if (entry) onSelectEntry(entry)
-        }
-      })
+        net.on('click', (props: { nodes: number[] }) => {
+          if (props.nodes.length > 0) {
+            const nodeId = props.nodes[0]
+            const entry = entries.find(e => e.id === nodeId)
+            if (entry) onSelectEntry(entry)
+          }
+        })
+      }
     }
 
     initNetwork()
 
     return () => {
+      isMounted = false
       if (networkRef.current) {
         networkRef.current.destroy()
         networkRef.current = null
       }
     }
-  }, [graphData, visLoaded, entries])
+  }, [graphData, visLoaded, entries, onSelectEntry])
 
   if (loading) return <div className="text-center py-8 text-gray-500">Loading graph...</div>
 
