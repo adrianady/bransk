@@ -48,17 +48,20 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
 
   useEffect(() => {
     if (!containerRef.current || entries.length === 0 || !visLoaded) return
+    let isMounted = true
 
     const initTimeline = async () => {
       const vis = await import('vis-timeline/standalone')
+      if (!isMounted) return
       const { Timeline, DataSet } = vis
 
       if (timelineRef.current) {
         timelineRef.current.destroy()
+        timelineRef.current = null
       }
 
-      const items = new DataSet()
-      const groups = new DataSet()
+      const items = new DataSet<any>([])
+      const groups = new DataSet<any>([])
 
       const importanceColors: Record<number, string> = {
         1: '#94a3b8', 2: '#6366f1', 3: '#f59e0b', 4: '#ef4444', 5: '#8b5cf6'
@@ -89,10 +92,12 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
         end: stats?.latest || undefined,
       }
 
-      if (containerRef.current) {
-        timelineRef.current = new Timeline(containerRef.current, items, groups, options)
+      const containerElement = containerRef.current
+      if (containerElement) {
+        const tl = new Timeline(containerElement, items, groups, options)
+        timelineRef.current = tl
 
-        timelineRef.current.on('select', (props: { items: number[] }) => {
+        tl.on('select', (props: { items: number[] }) => {
           if (props.items.length > 0) {
             const entry = entries.find(e => e.id === props.items[0])
             if (entry) onSelectEntry(entry)
@@ -104,12 +109,13 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
     initTimeline()
 
     return () => {
+      isMounted = false
       if (timelineRef.current) {
         timelineRef.current.destroy()
         timelineRef.current = null
       }
     }
-  }, [entries, stats, visLoaded])
+  }, [entries, stats, visLoaded, onSelectEntry])
 
   const importanceColor = (imp: number) => {
     const colors: Record<number, string> = { 1: 'bg-slate-400', 2: 'bg-indigo-500', 3: 'bg-amber-500', 4: 'bg-red-500', 5: 'bg-purple-500' }
