@@ -6,7 +6,7 @@ A local-first web application for building and exploring a chronological knowled
 
 - **📅 Timeline** — Horizontal timeline visualization of your entries by date
 - **🕸️ Knowledge Graph** — Interactive force-directed graph showing relationships between entries
-- **🤖 AI Chat** — Chat with DeepSeek AI that has full access to your knowledge base
+- **🤖 AI Chat** — Chat with local Ollama AI that has full access to your knowledge base (Reasonix provider)
 - **📝 Rich Entries** — Create entries with title, date, content, tags, source, and importance
 - **🔄 Spaced Repetition** — SM-2 algorithm for review scheduling (ported from BrainBook)
 - **✅ Tasks** — Todo/task management per entry
@@ -52,7 +52,7 @@ DEEPSEEK_MODEL=deepseek-chat
 - **Backend**: Python + FastAPI + SQLite (FTS5)
 - **Frontend**: React 19 + TypeScript + Vite + Tailwind CSS
 - **Visualization**: vis-timeline + vis-network
-- **AI**: DeepSeek API (or any OpenAI-compatible API)
+- **AI**: Ollama (local, Reasonix provider) or DeepSeek API
 - **UI**: TipTap (ported concept from BrainBook)
 
 ## Architecture
