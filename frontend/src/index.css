@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply antialiased;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply btn bg-chrono-600 text-white hover:bg-chrono-700;
+  }
+  .btn-secondary {
+    @apply btn bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600;
+  }
+  .btn-ghost {
+    @apply btn text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700;
+  }
+  .input {
+    @apply w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-chrono-500 focus:outline-none focus:ring-2 focus:ring-chrono-500/20 dark:border-gray-600 dark:bg-gray-800;
+  }
+  .card {
+    @apply rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-900;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+}
+
+/* Timeline overrides */
+.vis-timeline {
+  border: none !important;
+  font-family: inherit !important;
+}
+.vis-item {
+  background-color: #4c6ef5 !important;
+  border-color: #4263eb !important;
+  color: white !important;
+  border-radius: 6px !important;
+  padding: 4px 10px !important;
+}
+.vis-item.vis-selected {
+  background-color: #364fc7 !important;
+  border-color: #2b3da3 !important;
+}
+.vis-time-axis .vis-text {
+  color: #6b7280 !important;
+}
+.vis-panel.vis-center, .vis-panel.vis-left, .vis-panel.vis-right {
+  border-color: #e5e7eb !important;
+}
+.dark .vis-panel.vis-center,
+.dark .vis-panel.vis-left,
+.dark .vis-panel.vis-right {
+  border-color: #374151 !important;
+}
+.dark .vis-time-axis .vis-text {
+  color: #9ca3af !important;
+}
+
+/* TipTap editor */
+.tiptap {
+  @apply prose prose-sm max-w-none dark:prose-invert focus:outline-none min-h-[200px];
+}
+.tiptap p.is-editor-empty:first-child::before {
+  @apply text-gray-400 pointer-events-none float-left h-0;
+  content: attr(data-placeholder);
+}
