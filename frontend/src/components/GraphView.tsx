@@ -35,9 +35,19 @@ export function GraphView({ onSelectEntry }: Props) {
   const [minImportance, setMinImportance] = useState(0)
   const [period, setPeriod] = useState<Period>('all')
   const [physics, setPhysics] = useState(true)
+  const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'))
 
   useEffect(() => {
     import('vis-network/standalone').then(() => setVisLoaded(true))
+  }, [])
+
+  // Keep canvas text colors in sync with the active theme.
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setIsDark(document.documentElement.classList.contains('dark'))
+    })
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    return () => observer.disconnect()
   }, [])
 
   useEffect(() => {
@@ -121,14 +131,14 @@ export function GraphView({ onSelectEntry }: Props) {
       const edges = new vis.DataSet(visible.edges.map(e => ({
         ...e,
         title: e.label ? `<b>${escapeHtml(e.label)}</b>` : undefined,
-        font: { size: 10, align: 'middle', color: '#94a3b8' },
+        font: { size: 10, align: 'middle', color: isDark ? '#9ca3af' : '#94a3b8' },
       })))
 
       const options = {
         nodes: {
           shape: 'dot',
           scaling: { min: 12, max: 32, label: { min: 10, max: 22, drawThreshold: 14 } },
-          font: { size: 13, face: 'Inter, sans-serif' },
+          font: { size: 13, face: 'Inter, sans-serif', color: isDark ? '#e5e7eb' : '#374151' },
           shadow: true,
           labelHighlightBold: true,
         },
@@ -186,7 +196,7 @@ export function GraphView({ onSelectEntry }: Props) {
         networkRef.current = null
       }
     }
-  }, [graphData, visLoaded, entries, onSelectEntry, visible, tagColors, physics])
+  }, [graphData, visLoaded, entries, onSelectEntry, visible, tagColors, physics, isDark])
 
   if (loading) return <div className="text-center py-8 text-gray-500">Loading graph...</div>
 

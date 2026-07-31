@@ -30,6 +30,12 @@ export default function App() {
     document.documentElement.classList.toggle('dark', next)
   }
 
+  // Keep the root <html> dark class in sync on first mount too, so canvas
+  // visualizations (vis-network/vis-timeline) can read the active theme.
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', darkMode)
+  }, [darkMode])
+
   // Async handler to fetch full Entry from Timeline/Graph selection
   const handleSelectTimelineEntry = async (item: TimelineEntry) => {
     setLoadingDetail(true)
@@ -61,7 +67,7 @@ export default function App() {
   ]
 
   return (
-    <div className={`min-h-screen ${darkMode ? 'dark' : ''}`}>
+    <div className={`min-h-screen bg-gray-50 dark:bg-gray-950 ${darkMode ? 'dark' : ''}`}>
       <div className="flex h-screen">
         {/* Sidebar */}
         <nav className="w-16 lg:w-48 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 flex flex-col shrink-0">
@@ -109,7 +115,7 @@ export default function App() {
         </nav>
 
         {/* Main content */}
-        <main className="flex-1 overflow-auto relative">
+        <main className="flex-1 overflow-auto relative bg-gray-50 dark:bg-gray-950">
           <div className="p-4 lg:p-6">
             {view === 'timeline' && (
               <TimelineView
@@ -157,7 +163,7 @@ export default function App() {
 
         {/* AI Chat Panel */}
         {showChat && (
-          <aside className="w-80 lg:w-96 border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 flex flex-col">
+          <aside className="w-[22rem] lg:w-[30rem] xl:w-[34rem] shrink-0 border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 flex flex-col">
             <ChatPanel onClose={() => setShowChat(false)} />
           </aside>
         )}
