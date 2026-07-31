@@ -11,7 +11,7 @@ from app.db import init_db
 from app.routers import (
     entries, search, timeline, relationships,
     chat, tags, spaced_repetition, todos, reminders, thoughts,
-    research, theory
+    research, theory, maintenance
 )
 
 # Structured Python Logging Configuration
@@ -65,6 +65,7 @@ app.include_router(reminders.router, prefix="/api", tags=["reminders"])
 app.include_router(thoughts.router, prefix="/api", tags=["thoughts"])
 app.include_router(research.router, prefix="/api", tags=["research"])
 app.include_router(theory.router, prefix="/api", tags=["theory"])
+app.include_router(maintenance.router, prefix="/api", tags=["maintenance"])
 
 
 @app.get("/api/health")

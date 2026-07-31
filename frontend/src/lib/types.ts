@@ -225,3 +225,25 @@ export interface TheoryEvidence {
   weight: number;
   created_at: string;
 }
+
+// Data integrity / re-analysis (Review tab)
+export interface MaintenanceReport {
+  entries_scanned: number;
+  entries_fixed: number;
+  dates_fixed: number;
+  tags_fixed: number;
+  fts_rebuilt: boolean;
+  relationships_removed: number;
+  self_links_removed: number;
+  pdfs_found: number;
+  pdfs_reanalyzed: number;
+  pdfs_unreadable: number;
+  pdf_errors: number;
+  evidence_removed: number;
+  theories_updated: number;
+  undated_entries: number;
+  entries_active: number;
+  relationships_count: number;
+  theories_count: number;
+  warnings: string[];
+}

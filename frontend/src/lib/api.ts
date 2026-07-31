@@ -1,4 +1,4 @@
-import type { Entry, Relationship, Tag, TimelineEntry, TimelineStats, GraphData, SpacedRepetitionItem, TodoItem, Reminder, Thought, ChatHistoryItem, ProviderHealth, ResearchResult, Theory, TheoryNode, TheoryEvidence, TheoryStatus } from './types';
+import type { Entry, Relationship, Tag, TimelineEntry, TimelineStats, GraphData, SpacedRepetitionItem, TodoItem, Reminder, Thought, ChatHistoryItem, ProviderHealth, ResearchResult, Theory, TheoryNode, TheoryEvidence, TheoryStatus, MaintenanceReport } from './types';
 
 // Dynamic API Base URL resolution with fallback to relative /api proxy
 const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/api';
@@ -208,5 +208,15 @@ export const api = {
       request<TheoryEvidence>(`/theories/${id}/evidence`, { method: 'POST', body: JSON.stringify(data) }),
     removeEvidence: (theoryId: number, evidenceId: number) =>
       request<void>(`/theories/${theoryId}/evidence/${evidenceId}`, { method: 'DELETE' }),
+  },
+
+  // Data integrity / re-analysis
+  maintenance: {
+    analyze: (signal?: AbortSignal) =>
+      fetch(`${BASE}/maintenance/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal,
+      }),
   },
 };
