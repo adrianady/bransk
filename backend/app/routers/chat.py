@@ -64,6 +64,37 @@ async def chat_health():
 
 _READ_ACTION_TYPES = {"search_results", "timeline_results", "entry_fetched", "entries_listed", "relationships_listed", "theories_listed", "web_results"}
 
+_RESEARCH_VERBS = re.compile(r"\b(make|run|do|search|find|add|create|start|gather|compile|collect)\b", re.IGNORECASE)
+
+
+def _detect_research_intent(message: str):
+    """If the user explicitly asks for research/studies but the model forgot the
+    [RESEARCH:] action, extract a topic so we can run the pipeline anyway."""
+    if not re.search(r"\b(research|studies|study)\b", message, re.IGNORECASE):
+        return None
+    if not (_RESEARCH_VERBS.search(message) or re.match(r"^\s*research\b", message, re.IGNORECASE)):
+        return None
+    cleaned = re.sub(r"^(please|pls|can you|could you|i want you to|i want|help me|you)\s*", "", message.strip(), flags=re.IGNORECASE)
+    for kw in (
+        "research for studies regarding",
+        "research for studies about",
+        "research for studies on",
+        "research regarding",
+        "research about",
+        "research on",
+        "research for",
+        "studies regarding",
+        "studies about",
+        "studies on",
+        "research",
+    ):
+        idx = cleaned.lower().find(kw)
+        if idx != -1:
+            topic = cleaned[idx + len(kw):].strip(" :.,!?")
+            if topic:
+                return topic[:200]
+    return None
+
 
 @router.post("/chat", response_model=dict)
 async def chat(data: ChatRequest):
@@ -75,6 +106,10 @@ async def chat(data: ChatRequest):
         # Parse actions
         actions = _parse_actions(reply)
         research_req = next((a for a in actions if a["type"] == "research_request"), None)
+        if research_req is None:
+            auto_topic = _detect_research_intent(data.message)
+            if auto_topic:
+                research_req = {"type": "research_request", "topic": auto_topic}
         if research_req:
             result = await run_research(research_req["topic"], depth="quick")
             actions.append({"type": "research_done", "result": result.model_dump()})
@@ -136,6 +171,10 @@ async def chat_stream(data: ChatRequest):
 
             actions = _parse_actions(full_reply)
             research_req = next((a for a in actions if a["type"] == "research_request"), None)
+            if research_req is None:
+                auto_topic = _detect_research_intent(data.message)
+                if auto_topic:
+                    research_req = {"type": "research_request", "topic": auto_topic}
             if research_req:
                 yield f"data: {json.dumps({'type': 'progress', 'phase': 'research', 'message': 'Starting qualitative research...'})}\n\n"
                 try:

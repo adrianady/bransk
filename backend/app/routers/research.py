@@ -834,12 +834,21 @@ def _sse(payload: dict) -> str:
 
 @router.get("/studies", response_model=list)
 def list_studies(limit: int = 100, offset: int = 0):
-    """List study entries (chronological, newest first)."""
+    """List study entries (chronological, newest first).
+
+    A study is an entry with study metadata OR with study/pdf tags or a PDF
+    link in content — this keeps AI-created entries visible even when the
+    model forgot the study_type field.
+    """
     conn = get_db()
     try:
         rows = conn.execute(
             """SELECT * FROM entries
-               WHERE study_type != '' AND archived = 0
+               WHERE archived = 0
+                 AND (study_type != ''
+                      OR tags LIKE '%study%'
+                      OR tags LIKE '%pdf%'
+                      OR content LIKE '%**PDF:**%')
                ORDER BY entry_date IS NULL, entry_date DESC, updated_at DESC
                LIMIT ? OFFSET ?""",
             [limit, offset],
@@ -847,6 +856,39 @@ def list_studies(limit: int = 100, offset: int = 0):
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+@router.post("/studies/download-all")
+async def download_all_study_pdfs():
+    """Batch-download missing PDFs for every study that has a source URL."""
+    conn = get_db()
+    try:
+        studies = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT * FROM entries
+                   WHERE archived = 0
+                     AND (study_type != '' OR tags LIKE '%study%' OR tags LIKE '%pdf%' OR content LIKE '%**PDF:**%')"""
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    downloaded, failed = [], []
+    for entry in studies:
+        if entry.get("pdf_path"):
+            continue
+        url = extract_pdf_url(entry)
+        if not url:
+            continue
+        fname = await download_study_pdf(entry["id"], url, entry["title"])
+        if fname:
+            _set_pdf_path(entry["id"], fname)
+            downloaded.append(entry["id"])
+        else:
+            failed.append({"id": entry["id"], "title": entry["title"][:80]})
+
+    return {"downloaded": downloaded, "failed": failed}
 
 
 def _set_pdf_path(entry_id: int, fname: str) -> None:

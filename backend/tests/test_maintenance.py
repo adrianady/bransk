@@ -76,3 +76,12 @@ def test_maintenance_rereads_downloaded_pdf():
         assert report["pdfs_found"] >= 1
         entry = client.get(f"/api/entries/{study['id']}").json()
         assert "reanalysis" in entry["content"] or report["pdfs_unreadable"] == 1
+
+
+def test_maintenance_classifies_tag_based_studies():
+    with TestClient(app) as client:
+        client.post("/api/entries", json={"title": "Mind paper", "content": "x", "tags": "mind,pdf"})
+        report = _run_analysis(client)
+        assert report["studies_classified"] >= 1
+        entry = client.get("/api/entries").json()[0]
+        assert entry["study_type"] == "study"

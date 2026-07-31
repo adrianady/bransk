@@ -21,6 +21,7 @@ export function StudiesView({ onSelectEntry }: Props) {
   const [loading, setLoading] = useState(true)
   const [filterType, setFilterType] = useState('')
   const [filterQuality, setFilterQuality] = useState(0)
+  const [downloadingAll, setDownloadingAll] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -40,6 +41,19 @@ export function StudiesView({ onSelectEntry }: Props) {
 
   useEffect(() => { load() }, [])
 
+  const downloadAll = async () => {
+    setDownloadingAll(true)
+    try {
+      const res = await api.studies.downloadAll()
+      alert(`Downloaded ${res.downloaded.length} PDFs${res.failed.length ? `, ${res.failed.length} failed (offline or unreachable)` : ''}.`)
+      await load()
+    } catch (err: any) {
+      alert('Batch download failed: ' + (err?.message || 'unknown error'))
+    } finally {
+      setDownloadingAll(false)
+    }
+  }
+
   const types = [...new Set(studies.map(s => s.study_type).filter(Boolean))].sort()
   const filtered = studies.filter(s => {
     if (filterType && s.study_type !== filterType) return false
@@ -58,7 +72,12 @@ export function StudiesView({ onSelectEntry }: Props) {
             Qualitative research findings · {filtered.length} of {studies.length} studies
           </p>
         </div>
-        <button onClick={load} className="btn-secondary">↻ Refresh</button>
+        <div className="flex gap-2">
+          <button onClick={downloadAll} disabled={downloadingAll} className="btn-secondary">
+            {downloadingAll ? '⬇️ Downloading...' : '⬇️ Download all PDFs'}
+          </button>
+          <button onClick={load} className="btn-secondary">↻ Refresh</button>
+        </div>
       </div>
 
       {/* Filters */}

@@ -73,6 +73,14 @@ def test_download_study_action_parses():
     assert any(a["type"] == "download_study_request" and a["entry_id"] == 7 for a in acts)
 
 
+def test_detect_research_intent_extracts_topic():
+    from app.routers.chat import _detect_research_intent
+
+    assert _detect_research_intent("research the history of physics") == "the history of physics"
+    assert _detect_research_intent("i want you to make research for studies regarding the mind theories") == "the mind theories"
+    assert _detect_research_intent("what do you think about my notes?") is None
+
+
 def test_chat_stream_works_offline_with_mock():
     with TestClient(app) as client:
         resp = client.post("/api/chat/stream", json={"message": "Hello", "history": []})

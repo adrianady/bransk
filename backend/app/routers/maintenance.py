@@ -239,6 +239,8 @@ async def maintenance_analyze():
             "entries_fixed": 0,
             "dates_fixed": 0,
             "tags_fixed": 0,
+            "studies_classified": 0,
+            "sources_filled": 0,
             "fts_rebuilt": True,
             "relationships_removed": 0,
             "self_links_removed": 0,
@@ -277,6 +279,24 @@ async def maintenance_analyze():
                             report["dates_fixed"] += 1
                         if "tags" in updates:
                             report["tags_fixed"] += 1
+
+                # Study classification: entries with study/pdf tags or PDF links
+                # become studies even when the AI forgot the study_type field.
+                cur = conn.execute(
+                    """UPDATE entries SET study_type = 'study', updated_at = datetime('now')
+                       WHERE study_type = '' AND archived = 0
+                         AND (tags LIKE '%study%' OR tags LIKE '%pdf%' OR content LIKE '%**PDF:**%')"""
+                )
+                report["studies_classified"] = cur.rowcount
+
+                # Salvage PDF links into source for classified studies.
+                for row in conn.execute(
+                    "SELECT id, content FROM entries WHERE source = '' AND content LIKE '%**PDF:**%'"
+                ).fetchall():
+                    match = re.search(r"https?://\S+\.pdf\S*", row["content"] or "")
+                    if match:
+                        conn.execute("UPDATE entries SET source = ? WHERE id = ?", [match.group(0), row["id"]])
+                        report["sources_filled"] += 1
 
                 # Relationship hygiene
                 cur = conn.execute(

@@ -51,3 +51,25 @@ def test_study_pdf_endpoints_and_pdf_path_field():
         assert client.get(f"/api/studies/{study['id']}/pdf").status_code == 404
         # Download attempts the URL; offline sandbox -> graceful 502
         assert client.post(f"/api/studies/{study['id']}/download").status_code == 502
+
+
+def test_studies_list_includes_tag_based_studies():
+    with TestClient(app) as client:
+        # AI created the study without study_type, only with a pdf tag
+        client.post("/api/entries", json={"title": "Tagged study", "content": "x", "tags": "neuroscience,pdf"})
+        studies = client.get("/api/studies").json()
+        assert any(s["title"] == "Tagged study" for s in studies)
+
+
+def test_download_all_returns_counts_offline():
+    with TestClient(app) as client:
+        client.post("/api/entries", json={
+            "title": "S1",
+            "content": "**PDF:** https://example.com/one.pdf",
+            "tags": "pdf",
+            "study_type": "paper",
+        })
+        resp = client.post("/api/studies/download-all")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data["downloaded"], list) and isinstance(data["failed"], list)

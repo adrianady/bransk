@@ -190,6 +190,7 @@ export const api = {
   studies: {
     list: () => request<Entry[]>('/studies'),
     download: (id: number) => request<{ pdf_path: string }>(`/studies/${id}/download`, { method: 'POST' }),
+    downloadAll: () => request<{ downloaded: number[]; failed: { id: number; title: string }[] }>('/studies/download-all', { method: 'POST' }),
     pdfUrl: (id: number) => `${BASE}/studies/${id}/pdf`,
   },
 
