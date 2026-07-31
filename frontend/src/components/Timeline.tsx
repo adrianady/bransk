@@ -8,6 +8,17 @@ interface Props {
   onCreateEntry: () => void
 }
 
+const importanceColors: Record<number, string> = {
+  1: '#94a3b8', 2: '#6366f1', 3: '#f59e0b', 4: '#ef4444', 5: '#8b5cf6'
+}
+
+const importanceLabels: Record<number, string> = {
+  1: 'Low', 2: 'Medium', 3: 'Important', 4: 'Very important', 5: 'Critical'
+}
+
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
 export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<any>(null)
@@ -63,17 +74,15 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
       const items = new DataSet<any>([])
       const groups = new DataSet<any>([])
 
-      const importanceColors: Record<number, string> = {
-        1: '#94a3b8', 2: '#6366f1', 3: '#f59e0b', 4: '#ef4444', 5: '#8b5cf6'
-      }
-
       entries.forEach(e => {
         if (!e.entry_date) return
         const groupName = e.tags.split(',')[0]?.trim() || 'default'
+        const color = importanceColors[e.importance] || '#6366f1'
+        const preview = (e.content_preview || '').slice(0, 200)
         items.add({
           id: e.id,
-          content: `<div style="font-weight:600;font-size:13px">${e.title}</div>`,
-          title: e.title,
+          content: `<div style="font-weight:600;font-size:13px;color:${color}">${escapeHtml(e.title)}</div>`,
+          title: `${escapeHtml(e.title)}<br/><b>${escapeHtml(e.entry_date)}</b><br/>${escapeHtml(preview)}`,
           start: e.entry_date,
           group: groupName,
         })
@@ -86,7 +95,7 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
         stack: true,
         groupOrder: 'content',
         horizontalScroll: true,
-        zoomKey: 'ctrlKey',
+        zoomKey: 'ctrlKey' as const,
         height: '500px',
         start: stats?.earliest || undefined,
         end: stats?.latest || undefined,
@@ -159,9 +168,20 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
           <button onClick={onCreateEntry} className="btn-primary mt-4">Create your first entry</button>
         </div>
       ) : (
-        <div className="card">
-          <div ref={containerRef} style={{ width: '100%', minHeight: '500px' }} />
-        </div>
+        <>
+          {/* Importance legend */}
+          <div className="flex flex-wrap gap-3 mb-2 px-1 text-xs text-gray-500">
+            {[1, 2, 3, 4, 5].map(n => (
+              <span key={n} className="flex items-center gap-1.5">
+                <span className="w-3 h-3 rounded-full inline-block" style={{ background: importanceColors[n] }} />
+                {importanceLabels[n]}
+              </span>
+            ))}
+          </div>
+          <div className="card">
+            <div ref={containerRef} style={{ width: '100%', minHeight: '500px' }} />
+          </div>
+        </>
       )}
 
       {/* Entry list below timeline */}

@@ -15,6 +15,10 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
   const [tags, setTags] = useState(editEntry?.tags || '')
   const [source, setSource] = useState(editEntry?.source || '')
   const [importance, setImportance] = useState(editEntry?.importance || 3)
+  const [isStudy, setIsStudy] = useState(!!editEntry?.study_type)
+  const [studyType, setStudyType] = useState(editEntry?.study_type || '')
+  const [authors, setAuthors] = useState(editEntry?.authors || '')
+  const [quality, setQuality] = useState(editEntry?.quality ?? 3)
   const [saving, setSaving] = useState(false)
   const [allTags, setAllTags] = useState<Tag[]>([])
   const [showTagPicker, setShowTagPicker] = useState(false)
@@ -44,6 +48,9 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
           tags,
           source,
           importance,
+          study_type: isStudy ? studyType.trim() : '',
+          authors: isStudy ? authors.trim() : '',
+          quality: isStudy ? quality : null,
         })
         onSaved(updated)
       } else {
@@ -54,6 +61,9 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
           tags,
           source,
           importance,
+          study_type: isStudy ? studyType.trim() : '',
+          authors: isStudy ? authors.trim() : '',
+          quality: isStudy ? quality : null,
         })
         onSaved(created)
       }
@@ -129,6 +139,43 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
             <input value={source} onChange={e => setSource(e.target.value)}
               className="input" placeholder="Book, article, URL, or person" />
           </div>
+
+          {/* Study metadata */}
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={isStudy} onChange={e => setIsStudy(e.target.checked)}
+              className="rounded" />
+            <span className="font-medium">This is a study / research finding</span>
+          </label>
+          {isStudy && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900">
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium mb-1">Study type</label>
+                <input list="study-types" value={studyType} onChange={e => setStudyType(e.target.value)}
+                  className="input" placeholder="peer-reviewed paper, book, systematic review..." />
+                <datalist id="study-types">
+                  <option value="peer-reviewed paper" />
+                  <option value="systematic review" />
+                  <option value="meta-analysis" />
+                  <option value="book" />
+                  <option value="case study" />
+                  <option value="study" />
+                </datalist>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1">Authors</label>
+                <input value={authors} onChange={e => setAuthors(e.target.value)}
+                  className="input" placeholder="Author names" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1">Quality appraisal</label>
+                <select value={quality} onChange={e => setQuality(Number(e.target.value))} className="input">
+                  {[1, 2, 3, 4, 5].map(n => (
+                    <option key={n} value={n}>{'★'.repeat(n)}{'☆'.repeat(5 - n)} ({n}/5)</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium mb-1">Content (Markdown)</label>

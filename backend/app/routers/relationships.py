@@ -30,7 +30,7 @@ def get_graph_data():
     conn = get_db()
     try:
         entries = conn.execute(
-            "SELECT id, title, tags, importance FROM entries WHERE archived = 0"
+            "SELECT id, title, tags, importance, entry_date, content FROM entries WHERE archived = 0"
         ).fetchall()
         rels = conn.execute(
             "SELECT r.id, r.from_id, r.to_id, r.label FROM relationships r"
@@ -48,6 +48,9 @@ def get_graph_data():
                 "value": d["importance"],
                 "color": colors.get(d["importance"], "#6366f1"),
                 "group": d["tags"].split(",")[0] if d["tags"] else "default",
+                "entry_date": d["entry_date"],
+                "tags": d["tags"],
+                "content_preview": (d["content"] or "")[:300],
             })
 
         edges = []

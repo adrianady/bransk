@@ -1,4 +1,4 @@
-import type { Entry, Relationship, Tag, TimelineEntry, TimelineStats, GraphData, SpacedRepetitionItem, TodoItem, Reminder, Thought } from './types';
+import type { Entry, Relationship, Tag, TimelineEntry, TimelineStats, GraphData, SpacedRepetitionItem, TodoItem, Reminder, Thought, ChatHistoryItem, ProviderHealth, ResearchResult, Theory, TheoryNode, TheoryEvidence, TheoryStatus } from './types';
 
 // Dynamic API Base URL resolution with fallback to relative /api proxy
 const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/api';
@@ -33,10 +33,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export const api = {
   // Entries
   entries: {
-    list: (params?: { archived?: boolean; tag?: string }) => {
+    list: (params?: { archived?: boolean; tag?: string; limit?: number; offset?: number }) => {
       const q = new URLSearchParams();
       if (params?.archived) q.set('archived', 'true');
       if (params?.tag) q.set('tag', params.tag);
+      if (params?.limit) q.set('limit', String(params.limit));
+      if (params?.offset) q.set('offset', String(params.offset));
       return request<Entry[]>(`/entries?${q}`);
     },
     get: (id: number) => request<Entry>(`/entries/${id}`),
@@ -93,7 +95,7 @@ export const api = {
   // Chat
   chat: {
     send: (message: string, history?: { role: string; content: string }[]) =>
-      request<{ reply: string }>('/chat', {
+      request<{ reply: string; provider: string; model: string; actions: any[] }>('/chat', {
         method: 'POST',
         body: JSON.stringify({ message, history: history || [] }),
       }),
@@ -105,6 +107,11 @@ export const api = {
         signal,
       });
     },
+    history: {
+      list: () => request<ChatHistoryItem[]>('/chat/history'),
+      clear: () => request<void>('/chat/history', { method: 'DELETE' }),
+    },
+    health: () => request<ProviderHealth>('/chat/health'),
   },
 
   // Spaced Repetition
@@ -145,6 +152,8 @@ export const api = {
     due: () => request<Reminder[]>('/reminders?due=true'),
     create: (entryId: number, data: { title?: string; trigger_at: string; reminder_type?: string }) =>
       request<Reminder>(`/entries/${entryId}/reminders`, { method: 'POST', body: JSON.stringify(data) }),
+    notify: (id: number) =>
+      request<void>(`/reminders/${id}/notify`, { method: 'POST' }),
     delete: (entryId: number, reminderId: number) =>
       request<void>(`/entries/${entryId}/reminders/${reminderId}`, { method: 'DELETE' }),
   },
@@ -159,5 +168,42 @@ export const api = {
       request<Thought>(`/thoughts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     delete: (id: number) => request<void>(`/thoughts/${id}`, { method: 'DELETE' }),
     entries: (id: number) => request<Entry[]>(`/thoughts/${id}/entries`),
+  },
+
+  // Qualitative research / Studies
+  research: {
+    run: (topic: string, depth: 'quick' | 'deep' = 'deep', save = true) =>
+      request<ResearchResult>('/research', {
+        method: 'POST',
+        body: JSON.stringify({ topic, depth, save }),
+      }),
+    stream: (topic: string, depth: 'quick' | 'deep' = 'deep', save = true, signal?: AbortSignal) =>
+      fetch(`${BASE}/research/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic, depth, save }),
+        signal,
+      }),
+  },
+
+  // Studies (entries with study_type set)
+  studies: {
+    list: () => request<Entry[]>('/studies'),
+  },
+
+  // Theory Aggregator
+  theories: {
+    list: () => request<Theory[]>('/theories'),
+    tree: () => request<TheoryNode[]>('/theories/tree'),
+    create: (data: { name: string; description?: string; parent_id?: number | null; status?: TheoryStatus }) =>
+      request<Theory>('/theories', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ name: string; description: string; parent_id: number | null; status: TheoryStatus }>) =>
+      request<Theory>(`/theories/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: number) => request<void>(`/theories/${id}`, { method: 'DELETE' }),
+    evidence: (id: number) => request<TheoryEvidence[]>(`/theories/${id}/evidence`),
+    addEvidence: (id: number, data: { entry_id: number; stance: 'pro' | 'contra'; note?: string; weight?: number }) =>
+      request<TheoryEvidence>(`/theories/${id}/evidence`, { method: 'POST', body: JSON.stringify(data) }),
+    removeEvidence: (theoryId: number, evidenceId: number) =>
+      request<void>(`/theories/${theoryId}/evidence/${evidenceId}`, { method: 'DELETE' }),
   },
 };

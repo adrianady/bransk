@@ -1,13 +1,17 @@
 import { useState, useEffect } from 'react'
 import { api } from '../lib/api'
-import type { Thought, Entry } from '../lib/types'
+import type { Thought, Entry, Tag } from '../lib/types'
 
 export function ThoughtsView() {
   const [thoughts, setThoughts] = useState<Thought[]>([])
   const [entries, setEntries] = useState<Record<number, Entry[]>>({})
+  const [allTags, setAllTags] = useState<Tag[]>([])
   const [loading, setLoading] = useState(true)
-  const [showCreate, setShowCreate] = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [editing, setEditing] = useState<Thought | null>(null)
   const [newName, setNewName] = useState('')
+  const [newDescription, setNewDescription] = useState('')
+  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([])
   const [selectedThought, setSelectedThought] = useState<number | null>(null)
 
   const loadThoughts = async () => {
@@ -15,8 +19,6 @@ export function ThoughtsView() {
     try {
       const items = await api.thoughts.list()
       setThoughts(items)
-
-      // Load entries for selected thought
       if (selectedThought) {
         const ents = await api.thoughts.entries(selectedThought)
         setEntries(prev => ({ ...prev, [selectedThought]: ents }))
@@ -26,7 +28,10 @@ export function ThoughtsView() {
     }
   }
 
-  useEffect(() => { loadThoughts() }, [])
+  useEffect(() => {
+    loadThoughts()
+    api.tags.list().then(setAllTags).catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (selectedThought) {
@@ -36,11 +41,39 @@ export function ThoughtsView() {
     }
   }, [selectedThought])
 
-  const createThought = async () => {
-    if (!newName.trim()) return
-    await api.thoughts.create({ name: newName.trim() })
+  const openCreate = () => {
+    setEditing(null)
     setNewName('')
-    setShowCreate(false)
+    setNewDescription('')
+    setSelectedTagIds([])
+    setShowForm(true)
+  }
+
+  const openEdit = (thought: Thought) => {
+    setEditing(thought)
+    setNewName(thought.name)
+    setNewDescription(thought.description)
+    setSelectedTagIds(thought.tag_ids.split(',').map(t => t.trim()).filter(Boolean))
+    setShowForm(true)
+  }
+
+  const toggleTag = (tagId: string) => {
+    setSelectedTagIds(prev =>
+      prev.includes(tagId) ? prev.filter(t => t !== tagId) : [...prev, tagId]
+    )
+  }
+
+  const saveThought = async () => {
+    const name = newName.trim()
+    if (!name) return
+    const tagIds = selectedTagIds.join(',')
+    if (editing) {
+      await api.thoughts.update(editing.id, { name, description: newDescription, tag_ids: tagIds })
+    } else {
+      await api.thoughts.create({ name, description: newDescription, tag_ids: tagIds })
+    }
+    setShowForm(false)
+    setEditing(null)
     await loadThoughts()
   }
 
@@ -53,16 +86,41 @@ export function ThoughtsView() {
           <h2 className="text-xl font-bold">Thoughts</h2>
           <p className="text-sm text-gray-500">Tag-based dynamic collections · {thoughts.length} thoughts</p>
         </div>
-        <button onClick={() => setShowCreate(true)} className="btn-primary">+ New Thought</button>
+        <button onClick={openCreate} className="btn-primary">+ New Thought</button>
       </div>
 
-      {showCreate && (
-        <div className="card mb-4 flex gap-2">
+      {showForm && (
+        <div className="card mb-4 space-y-3">
           <input value={newName} onChange={e => setNewName(e.target.value)}
-            className="input flex-1" placeholder="Thought name"
-            onKeyDown={e => e.key === 'Enter' && createThought()} autoFocus />
-          <button onClick={createThought} className="btn-primary">Create</button>
-          <button onClick={() => setShowCreate(false)} className="btn-ghost">Cancel</button>
+            className="input" placeholder="Thought name"
+            onKeyDown={e => e.key === 'Enter' && saveThought()} autoFocus />
+          <textarea value={newDescription} onChange={e => setNewDescription(e.target.value)}
+            className="input min-h-[60px]" placeholder="Description (optional)" />
+          <div>
+            <p className="text-xs font-medium text-gray-500 mb-1.5">Tags — entries with these tags flow into this collection</p>
+            {allTags.length === 0 ? (
+              <p className="text-xs text-gray-400">No tags yet. Create tags in the entry form first.</p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {allTags.map(tag => {
+                  const active = selectedTagIds.includes(String(tag.id))
+                  return (
+                    <button key={tag.id} onClick={() => toggleTag(String(tag.id))}
+                      className={`px-2.5 py-1 rounded-full text-xs transition-colors ${
+                        active
+                          ? 'bg-chrono-600 text-white'
+                          : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
+                      }`}
+                    >{tag.name}</button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <button onClick={saveThought} disabled={!newName.trim()} className="btn-primary">Save</button>
+            <button onClick={() => { setShowForm(false); setEditing(null) }} className="btn-ghost">Cancel</button>
+          </div>
         </div>
       )}
 
@@ -86,14 +144,28 @@ export function ThoughtsView() {
                   {thought.description && (
                     <p className="text-sm text-gray-500 mt-1">{thought.description}</p>
                   )}
+                  {thought.tag_ids && (
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {thought.tag_ids.split(',').filter(Boolean).map(tid => {
+                        const tag = allTags.find(t => String(t.id) === tid.trim())
+                        return tag ? (
+                          <span key={tid} className="badge bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">{tag.name}</span>
+                        ) : null
+                      })}
+                    </div>
+                  )}
                 </div>
-                <button onClick={async (e) => {
-                  e.stopPropagation()
-                  if (confirm('Delete this thought?')) {
-                    await api.thoughts.delete(thought.id)
-                    await loadThoughts()
-                  }
-                }} className="btn-ghost p-1 text-red-400 text-xs">✕</button>
+                <div className="flex gap-1 shrink-0">
+                  <button onClick={(e) => { e.stopPropagation(); openEdit(thought) }}
+                    className="btn-ghost p-1 text-xs">✏️</button>
+                  <button onClick={async (e) => {
+                    e.stopPropagation()
+                    if (confirm('Delete this thought?')) {
+                      await api.thoughts.delete(thought.id)
+                      await loadThoughts()
+                    }
+                  }} className="btn-ghost p-1 text-red-400 text-xs">✕</button>
+                </div>
               </div>
 
               {selectedThought === thought.id && (

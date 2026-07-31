@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
 import type { Entry, Relationship, TodoItem, SpacedRepetitionItem, Reminder } from '../lib/types'
 import { EntryForm } from './EntryForm'
@@ -17,28 +19,36 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
   const [linkLabel, setLinkLabel] = useState('')
   const [linkTarget, setLinkTarget] = useState<number | null>(null)
   const [todo, setTodo] = useState<TodoItem | null>(null)
+  const [todoDraft, setTodoDraft] = useState<{ priority: string; effort: string; due_date: string }>({ priority: 'normal', effort: 'm', due_date: '' })
   const [srItem, setSrItem] = useState<SpacedRepetitionItem | null>(null)
   const [reminders, setReminders] = useState<Reminder[]>([])
-  const [activeTab, setActiveTab] = useState<'info' | 'links' | 'todo' | 'review'>('info')
+  const [showReminderForm, setShowReminderForm] = useState(false)
+  const [reminderTitle, setReminderTitle] = useState('')
+  const [reminderTrigger, setReminderTrigger] = useState('')
+  const [reminderType, setReminderType] = useState('once')
+  const [activeTab, setActiveTab] = useState<'info' | 'links' | 'todo' | 'review' | 'reminders'>('info')
 
   useEffect(() => {
     Promise.all([
       api.relationships.list(entry.id),
-      api.entries.list(),
+      api.entries.list({ limit: 500 }),
     ]).then(([rels, entries]) => {
       setRelationships(rels)
       setAllEntries(entries.filter(e => e.id !== entry.id))
     })
     api.todos.list().then(todos => {
       const t = todos.find(t => t.entry_id === entry.id)
-      if (t) setTodo(t)
+      if (t) {
+        setTodo(t)
+        setTodoDraft({ priority: t.priority, effort: t.effort, due_date: t.due_date || '' })
+      }
     })
     api.spacedRepetition.list().then(items => {
       const item = items.find(i => i.entry_id === entry.id)
       if (item) setSrItem(item)
     })
     api.reminders.list().then(rs => {
-      // reminders are per-entry, we'll just show the list
+      setReminders(rs.filter(r => r.entry_id === entry.id))
     })
   }, [entry.id])
 
@@ -60,11 +70,45 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
   const addTodo = async () => {
     const item = await api.todos.create(entry.id)
     setTodo(item)
+    setTodoDraft({ priority: item.priority, effort: item.effort, due_date: item.due_date || '' })
+  }
+
+  const saveTodoDraft = async () => {
+    if (!todo) return
+    const updated = await api.todos.update(entry.id, {
+      priority: todoDraft.priority,
+      effort: todoDraft.effort,
+      due_date: todoDraft.due_date || null,
+    })
+    setTodo(updated)
+    setTodoDraft({ priority: updated.priority, effort: updated.effort, due_date: updated.due_date || '' })
+  }
+
+  const addReminder = async () => {
+    if (!reminderTrigger) return
+    const created = await api.reminders.create(entry.id, {
+      title: reminderTitle,
+      trigger_at: reminderTrigger,
+      reminder_type: reminderType,
+    })
+    setReminders(prev => [...prev, created])
+    setShowReminderForm(false)
+    setReminderTitle('')
+    setReminderTrigger('')
+    setReminderType('once')
   }
 
   const importanceLabel = (n: number) => {
     const labels: Record<number, string> = { 1: 'Low', 2: 'Medium', 3: 'Important', 4: 'Very Important', 5: 'Critical' }
     return labels[n] || 'Normal'
+  }
+
+  const qualityLabel = (n: number | null) => {
+    if (!n) return ''
+    const labels: Record<number, string> = {
+      1: 'Weak', 2: 'Limited', 3: 'Moderate', 4: 'Strong', 5: 'High quality',
+    }
+    return labels[n] || ''
   }
 
   return (
@@ -85,6 +129,14 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
           </div>
           <div className="flex gap-2">
             <button onClick={() => setShowEdit(true)} className="btn-ghost">✏️</button>
+            <button
+              onClick={async () => {
+                const updated = await api.entries.update(entry.id, { archived: !entry.archived })
+                onUpdate(updated)
+              }}
+              className="btn-ghost"
+              title={entry.archived ? 'Restore entry' : 'Archive entry'}
+            >{entry.archived ? '♻️' : '🗄️'}</button>
             <button onClick={async () => {
               if (confirm('Delete this entry?')) {
                 await api.entries.delete(entry.id)
@@ -102,10 +154,35 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
           </div>
         )}
 
+        {/* Study metadata */}
+        {entry.study_type && (
+          <div className="mb-4 p-3 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-900 text-sm space-y-1">
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              <span className="badge bg-indigo-100 text-indigo-700 dark:bg-indigo-900/60 dark:text-indigo-300">{entry.study_type}</span>
+              {entry.entry_date && <span>📅 {entry.entry_date.slice(0, 4)}</span>}
+              {entry.quality != null && (
+                <span title={qualityLabel(entry.quality)}>
+                  {'★'.repeat(entry.quality)}{'☆'.repeat(5 - entry.quality)}
+                  <span className="text-gray-500 ml-1">quality {entry.quality}/5</span>
+                </span>
+              )}
+            </div>
+            {entry.authors && <p className="text-gray-600 dark:text-gray-400"><strong>Authors:</strong> {entry.authors}</p>}
+            {entry.source && (
+              <p className="text-gray-600 dark:text-gray-400 break-all">
+                <strong>Source:</strong>{' '}
+                {entry.source.startsWith('http') ? (
+                  <a href={entry.source} target="_blank" rel="noreferrer" className="text-chrono-600 hover:underline">{entry.source}</a>
+                ) : entry.source}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Content */}
         <div className="prose prose-sm dark:prose-invert max-w-none mt-4">
           {entry.content ? (
-            <pre className="whitespace-pre-wrap font-sans text-sm">{entry.content}</pre>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.content}</ReactMarkdown>
           ) : (
             <p className="text-gray-400 italic">No content</p>
           )}
@@ -114,7 +191,7 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700">
-        {(['info', 'links', 'todo', 'review'] as const).map(tab => (
+        {(['info', 'links', 'todo', 'review', 'reminders'] as const).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
             className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab
@@ -126,6 +203,7 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
             {tab === 'links' && `🔗 Links (${relationships.length})`}
             {tab === 'todo' && '✅ Todo'}
             {tab === 'review' && '🔄 Review'}
+            {tab === 'reminders' && `⏰ Reminders (${reminders.length})`}
           </button>
         ))}
       </div>
@@ -193,8 +271,43 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
                   {todo.completed ? 'Completed' : 'In progress'}
                 </span>
               </label>
-              <p className="text-sm">Priority: <span className="font-medium">{todo.priority}</span></p>
-              {todo.due_date && <p className="text-sm">Due: {todo.due_date}</p>}
+              <div className="grid grid-cols-3 gap-2 pt-1">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Priority</label>
+                  <select
+                    value={todoDraft.priority}
+                    onChange={e => setTodoDraft(d => ({ ...d, priority: e.target.value }))}
+                    className="input text-sm"
+                  >
+                    <option value="critical">critical</option>
+                    <option value="important">important</option>
+                    <option value="normal">normal</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Effort</label>
+                  <select
+                    value={todoDraft.effort}
+                    onChange={e => setTodoDraft(d => ({ ...d, effort: e.target.value }))}
+                    className="input text-sm"
+                  >
+                    <option value="s">S</option>
+                    <option value="m">M</option>
+                    <option value="l">L</option>
+                    <option value="xl">XL</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Due</label>
+                  <input
+                    type="date"
+                    value={todoDraft.due_date}
+                    onChange={e => setTodoDraft(d => ({ ...d, due_date: e.target.value }))}
+                    className="input text-sm"
+                  />
+                </div>
+              </div>
+              <button onClick={saveTodoDraft} className="btn-secondary text-sm">Save task details</button>
               <button onClick={async () => {
                 await api.todos.delete(entry.id)
                 setTodo(null)
@@ -204,6 +317,59 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
             <div>
               <p className="text-sm text-gray-500 mb-2">No task for this entry.</p>
               <button onClick={addTodo} className="btn-primary text-sm">+ Add as Task</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Reminders Tab */}
+      {activeTab === 'reminders' && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold">Reminders</h3>
+            <button onClick={() => setShowReminderForm(!showReminderForm)} className="btn-primary text-sm">+ Add Reminder</button>
+          </div>
+
+          {showReminderForm && (
+            <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg space-y-2">
+              <input value={reminderTitle} onChange={e => setReminderTitle(e.target.value)}
+                className="input" placeholder="Reminder title (optional)" />
+              <div className="grid grid-cols-2 gap-2">
+                <input type="datetime-local" value={reminderTrigger} onChange={e => setReminderTrigger(e.target.value)}
+                  className="input" />
+                <select value={reminderType} onChange={e => setReminderType(e.target.value)} className="input">
+                  <option value="once">Once</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={addReminder} disabled={!reminderTrigger} className="btn-primary text-sm">Save</button>
+                <button onClick={() => setShowReminderForm(false)} className="btn-ghost text-sm">Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {reminders.length === 0 ? (
+            <p className="text-sm text-gray-500">No reminders for this entry yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {reminders.map(rem => (
+                <div key={rem.id} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm">
+                  <div>
+                    <p className="font-medium">{rem.title || 'Reminder'}</p>
+                    <p className="text-xs text-gray-500">
+                      {rem.trigger_at.replace('T', ' ')} · {rem.reminder_type}
+                      {rem.notified ? ' · ✅ notified' : ' · ⏳ pending'}
+                    </p>
+                  </div>
+                  <button onClick={async () => {
+                    await api.reminders.delete(entry.id, rem.id)
+                    setReminders(prev => prev.filter(r => r.id !== rem.id))
+                  }} className="text-red-400 hover:text-red-600 text-xs">Remove</button>
+                </div>
+              ))}
             </div>
           )}
         </div>

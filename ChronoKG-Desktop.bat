@@ -1,214 +1,80 @@
 @echo off
 setlocal enabledelayedexpansion
-title ChronoKG Launcher & Control Suite
+title ChronoKG
 
-:: -------------------------------------------------------------------
-:: 1. Script Environment & Path Setup (Script-Relative Resolution)
-:: -------------------------------------------------------------------
-set "ROOT_DIR=%~dp0"
-if "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR:~0,-1%"
+set "ROOT_DIR=C:\bransk\chronokg"
 cd /d "%ROOT_DIR%"
 
-set "BACKEND_DIR=%ROOT_DIR%\backend"
-set "FRONTEND_DIR=%ROOT_DIR%\frontend"
-
-set "BACKEND_PORT=8000"
-set "FRONTEND_PORT=5173"
-
-set "VENV_PYTHON=python"
-if exist "%BACKEND_DIR%\venv\Scripts\python.exe" (
-    set "VENV_PYTHON=%BACKEND_DIR%\venv\Scripts\python.exe"
-)
-
-echo ===================================================================
-echo    ChronoKG - Chronological Knowledge Graph Production Launcher
-echo ===================================================================
-echo Workspace Root: "%ROOT_DIR%"
+echo ========================================
+echo    ChronoKG - Chronological Knowledge Graph
+echo ========================================
 echo.
 
-:: -------------------------------------------------------------------
-:: 2. Check Shutdown Argument
-:: -------------------------------------------------------------------
-if /i "%~1"=="stop" goto stop_servers
-
-:: -------------------------------------------------------------------
-:: 3. Prerequisite CLI Tool Verification
-:: -------------------------------------------------------------------
-echo [1/5] Verifying System Prerequisites...
-
-where python >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] Python 3.11+ is not found in system PATH.
-    echo Please install Python and ensure it is added to your PATH.
-    pause
-    exit /b 1
-)
-
-where node >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] Node.js is not found in system PATH.
-    pause
-    exit /b 1
-)
-
-where npm >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] npm is not found in system PATH.
-    pause
-    exit /b 1
-)
-
-where curl >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] curl is not found in system PATH.
-    pause
-    exit /b 1
-)
-
-echo   [OK] All prerequisite tools detected.
-
-:: -------------------------------------------------------------------
-:: 4. Backend Process & Port Verification
-:: -------------------------------------------------------------------
+:: Check prerequisites
+where python >nul 2>&1 || ( echo [ERROR] Python not found.& pause & exit /b 1 )
+where node >nul 2>&1 || ( echo [ERROR] Node.js not found.& pause & exit /b 1 )
+echo [OK] Prerequisites found.
 echo.
-echo [2/5] Checking Backend Status on Port %BACKEND_PORT%...
 
-set BACKEND_RUNNING=0
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /C:":%BACKEND_PORT% " ^| findstr "LISTENING"') do (
-    set BACKEND_PID=%%a
-    set BACKEND_RUNNING=1
-)
-
-if %BACKEND_RUNNING% equ 1 (
-    echo   [INFO] Backend already running on port %BACKEND_PORT% (PID: !BACKEND_PID!).
-) else (
-    echo   Starting FastAPI Backend Server...
-    start "ChronoKG Backend" /D "%BACKEND_DIR%" cmd /k "%VENV_PYTHON% -m uvicorn app.main:app --host 127.0.0.1 --port %BACKEND_PORT% --reload"
-)
-
-:: -------------------------------------------------------------------
-:: 5. Bounded Health Check Wait Loop (30-Second Max Timeout)
-:: -------------------------------------------------------------------
-echo.
-echo [3/5] Awaiting Backend Service Readiness...
-
-set RETRY_COUNT=0
-set MAX_RETRIES=15
-set BACKEND_READY=0
-
-:health_poll_loop
-if !RETRY_COUNT! geq %MAX_RETRIES% (
-    echo.
-    echo [CRITICAL ERROR] Backend failed to respond within 30 seconds!
-    echo Check the "ChronoKG Backend" terminal window for errors.
-    pause
-    exit /b 1
-)
-
-timeout /t 2 /nobreak >nul
-curl -s -m 3 http://localhost:%BACKEND_PORT%/api/health 2>nul | findstr /i "status" >nul
+:: Step 1: Start backend if not running
+echo [1/3] Backend...
+netstat -ano 2>nul | findstr /C:":8000 " | findstr "LISTENING" >nul
 if %errorlevel% equ 0 (
-    set BACKEND_READY=1
-    echo   [OK] Backend health check passed! (Port %BACKEND_PORT%)
-) else (
-    set /a RETRY_COUNT+=1
-    echo   Waiting for backend... (Attempt !RETRY_COUNT!/%MAX_RETRIES%)
-    goto health_poll_loop
+    echo   Backend already running on port 8000.
+    goto start_frontend
 )
 
-:: -------------------------------------------------------------------
-:: 6. Frontend Dependency Verification & Service Start
-:: -------------------------------------------------------------------
-echo.
-echo [4/5] Checking Frontend Service on Port %FRONTEND_PORT%...
+echo   Starting backend...
+start "ChronoKG Backend" /D "%ROOT_DIR%\backend" cmd /k "set PYTHONPATH=%ROOT_DIR%\backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
 
-if not exist "%FRONTEND_DIR%\node_modules\vite" (
-    echo   Installing Frontend Dependencies (node_modules missing)...
-    cd /d "%FRONTEND_DIR%"
+echo   Waiting for backend to become ready...
+set RETRIES=0
+:wait_loop
+timeout /t 2 /nobreak >nul
+curl -s -m 2 http://localhost:8000/api/health >nul 2>&1
+if !errorlevel! equ 0 (
+    echo   Backend ready!
+    goto start_frontend
+)
+set /a RETRIES+=1
+if !RETRIES! lss 15 (
+    echo   Attempt !RETRIES!/15...
+    goto wait_loop
+)
+echo   Backend failed to start - check the ChronoKG Backend window for errors.
+pause
+exit /b 1
+
+:: Step 2: Start frontend if not running
+:start_frontend
+echo.
+echo [2/3] Frontend...
+if not exist "%ROOT_DIR%\frontend\node_modules\vite" (
+    echo   Installing frontend dependencies...
+    cd /d "%ROOT_DIR%\frontend"
     call npm install
-    if %errorlevel% neq 0 (
-        echo [ERROR] npm install failed.
-        pause
-        exit /b 1
-    )
     cd /d "%ROOT_DIR%"
 )
-
-set FRONTEND_RUNNING=0
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /C:":%FRONTEND_PORT% " ^| findstr "LISTENING"') do (
-    set FRONTEND_PID=%%a
-    set FRONTEND_RUNNING=1
-)
-
-if %FRONTEND_RUNNING% equ 1 (
-    echo   [INFO] Frontend already running on port %FRONTEND_PORT% (PID: !FRONTEND_PID!).
+netstat -ano 2>nul | findstr /C:":5173 " | findstr "LISTENING" >nul
+if %errorlevel% equ 0 (
+    echo   Frontend already running on port 5173.
 ) else (
-    echo   Starting Vite Frontend Development Server...
-    start "ChronoKG Frontend" /D "%FRONTEND_DIR%" cmd /k "npm run dev"
-    timeout /t 3 /nobreak >nul
+    echo   Starting frontend...
+    start "ChronoKG Frontend" /D "%ROOT_DIR%\frontend" cmd /k "npm run dev"
+    timeout /t 5 /nobreak >nul
 )
 
-:: -------------------------------------------------------------------
-:: 7. Launch Browser & Control Handlers
-:: -------------------------------------------------------------------
+:: Step 3: Open browser
 echo.
-echo [5/5] Launching ChronoKG Web Interface...
-start http://localhost:%FRONTEND_PORT%
+echo [3/3] Opening browser...
+start http://localhost:5173
 
 echo.
-echo ===================================================================
-echo    ChronoKG Application Started Successfully!
-echo    - Frontend Web UI:  http://localhost:%FRONTEND_PORT%
-echo    - Backend API Docs: http://localhost:%BACKEND_PORT%/docs
-echo    - Health Check:     http://localhost:%BACKEND_PORT%/api/health
-echo ===================================================================
-echo    Press [S] and Enter to Stop all servers cleanly.
-echo    Press any other key to exit (servers remain running).
-echo ===================================================================
-set /p USER_CHOICE="Select Option: "
-
-if /i "%USER_CHOICE%"=="S" goto stop_servers
-exit /b 0
-
-:: -------------------------------------------------------------------
-:: 8. Clean Process Tree Shutdown Routine
-:: -------------------------------------------------------------------
-:stop_servers
+echo ========================================
+echo    ChronoKG is running!
+echo    Frontend: http://localhost:5173
+echo    Backend:  http://localhost:8000
+echo ========================================
 echo.
-echo Terminating ChronoKG Process Trees...
-
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /C:":%BACKEND_PORT% " ^| findstr "LISTENING"') do (
-    set "PORT_PID=%%a"
-    set "SAFE_KILL=0"
-    for /f "tokens=1" %%i in ('tasklist /FI "PID eq !PORT_PID!" /NH 2^>nul') do (
-        if /i "%%i"=="python.exe" set SAFE_KILL=1
-        if /i "%%i"=="node.exe" set SAFE_KILL=1
-        if /i "%%i"=="cmd.exe" set SAFE_KILL=1
-    )
-    if !SAFE_KILL! equ 1 (
-        echo Killing Backend Process Tree (PID !PORT_PID!)...
-        taskkill /F /T /PID !PORT_PID! >nul 2>&1
-    ) else (
-        echo [WARNING] PID !PORT_PID! is not python/node/cmd. Skipping.
-    )
-)
-
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /C:":%FRONTEND_PORT% " ^| findstr "LISTENING"') do (
-    set "PORT_PID=%%a"
-    set "SAFE_KILL=0"
-    for /f "tokens=1" %%i in ('tasklist /FI "PID eq !PORT_PID!" /NH 2^>nul') do (
-        if /i "%%i"=="python.exe" set SAFE_KILL=1
-        if /i "%%i"=="node.exe" set SAFE_KILL=1
-        if /i "%%i"=="cmd.exe" set SAFE_KILL=1
-    )
-    if !SAFE_KILL! equ 1 (
-        echo Killing Frontend Process Tree (PID !PORT_PID!)...
-        taskkill /F /T /PID !PORT_PID! >nul 2>&1
-    ) else (
-        echo [WARNING] PID !PORT_PID! is not python/node/cmd. Skipping.
-    )
-)
-
-echo [OK] ChronoKG services terminated cleanly.
-pause
-exit /b 0
+echo Close this window to keep servers running in background.
+pause >nul

@@ -7,10 +7,12 @@ import { EntryDetail } from './components/EntryDetail'
 import { ReviewPanel } from './components/ReviewPanel'
 import { TodoList } from './components/TodoList'
 import { ThoughtsView } from './components/ThoughtsView'
+import { StudiesView } from './components/StudiesView'
+import { TheoriesView } from './components/TheoriesView'
 import { api } from './lib/api'
 import type { Entry, TimelineEntry } from './lib/types'
 
-type View = 'timeline' | 'graph' | 'entries' | 'review' | 'todos' | 'thoughts' | 'settings'
+type View = 'timeline' | 'graph' | 'studies' | 'theories' | 'entries' | 'review' | 'todos' | 'thoughts'
 
 export default function App() {
   const [view, setView] = useState<View>('timeline')
@@ -42,9 +44,16 @@ export default function App() {
     }
   }
 
+  const handleSelectStudy = (entry: Entry) => {
+    setSelectedEntry(entry)
+    setView('entries')
+  }
+
   const navItems: { id: View; label: string; icon: string }[] = [
     { id: 'timeline', label: 'Timeline', icon: '📅' },
     { id: 'graph', label: 'Graph', icon: '🕸️' },
+    { id: 'studies', label: 'Studies', icon: '📚' },
+    { id: 'theories', label: 'Theories', icon: '🧬' },
     { id: 'entries', label: 'Entries', icon: '📝' },
     { id: 'review', label: 'Review', icon: '🔄' },
     { id: 'todos', label: 'Tasks', icon: '✅' },
@@ -113,6 +122,12 @@ export default function App() {
                 onSelectEntry={handleSelectTimelineEntry}
               />
             )}
+            {view === 'studies' && (
+              <StudiesView onSelectEntry={handleSelectStudy} />
+            )}
+            {view === 'theories' && (
+              <TheoriesView onSelectEntry={handleSelectStudy} />
+            )}
             {view === 'entries' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -166,38 +181,201 @@ export default function App() {
 function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
   const [entries, setEntries] = useState<Entry[]>([])
   const [loading, setLoading] = useState(true)
+  const [offset, setOffset] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
+  const [query, setQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<{ entry: Entry; rank: number }[] | null>(null)
+  const [searching, setSearching] = useState(false)
+
+  const load = async (nextOffset = 0, archived = showArchived) => {
+    setLoading(true)
+    try {
+      const data = await api.entries.list({ limit: 100, offset: nextOffset, archived })
+      if (nextOffset === 0) setEntries(data)
+      else setEntries(prev => [...prev, ...data])
+      setHasMore(data.length === 100)
+      setOffset(nextOffset)
+    } catch (err) {
+      console.error('Failed to load entries:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
-    let isSubscribed = true
-    api.entries.list()
-      .then(data => { if (isSubscribed) setEntries(data) })
-      .catch(err => console.error("Failed to load entries:", err))
-      .finally(() => { if (isSubscribed) setLoading(false) })
-    return () => { isSubscribed = false }
-  }, [])
+    setQuery('')
+    setSearchResults(null)
+    setEntries([])
+    load(0, showArchived)
+  }, [showArchived])
 
-  if (loading) return <div className="text-center py-8 text-gray-500">Loading...</div>
+  const runSearch = async () => {
+    const q = query.trim()
+    if (!q) { setSearchResults(null); return }
+    setSearching(true)
+    try {
+      setSearchResults(await api.search(q))
+    } catch (err) {
+      console.error('Search failed:', err)
+      setSearchResults([])
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const exportData = async () => {
+    try {
+      const [entriesData, relationships, tags] = await Promise.all([
+        api.entries.list({ limit: 500 }),
+        api.relationships.list(),
+        api.tags.list(),
+      ])
+      const payload = {
+        app: 'chronokg',
+        exported_at: new Date().toISOString(),
+        entries: entriesData,
+        relationships,
+        tags,
+      }
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `chronokg-export-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err: any) {
+      alert('Export failed: ' + err.message)
+    }
+  }
+
+  const importData = async (file: File) => {
+    try {
+      const data = JSON.parse(await file.text())
+      if (!Array.isArray(data.entries)) throw new Error('Not a ChronoKG export file')
+      if (!confirm(`Import ${data.entries.length} entries, ${(data.tags || []).length} tags, ${(data.relationships || []).length} relationships?`)) return
+
+      const idMap: Record<number, number> = {}
+      let created = 0
+      for (const e of data.entries) {
+        if (e.archived) continue
+        const entry = await api.entries.create({
+          title: String(e.title).slice(0, 500),
+          content: e.content || '',
+          entry_date: e.entry_date || null,
+          tags: e.tags || '',
+          source: e.source || '',
+          importance: e.importance ?? 3,
+        })
+        idMap[e.id] = entry.id
+        created++
+      }
+      for (const t of data.tags || []) {
+        if (t.name) await api.tags.create({ name: String(t.name), color: t.color })
+      }
+      for (const r of data.relationships || []) {
+        const from = idMap[r.from_id]
+        const to = idMap[r.to_id]
+        if (from && to && from !== to) {
+          try { await api.relationships.create({ from_id: from, to_id: to, label: r.label || '' }) } catch { /* dedupe */ }
+        }
+      }
+      alert(`Import complete: ${created} entries restored`)
+      setSearchResults(null)
+      load(0, showArchived)
+    } catch (err: any) {
+      alert('Import failed: ' + err.message)
+    }
+  }
+
+  if (loading && entries.length === 0) return <div className="text-center py-8 text-gray-500">Loading...</div>
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {entries.map(entry => (
-        <button key={entry.id} onClick={() => onSelect(entry)}
-          className="card text-left hover:border-chrono-300 dark:hover:border-chrono-700 transition-colors"
+    <div className="space-y-4">
+      {/* Toolbar: search, archive toggle, export/import */}
+      <div className="flex flex-wrap gap-2">
+        <div className="flex flex-1 min-w-[220px] gap-2">
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && runSearch()}
+            className="input flex-1"
+            placeholder="Search entries (full-text)..."
+          />
+          <button onClick={runSearch} disabled={searching} className="btn-secondary">🔎</button>
+        </div>
+        <button
+          onClick={() => setShowArchived(!showArchived)}
+          className={`btn-ghost text-sm ${showArchived ? 'text-chrono-600' : ''}`}
         >
-          <h3 className="font-semibold mb-1">{entry.title}</h3>
-          {entry.entry_date && (
-            <p className="text-xs text-gray-500 mb-1">{entry.entry_date}</p>
-          )}
-          <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2">{entry.content}</p>
-          {entry.tags && (
-            <div className="flex gap-1 mt-2 flex-wrap">
-              {entry.tags.split(',').map(t => t.trim()).filter(Boolean).map(t => (
-                <span key={t} className="badge bg-chrono-100 text-chrono-700 dark:bg-chrono-900/50 dark:text-chrono-400">{t}</span>
-              ))}
+          {showArchived ? '📦 Archived' : '🗄️ Show archived'}
+        </button>
+        <button onClick={exportData} className="btn-ghost text-sm">⬇️ Export</button>
+        <label className="btn-ghost text-sm cursor-pointer">
+          ⬆️ Import
+          <input
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0]
+              if (f) importData(f)
+              e.target.value = ''
+            }}
+          />
+        </label>
+      </div>
+
+      {searching ? (
+        <div className="text-center py-8 text-gray-500">Searching...</div>
+      ) : searchResults !== null ? (
+        searchResults.length === 0 ? (
+          <div className="card text-center py-10 text-gray-500">No results for "{query.trim()}"</div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {searchResults.map(({ entry, rank }) => (
+              <button key={entry.id} onClick={() => onSelect(entry)}
+                className="card text-left hover:border-chrono-300 dark:hover:border-chrono-700 transition-colors"
+              >
+                <h3 className="font-semibold mb-1">{entry.title}</h3>
+                {entry.entry_date && <p className="text-xs text-gray-500 mb-1">{entry.entry_date}</p>}
+                <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2">{entry.content}</p>
+                <p className="text-xs text-gray-400 mt-1">relevance {rank.toFixed(2)}</p>
+              </button>
+            ))}
+          </div>
+        )
+      ) : (
+        <>
+          <p className="text-sm text-gray-500">{entries.length} entries {showArchived ? '(archived)' : ''}</p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {entries.map(entry => (
+              <button key={entry.id} onClick={() => onSelect(entry)}
+                className="card text-left hover:border-chrono-300 dark:hover:border-chrono-700 transition-colors"
+              >
+                <h3 className="font-semibold mb-1">{entry.title}</h3>
+                {entry.entry_date && <p className="text-xs text-gray-500 mb-1">{entry.entry_date}</p>}
+                <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2">{entry.content}</p>
+                {entry.tags && (
+                  <div className="flex gap-1 mt-2 flex-wrap">
+                    {entry.tags.split(',').map(t => t.trim()).filter(Boolean).map(t => (
+                      <span key={t} className="badge bg-chrono-100 text-chrono-700 dark:bg-chrono-900/50 dark:text-chrono-400">{t}</span>
+                    ))}
+                  </div>
+                )}
+              </button>
+            ))}
+          </div>
+          {hasMore && (
+            <div className="text-center pt-2">
+              <button onClick={() => load(offset + 100)} disabled={loading} className="btn-secondary">
+                {loading ? 'Loading...' : 'Load more'}
+              </button>
             </div>
           )}
-        </button>
-      ))}
+        </>
+      )}
     </div>
   )
 }

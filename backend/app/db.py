@@ -7,12 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DB_DIR = Path(__file__).parent.parent / "data"
-DB_PATH = DB_DIR / "chronokg.db"
+DB_PATH = Path(os.getenv("CHRONOKG_DB_PATH", str(DB_DIR / "chronokg.db")))
 
 
 def get_db() -> sqlite3.Connection:
     """Get a database connection with row factory and WAL mode."""
-    DB_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -35,7 +35,35 @@ def init_db():
                 tags        TEXT DEFAULT '',   -- comma-separated
                 source      TEXT DEFAULT '',   -- where info came from
                 importance  INTEGER DEFAULT 1 CHECK(importance BETWEEN 1 AND 5),
+                study_type  TEXT DEFAULT '',   -- 'paper' | 'book' | 'review' | 'study' ... ('' = regular entry)
+                authors     TEXT DEFAULT '',   -- authors for study entries
+                quality     INTEGER DEFAULT NULL, -- qualitative appraisal 1-5 (studies only)
+                url_validated INTEGER DEFAULT 0, -- source URL reachability check
+                design      TEXT DEFAULT '',   -- study design (RCT, cohort, ...)
+                effect_direction TEXT DEFAULT '', -- positive | negative | mixed | null
                 archived    INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS theories (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                parent_id   INTEGER REFERENCES theories(id) ON DELETE SET NULL,
+                status      TEXT DEFAULT 'emerging'
+                            CHECK(status IN ('supported','contested','refuted','emerging')),
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS theory_evidence (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                theory_id   INTEGER NOT NULL REFERENCES theories(id) ON DELETE CASCADE,
+                entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                stance      TEXT NOT NULL CHECK(stance IN ('pro','contra')),
+                note        TEXT DEFAULT '',
+                weight      INTEGER DEFAULT 3 CHECK(weight BETWEEN 1 AND 5),
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(theory_id, entry_id, stance)
             );
 
             CREATE TABLE IF NOT EXISTS relationships (
@@ -97,6 +125,16 @@ def init_db():
                 tag_ids         TEXT DEFAULT '',  -- comma-separated tag IDs
                 created_at      TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            -- Chat history persistence
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                role        TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+                content     TEXT NOT NULL,
+                provider    TEXT DEFAULT '',
+                model       TEXT DEFAULT '',
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
 
         # Create FTS5 virtual table for full-text search
@@ -127,6 +165,22 @@ def init_db():
         """)
 
         conn.commit()
+
+        # ── Migration: study metadata columns (added later, keep old DBs working) ──
+        _add_column = [
+            ("study_type", "TEXT DEFAULT ''"),
+            ("authors", "TEXT DEFAULT ''"),
+            ("quality", "INTEGER DEFAULT NULL"),
+            ("url_validated", "INTEGER DEFAULT 0"),
+            ("design", "TEXT DEFAULT ''"),
+            ("effect_direction", "TEXT DEFAULT ''"),
+        ]
+        for col, ddl in _add_column:
+            try:
+                conn.execute(f"ALTER TABLE entries ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
     finally:
         conn.close()
 

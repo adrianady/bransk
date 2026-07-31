@@ -17,6 +17,9 @@
     "lucide-react": "^0.460.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "react-syntax-highlighter": "^16.1.1",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^2.6.0",
     "vis-network": "^9.1.0",
     "vis-timeline": "^7.7.0"

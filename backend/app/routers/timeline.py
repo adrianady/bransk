@@ -45,7 +45,7 @@ def get_timeline(
 
         # Get entries with relationship counts
         rows = conn.execute(
-            f"""SELECT e.id, e.title, e.entry_date, e.tags, e.importance,
+            f"""SELECT e.id, e.title, e.entry_date, e.tags, e.importance, e.content,
                        (SELECT COUNT(*) FROM relationships r WHERE r.from_id = e.id OR r.to_id = e.id) as relationship_count
                 FROM entries e
                 WHERE {where_sql}
@@ -54,7 +54,12 @@ def get_timeline(
             [*params, limit, offset]
         ).fetchall()
 
-        entries = [TimelineEntry(**dict(r)) for r in rows]
+        entries = []
+        for r in rows:
+            d = dict(r)
+            content = d.pop("content", "") or ""
+            d["content_preview"] = content[:300]
+            entries.append(TimelineEntry(**d))
         return TimelineResponse(
             entries=entries,
             total=total,

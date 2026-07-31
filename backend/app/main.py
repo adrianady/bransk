@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.db import init_db
 from app.routers import (
     entries, search, timeline, relationships,
-    chat, tags, spaced_repetition, todos, reminders, thoughts
+    chat, tags, spaced_repetition, todos, reminders, thoughts,
+    research, theory
 )
 
 # Structured Python Logging Configuration
@@ -62,6 +63,8 @@ app.include_router(spaced_repetition.router, prefix="/api", tags=["spaced-repeti
 app.include_router(todos.router, prefix="/api", tags=["todos"])
 app.include_router(reminders.router, prefix="/api", tags=["reminders"])
 app.include_router(thoughts.router, prefix="/api", tags=["thoughts"])
+app.include_router(research.router, prefix="/api", tags=["research"])
+app.include_router(theory.router, prefix="/api", tags=["theory"])
 
 
 @app.get("/api/health")

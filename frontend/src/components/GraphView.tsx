@@ -1,10 +1,28 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
-import type { GraphData, TimelineEntry } from '../lib/types'
+import type { GraphData, GraphNode, TimelineEntry } from '../lib/types'
 
 interface Props {
   onSelectEntry: (entry: TimelineEntry) => void
 }
+
+const importanceColors: Record<number, string> = {
+  1: '#94a3b8', 2: '#6366f1', 3: '#f59e0b', 4: '#ef4444', 5: '#8b5cf6'
+}
+
+const importanceLabels: Record<number, string> = {
+  1: 'Low', 2: 'Medium', 3: 'Important', 4: 'Very important', 5: 'Critical'
+}
+
+const tagPalette = [
+  '#0ea5e9', '#10b981', '#f97316', '#ec4899', '#84cc16',
+  '#14b8a6', '#a855f7', '#f43f5e', '#eab308', '#3b82f6',
+]
+
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+type Period = 'all' | 'year' | 'decade'
 
 export function GraphView({ onSelectEntry }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -13,7 +31,10 @@ export function GraphView({ onSelectEntry }: Props) {
   const [loading, setLoading] = useState(true)
   const [visLoaded, setVisLoaded] = useState(false)
   const [entries, setEntries] = useState<TimelineEntry[]>([])
-  const [timeFilter, setTimeFilter] = useState<'all' | 'year' | 'decade'>('all')
+  const [tagFilter, setTagFilter] = useState('')
+  const [minImportance, setMinImportance] = useState(0)
+  const [period, setPeriod] = useState<Period>('all')
+  const [physics, setPhysics] = useState(true)
 
   useEffect(() => {
     import('vis-network/standalone').then(() => setVisLoaded(true))
@@ -35,8 +56,46 @@ export function GraphView({ onSelectEntry }: Props) {
     load()
   }, [])
 
+  const allTags = useMemo(() => {
+    if (!graphData) return []
+    const set = new Set<string>()
+    graphData.nodes.forEach(n => n.tags.split(',').map(t => t.trim()).filter(Boolean).forEach(t => set.add(t)))
+    return [...set].sort()
+  }, [graphData])
+
+  const tagColors = useMemo(() => {
+    const map: Record<string, string> = {}
+    allTags.forEach((t, i) => { map[t] = tagPalette[i % tagPalette.length] })
+    return map
+  }, [allTags])
+
+  const visible = useMemo(() => {
+    if (!graphData) return { nodes: [], edges: [] }
+    let maxDate = 0
+    graphData.nodes.forEach(n => {
+      const t = n.entry_date ? Date.parse(n.entry_date) : NaN
+      if (!isNaN(t) && t > maxDate) maxDate = t
+    })
+    const cutoff =
+      period === 'year' ? maxDate - 365 * 86400000
+      : period === 'decade' ? maxDate - 3650 * 86400000
+      : 0
+    const nodes = graphData.nodes.filter(n => {
+      if (tagFilter && !n.tags.split(',').map(t => t.trim()).includes(tagFilter)) return false
+      if (minImportance > 0 && n.value < minImportance) return false
+      if (cutoff > 0) {
+        const t = n.entry_date ? Date.parse(n.entry_date) : NaN
+        if (isNaN(t) || t < cutoff) return false
+      }
+      return true
+    })
+    const nodeIds = new Set(nodes.map(n => n.id))
+    const edges = graphData.edges.filter(e => nodeIds.has(e.from) && nodeIds.has(e.to))
+    return { nodes, edges }
+  }, [graphData, tagFilter, minImportance, period])
+
   useEffect(() => {
-    if (!graphData) return
+    if (!graphData || !visLoaded) return
     let isMounted = true
 
     const initNetwork = async () => {
@@ -49,22 +108,37 @@ export function GraphView({ onSelectEntry }: Props) {
         networkRef.current = null
       }
 
-      const nodes = new vis.DataSet(graphData.nodes)
-      const edges = new vis.DataSet(graphData.edges)
+      const nodes = new vis.DataSet(visible.nodes.map(n => {
+        const firstTag = n.tags.split(',')[0]?.trim()
+        const date = n.entry_date ? `<br/><b>${escapeHtml(n.entry_date)}</b>` : ''
+        return {
+          ...n,
+          color: firstTag ? tagColors[firstTag] || n.color : n.color,
+          title: `<b>${escapeHtml(n.title)}</b>${date}<br/>${escapeHtml((n.content_preview || '').slice(0, 200))}`,
+          borderWidth: 1,
+        }
+      }))
+      const edges = new vis.DataSet(visible.edges.map(e => ({
+        ...e,
+        title: e.label ? `<b>${escapeHtml(e.label)}</b>` : undefined,
+        font: { size: 10, align: 'middle', color: '#94a3b8' },
+      })))
 
       const options = {
         nodes: {
           shape: 'dot',
           scaling: { min: 10, max: 30, label: { min: 8, max: 20, drawThreshold: 12 } },
           font: { size: 12, face: 'Inter, sans-serif' },
+          shadow: true,
         },
         edges: {
           width: 1,
-          smooth: { type: 'continuous' },
-          font: { size: 10, align: 'middle' },
+          smooth: { enabled: true, type: 'continuous', roundness: 0.5 },
+          arrows: { to: { enabled: true, scaleFactor: 0.6 } },
         },
         physics: {
-          stabilization: { iterations: 50 },
+          enabled: physics,
+          stabilization: { iterations: physics ? 50 : 0 },
           solver: 'forceAtlas2Based',
           forceAtlas2Based: {
             gravitationalConstant: -40,
@@ -73,11 +147,10 @@ export function GraphView({ onSelectEntry }: Props) {
             springConstant: 0.02,
           },
         },
-        interaction: { hover: true, tooltipDelay: 200, zoomView: true, dragView: true },
+        interaction: { hover: true, tooltipDelay: 150, zoomView: true, dragView: true },
         layout: { improvedLayout: true },
       }
 
-      // Explicit null check for containerRef.current resolves TS compiler error
       const containerElement = containerRef.current
       if (containerElement) {
         const net = new Network(containerElement, { nodes, edges }, options)
@@ -102,7 +175,7 @@ export function GraphView({ onSelectEntry }: Props) {
         networkRef.current = null
       }
     }
-  }, [graphData, visLoaded, entries, onSelectEntry])
+  }, [graphData, visLoaded, entries, onSelectEntry, visible, tagColors, physics])
 
   if (loading) return <div className="text-center py-8 text-gray-500">Loading graph...</div>
 
@@ -121,16 +194,57 @@ export function GraphView({ onSelectEntry }: Props) {
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-xl font-bold">Knowledge Graph</h2>
-          <p className="text-sm text-gray-500">{graphData.nodes.length} nodes · {graphData.edges.length} edges</p>
+          <p className="text-sm text-gray-500">{visible.nodes.length} of {graphData.nodes.length} nodes · {visible.edges.length} edges</p>
         </div>
-        <button onClick={() => {
-          if (networkRef.current) {
-            networkRef.current.fit({ animation: true })
-          }
-        }} className="btn-secondary">Reset View</button>
+        <div className="flex gap-2">
+          <button onClick={() => {
+            if (networkRef.current) networkRef.current.fit({ animation: true })
+          }} className="btn-secondary">⛶ Fit</button>
+          <button onClick={() => setPhysics(!physics)} className={`btn-ghost text-sm ${physics ? 'text-chrono-600' : ''}`}>
+            {physics ? '⚛️ Physics on' : '⚛️ Physics off'}
+          </button>
+        </div>
       </div>
 
-      <div className="card" style={{ height: '70vh' }} ref={containerRef} />
+      {/* Filters */}
+      <div className="flex flex-wrap gap-3 mb-3">
+        <select value={tagFilter} onChange={e => setTagFilter(e.target.value)} className="input w-auto text-sm">
+          <option value="">All tags</option>
+          {allTags.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <select value={minImportance} onChange={e => setMinImportance(Number(e.target.value))} className="input w-auto text-sm">
+          <option value={0}>Any importance</option>
+          <option value={3}>3★ and up</option>
+          <option value={4}>4★ and up</option>
+          <option value={5}>5★ only</option>
+        </select>
+        <select value={period} onChange={e => setPeriod(e.target.value as Period)} className="input w-auto text-sm">
+          <option value="all">All time</option>
+          <option value="year">Last year</option>
+          <option value="decade">Last decade</option>
+        </select>
+        {(tagFilter || minImportance > 0 || period !== 'all') && (
+          <button onClick={() => { setTagFilter(''); setMinImportance(0); setPeriod('all') }} className="btn-ghost text-sm">Clear</button>
+        )}
+      </div>
+
+      {/* Legend */}
+      <div className="flex flex-wrap gap-3 mb-2 px-1 text-xs text-gray-500">
+        {[1, 2, 3, 4, 5].map(n => (
+          <span key={n} className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded-full inline-block" style={{ background: importanceColors[n] }} />
+            {importanceLabels[n]}
+          </span>
+        ))}
+        {tagFilter && allTags.includes(tagFilter) && (
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded-full inline-block" style={{ background: tagColors[tagFilter] }} />
+            tag: {tagFilter}
+          </span>
+        )}
+      </div>
+
+      <div className="card" style={{ height: '68vh' }} ref={containerRef} />
     </div>
   )
 }

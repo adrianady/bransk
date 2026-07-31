@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
 import type { SpacedRepetitionItem } from '../lib/types'
 
@@ -35,13 +37,19 @@ export function ReviewPanel() {
 
   // Load entry titles for display
   const [entryTitles, setEntryTitles] = useState<Record<number, string>>({})
+  const [entryContents, setEntryContents] = useState<Record<number, string>>({})
 
   useEffect(() => {
     if (queue.length > 0) {
-      api.entries.list().then(allEntries => {
-        const map: Record<number, string> = {}
-        allEntries.forEach(e => { map[e.id] = e.title })
-        setEntryTitles(map)
+      api.entries.list({ limit: 500 }).then(allEntries => {
+        const titleMap: Record<number, string> = {}
+        const contentMap: Record<number, string> = {}
+        allEntries.forEach(e => {
+          titleMap[e.id] = e.title
+          if (e.content) contentMap[e.id] = e.content
+        })
+        setEntryTitles(titleMap)
+        setEntryContents(contentMap)
       })
     }
   }, [queue])
@@ -93,7 +101,13 @@ export function ReviewPanel() {
         ) : (
           <div>
             <div className="mb-6 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
-              <p className="text-sm text-gray-500">How well did you remember?</p>
+              {entryContents[current.entry_id] ? (
+                <div className="prose prose-sm dark:prose-invert max-w-none">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{entryContents[current.entry_id]}</ReactMarkdown>
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500 italic">This entry has no content — rate your recall of the title above.</p>
+              )}
             </div>
             <div className="space-y-2">
               <p className="text-sm font-medium text-gray-500 mb-2">Rate your recall:</p>
