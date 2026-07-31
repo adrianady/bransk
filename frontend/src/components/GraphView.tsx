@@ -127,34 +127,45 @@ export function GraphView({ onSelectEntry }: Props) {
       const options = {
         nodes: {
           shape: 'dot',
-          scaling: { min: 10, max: 30, label: { min: 8, max: 20, drawThreshold: 12 } },
-          font: { size: 12, face: 'Inter, sans-serif' },
+          scaling: { min: 12, max: 32, label: { min: 10, max: 22, drawThreshold: 14 } },
+          font: { size: 13, face: 'Inter, sans-serif' },
           shadow: true,
+          labelHighlightBold: true,
         },
         edges: {
-          width: 1,
+          width: 1.2,
           smooth: { enabled: true, type: 'continuous', roundness: 0.5 },
           arrows: { to: { enabled: true, scaleFactor: 0.6 } },
         },
         physics: {
           enabled: physics,
-          stabilization: { iterations: physics ? 50 : 0 },
+          stabilization: { iterations: physics ? 200 : 0, updateInterval: 25 },
           solver: 'forceAtlas2Based',
           forceAtlas2Based: {
-            gravitationalConstant: -40,
-            centralGravity: 0.005,
-            springLength: 150,
-            springConstant: 0.02,
+            gravitationalConstant: -70,
+            centralGravity: 0.004,
+            springLength: 220,
+            springConstant: 0.05,
+            damping: 0.4,
           },
         },
         interaction: { hover: true, tooltipDelay: 150, zoomView: true, dragView: true },
-        layout: { improvedLayout: true },
+        layout: { improvedLayout: true, randomSeed: 42 },
       }
 
       const containerElement = containerRef.current
       if (containerElement) {
         const net = new Network(containerElement, { nodes, edges }, options)
         networkRef.current = net
+
+        // Fit the viewport once physics settles so no node is clipped at the
+        // edges and the layout fills the container instead of leaving dead space.
+        net.once('stabilizationIterationsDone', () => {
+          if (networkRef.current) networkRef.current.fit({ animation: false })
+        })
+        setTimeout(() => {
+          if (networkRef.current) networkRef.current.fit({ animation: false })
+        }, 350)
 
         net.on('click', (props: { nodes: number[] }) => {
           if (props.nodes.length > 0) {
