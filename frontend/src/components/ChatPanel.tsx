@@ -15,6 +15,12 @@ interface Message {
   model?: string
 }
 
+const friendlyError = (err: any): string => {
+  const raw = err?.detail ?? err?.message ?? err
+  if (typeof raw === 'string') return raw
+  try { return JSON.stringify(raw) } catch { return String(raw) }
+}
+
 export function ChatPanel({ onClose }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -65,7 +71,7 @@ export function ChatPanel({ onClose }: Props) {
       const response = await api.chat.stream(input.trim(), history)
       if (!response.ok) {
         const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }))
-        throw new Error(err.detail || err.message || `HTTP ${response.status}`)
+        throw new Error(friendlyError(err) || `HTTP ${response.status}`)
       }
       if (!response.body) throw new Error('No response body')
 
@@ -117,6 +123,8 @@ export function ChatPanel({ onClose }: Props) {
                 setMessages(prev => [...prev, { role: 'assistant', content: researchMsg }])
               } else if (parsed.type === 'tool') {
                 setMessages(prev => [...prev, { role: 'assistant', content: `🛠️ ${parsed.message || 'Tools used'}` }])
+              } else if (parsed.type === 'error') {
+                setMessages(prev => [...prev, { role: 'assistant', content: `⚠️ **Error:** ${friendlyError(parsed.content) || 'Something went wrong.'}` }])
               } else if (parsed.type === 'actions') {
                 actions = parsed.content || []
               }
@@ -156,6 +164,14 @@ export function ChatPanel({ onClose }: Props) {
                 : 'No relationships yet.'
             )
           }
+          else if (action.type === 'theories_listed') {
+            const results = action.results || []
+            actionMsg = `🧬 **Theories${action.query ? ` matching "${action.query}"` : ''} (${results.length}):**\n` + (
+              results.length
+                ? results.map((r: any) => `- #${r.id} **${r.name}** [${r.status}] — pro ${r.pro_count} / contra ${r.contra_count}`).join('\n')
+                : 'None found.'
+            )
+          }
           else if (action.type === 'entry_appended') actionMsg = `✏️ **Entry #${action.entry_id} updated** (content appended)`
           else if (action.type === 'entry_archived') actionMsg = `🗄️ **Entry #${action.entry_id} archived**`
           else if (action.type === 'thought_created') actionMsg = `💭 **Thought created:** "${action.name}"`
@@ -192,7 +208,7 @@ export function ChatPanel({ onClose }: Props) {
         }
       }
     } catch (err: any) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `⚠️ **Error:** ${err.message || 'Something went wrong.'}` }])
+      setMessages(prev => [...prev, { role: 'assistant', content: `⚠️ **Error:** ${friendlyError(err) || 'Something went wrong.'}` }])
     } finally {
       setLoading(false)
       setStreamingContent('')

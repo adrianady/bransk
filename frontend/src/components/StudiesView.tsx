@@ -17,6 +17,7 @@ const typeColors: Record<string, string> = {
 
 export function StudiesView({ onSelectEntry }: Props) {
   const [studies, setStudies] = useState<Entry[]>([])
+  const [theoryLinks, setTheoryLinks] = useState<Record<number, { theory_name: string; stance: string }[]>>({})
   const [loading, setLoading] = useState(true)
   const [filterType, setFilterType] = useState('')
   const [filterQuality, setFilterQuality] = useState(0)
@@ -24,8 +25,14 @@ export function StudiesView({ onSelectEntry }: Props) {
   const load = async () => {
     setLoading(true)
     try {
-      const items = await api.studies.list()
+      const [items, evidence] = await Promise.all([api.studies.list(), api.theories.allEvidence()])
       setStudies(items)
+      const map: Record<number, { theory_name: string; stance: string }[]> = {}
+      evidence.forEach(e => {
+        if (!map[e.entry_id]) map[e.entry_id] = []
+        map[e.entry_id].push({ theory_name: e.theory_name, stance: e.stance })
+      })
+      setTheoryLinks(map)
     } finally {
       setLoading(false)
     }
@@ -127,6 +134,16 @@ export function StudiesView({ onSelectEntry }: Props) {
                 <div className="flex gap-1 mt-2 flex-wrap">
                   {study.tags.split(',').map(t => t.trim()).filter(t => t && t !== 'study').slice(0, 4).map(t => (
                     <span key={t} className="badge bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">{t}</span>
+                  ))}
+                </div>
+              )}
+              {theoryLinks[study.id] && theoryLinks[study.id].length > 0 && (
+                <div className="flex gap-1 mt-2 flex-wrap">
+                  {theoryLinks[study.id].map((t, i) => (
+                    <span key={i} title={`Evidence for this theory in the aggregator`}
+                      className={`badge text-xs ${t.stance === 'pro' ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'}`}>
+                      🧬 {t.theory_name} ({t.stance})
+                    </span>
                   ))}
                 </div>
               )}

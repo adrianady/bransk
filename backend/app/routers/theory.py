@@ -142,6 +142,24 @@ def list_evidence(theory_id: int):
         conn.close()
 
 
+@router.get("/theories/evidence", response_model=list[dict])
+def list_all_evidence():
+    """All theory evidence with theory names, for study <-> theory cross-referencing."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT te.id, te.theory_id, t.name AS theory_name, te.entry_id, e.title AS entry_title,
+                      te.stance, te.note, te.weight, te.created_at
+               FROM theory_evidence te
+               JOIN theories t ON t.id = te.theory_id
+               JOIN entries e ON e.id = te.entry_id
+               ORDER BY t.name, e.title"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 @router.post("/theories/{theory_id}/evidence", response_model=TheoryEvidence, status_code=201)
 def add_evidence(theory_id: int, data: TheoryEvidenceIn):
     conn = get_db()

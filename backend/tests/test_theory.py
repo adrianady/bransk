@@ -39,3 +39,12 @@ def test_delete_theory_cascades_evidence_and_frees_children():
         assert client.get(f"/api/theories/{root['id']}/evidence").status_code == 404
         tree = client.get("/api/theories/tree").json()
         assert any(t["id"] == child["id"] and t["parent_id"] is None for t in tree)
+
+
+def test_all_evidence_endpoint_cross_references_theory_and_study():
+    with TestClient(app) as client:
+        theory = client.post("/api/theories", json={"name": "Cross ref"}).json()
+        entry = client.post("/api/entries", json={"title": "Study X", "content": "c"}).json()
+        client.post(f"/api/theories/{theory['id']}/evidence", json={"entry_id": entry["id"], "stance": "pro"})
+        all_ev = client.get("/api/theories/evidence").json()
+        assert any(e["theory_id"] == theory["id"] and e["entry_id"] == entry["id"] and e["theory_name"] == "Cross ref" for e in all_ev)

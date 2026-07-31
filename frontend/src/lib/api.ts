@@ -195,6 +195,7 @@ export const api = {
   theories: {
     list: () => request<Theory[]>('/theories'),
     tree: () => request<TheoryNode[]>('/theories/tree'),
+    allEvidence: () => request<{ id: number; theory_id: number; theory_name: string; entry_id: number; entry_title: string; stance: 'pro' | 'contra'; note: string; weight: number; created_at: string }[]>('/theories/evidence'),
     create: (data: { name: string; description?: string; parent_id?: number | null; status?: TheoryStatus }) =>
       request<Theory>('/theories', { method: 'POST', body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{ name: string; description: string; parent_id: number | null; status: TheoryStatus }>) =>

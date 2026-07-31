@@ -42,6 +42,32 @@ def test_link_study_missing_target_returns_error_action():
     assert any(a["type"] == "error" for a in acts)
 
 
+def test_malformed_actions_never_crash_parser():
+    """Regression: a bad numeric id used to raise ValueError and kill the whole reply."""
+    # Must not raise, even for garbage inside action tags.
+    acts = _parse(
+        "[ADD_TODO: notanumber | important | 2026-08-01]\n"
+        "[SPACED_REPETITION: xyz]\n"
+        "[CREATE_RELATIONSHIP: a | b | label]\n"
+        "[ADD_REMINDER: abc | title | 2026-08-01T09:00 | once]\n"
+        "[FETCH_ENTRY: oops]\n"
+        "[LINK_STUDY: x | y | pro | note]"
+    )
+    errors = [a for a in acts if a["type"] == "error"]
+    # The permissive ADD_TODO pattern is the crash vector; it must degrade to an error.
+    # Strictly-numeric patterns simply don't match and are safely ignored.
+    assert len(errors) >= 1
+    assert any("ADD_TODO" in e.get("detail", "") for e in errors)
+
+
+def test_list_theories_read_tool():
+    with TestClient(app) as client:
+        client.post("/api/theories", json={"name": "Consolidation theory"})
+        acts = _parse("[LIST_THEORIES: consolidation]")
+        listed = next(a for a in acts if a["type"] == "theories_listed")
+        assert any(r["name"] == "Consolidation theory" for r in listed["results"])
+
+
 def test_chat_stream_works_offline_with_mock():
     with TestClient(app) as client:
         resp = client.post("/api/chat/stream", json={"message": "Hello", "history": []})

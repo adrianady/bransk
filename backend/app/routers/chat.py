@@ -4,6 +4,7 @@ ChronoKG Chat — auto-failover provider, expanded actions, chat persistence, he
 import json
 import logging
 import re
+from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 import anyio
@@ -60,7 +61,7 @@ async def chat_health():
 
 # ── Chat endpoints ──
 
-_READ_ACTION_TYPES = {"search_results", "timeline_results", "entry_fetched", "entries_listed", "relationships_listed", "web_results"}
+_READ_ACTION_TYPES = {"search_results", "timeline_results", "entry_fetched", "entries_listed", "relationships_listed", "theories_listed", "web_results"}
 
 
 @router.post("/chat", response_model=dict)
@@ -272,6 +273,9 @@ def _tool_results_text(read_actions: list) -> str:
         elif a["type"] == "relationships_listed":
             for r in a.get("results", []):
                 lines.append(f"- relationship {r.get('id')}: {r.get('from_id')} --{r.get('label') or 'related_to'}--> {r.get('to_id')}")
+        elif a["type"] == "theories_listed":
+            for r in a.get("results", []):
+                lines.append(f"- theory #{r.get('id')}: {r.get('name')} [{r.get('status')}] pro {r.get('pro_count')} / contra {r.get('contra_count')} parent={r.get('parent_id')}")
         elif a["type"] == "web_results":
             for r in a.get("results", []):
                 lines.append(f"- {r.get('title')} | {r.get('url')} | {(r.get('snippet') or '')[:300]}")
@@ -365,8 +369,23 @@ def _build_context(message: str) -> list[dict]:
 # ── Action parsing ──
 
 def _parse_actions(reply: str) -> list[dict]:
+    """Parse AI actions. Malformed input degrades to error actions, never crashes."""
+    try:
+        return _parse_actions_inner(reply)
+    except Exception as exc:
+        logger.warning("Action parsing failed: %s", exc)
+        return [{"type": "error", "detail": f"Could not parse AI actions: {type(exc).__name__}"}]
+
+
+def _parse_actions_inner(reply: str) -> list[dict]:
     """Parse and execute structured actions from AI reply."""
     actions = []
+
+    def to_int(value) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     # CREATE_ENTRY
     for m in re.finditer(r'\[CREATE_ENTRY:\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(\d+)\]', reply, re.DOTALL):
@@ -396,7 +415,11 @@ def _parse_actions(reply: str) -> list[dict]:
 
     # CREATE_RELATIONSHIP
     for m in re.finditer(r'\[CREATE_RELATIONSHIP:\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(.*?)\]', reply, re.DOTALL):
-        from_id, to_id, label = int(m.group(1)), int(m.group(2)), m.group(3).strip()
+        from_id, to_id = to_int(m.group(1)), to_int(m.group(2))
+        label = m.group(3).strip()
+        if from_id is None or to_id is None or from_id == to_id:
+            actions.append({"type": "error", "detail": "CREATE_RELATIONSHIP needs two different numeric entry ids"})
+            continue
         conn = get_db()
         try:
             conn.execute("INSERT OR IGNORE INTO relationships (from_id, to_id, label) VALUES (?, ?, ?)", [from_id, to_id, label])
@@ -417,18 +440,25 @@ def _parse_actions(reply: str) -> list[dict]:
 
     # ADD_TODO
     for m in re.finditer(r'\[ADD_TODO:\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\]', reply, re.DOTALL):
-        entry_id_str, priority, due = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+        entry_id = to_int(m.group(1).strip())
+        priority, due = m.group(2).strip(), m.group(3).strip()
+        if entry_id is None:
+            actions.append({"type": "error", "detail": "ADD_TODO needs a numeric entry id"})
+            continue
         conn = get_db()
         try:
-            conn.execute("INSERT OR IGNORE INTO todos (entry_id, priority, due_date) VALUES (?, ?, ?)", [int(entry_id_str), priority, due or None])
+            conn.execute("INSERT OR IGNORE INTO todos (entry_id, priority, due_date) VALUES (?, ?, ?)", [entry_id, priority, due or None])
             conn.commit()
-            actions.append({"type": "todo_added", "entry_id": int(entry_id_str), "priority": priority})
+            actions.append({"type": "todo_added", "entry_id": entry_id, "priority": priority})
         finally:
             conn.close()
 
     # SPACED_REPETITION
     for m in re.finditer(r'\[SPACED_REPETITION:\s*(\d+)\]', reply):
-        eid = int(m.group(1))
+        eid = to_int(m.group(1))
+        if eid is None:
+            actions.append({"type": "error", "detail": "SPACED_REPETITION needs a numeric entry id"})
+            continue
         conn = get_db()
         try:
             conn.execute("INSERT OR IGNORE INTO spaced_repetition (entry_id) VALUES (?)", [eid])
@@ -443,7 +473,10 @@ def _parse_actions(reply: str) -> list[dict]:
 
     # FETCH_ENTRY — read a full entry
     for m in re.finditer(r'\[FETCH_ENTRY:\s*(\d+)\]', reply):
-        eid = int(m.group(1))
+        eid = to_int(m.group(1))
+        if eid is None:
+            actions.append({"type": "error", "detail": "FETCH_ENTRY needs a numeric entry id"})
+            continue
         conn = get_db()
         try:
             row = conn.execute(
@@ -474,7 +507,10 @@ def _parse_actions(reply: str) -> list[dict]:
 
     # LIST_RELATIONSHIPS — read an entry's graph links
     for m in re.finditer(r'\[LIST_RELATIONSHIPS:\s*(\d+)\]', reply):
-        eid = int(m.group(1))
+        eid = to_int(m.group(1))
+        if eid is None:
+            actions.append({"type": "error", "detail": "LIST_RELATIONSHIPS needs a numeric entry id"})
+            continue
         conn = get_db()
         try:
             rows = conn.execute(
@@ -487,7 +523,11 @@ def _parse_actions(reply: str) -> list[dict]:
 
     # APPEND_ENTRY — extend an existing entry's content
     for m in re.finditer(r'\[APPEND_ENTRY:\s*(\d+)\s*\|\s*(.*?)\]', reply, re.DOTALL):
-        eid, text = int(m.group(1)), m.group(2).strip()
+        eid = to_int(m.group(1))
+        text = m.group(2).strip()
+        if eid is None:
+            actions.append({"type": "error", "detail": "APPEND_ENTRY needs a numeric entry id"})
+            continue
         conn = get_db()
         try:
             row = conn.execute("SELECT content FROM entries WHERE id = ?", [eid]).fetchone()
@@ -506,7 +546,10 @@ def _parse_actions(reply: str) -> list[dict]:
 
     # ARCHIVE_ENTRY — soft-delete
     for m in re.finditer(r'\[ARCHIVE_ENTRY:\s*(\d+)\]', reply):
-        eid = int(m.group(1))
+        eid = to_int(m.group(1))
+        if eid is None:
+            actions.append({"type": "error", "detail": "ARCHIVE_ENTRY needs a numeric entry id"})
+            continue
         conn = get_db()
         try:
             conn.execute("UPDATE entries SET archived = 1, updated_at = datetime('now') WHERE id = ?", [eid])
@@ -544,7 +587,11 @@ def _parse_actions(reply: str) -> list[dict]:
 
     # ADD_REMINDER
     for m in re.finditer(r'\[ADD_REMINDER:\s*(\d+)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\]', reply, re.DOTALL):
-        eid, title, trigger, rtype = int(m.group(1)), m.group(2).strip(), m.group(3).strip(), m.group(4).strip() or "once"
+        eid = to_int(m.group(1))
+        title, trigger, rtype = m.group(2).strip(), m.group(3).strip(), m.group(4).strip() or "once"
+        if eid is None:
+            actions.append({"type": "error", "detail": "ADD_REMINDER needs a numeric entry id"})
+            continue
         conn = get_db()
         try:
             cur = conn.execute(
@@ -561,7 +608,7 @@ def _parse_actions(reply: str) -> list[dict]:
         name, desc, parent_id, status = m.group(1).strip(), m.group(2).strip(), m.group(3).strip(), m.group(4).strip() or "emerging"
         conn = get_db()
         try:
-            pid = int(parent_id) if parent_id else None
+            pid = to_int(parent_id) if parent_id else None
             cur = conn.execute(
                 "INSERT INTO theories (name, description, parent_id, status) VALUES (?, ?, ?, ?)",
                 [name[:300], desc[:2000], pid, status],
@@ -575,7 +622,11 @@ def _parse_actions(reply: str) -> list[dict]:
 
     # LINK_STUDY — attach pro/contra evidence to a theory
     for m in re.finditer(r'\[LINK_STUDY:\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(pro|contra)\s*\|\s*(.*?)\]', reply, re.DOTALL):
-        theory_id, entry_id, stance, note = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4).strip()
+        theory_id, entry_id = to_int(m.group(1)), to_int(m.group(2))
+        stance, note = m.group(3), m.group(4).strip()
+        if theory_id is None or entry_id is None:
+            actions.append({"type": "error", "detail": "LINK_STUDY needs numeric theory and entry ids"})
+            continue
         conn = get_db()
         try:
             theory = conn.execute("SELECT id FROM theories WHERE id = ?", [theory_id]).fetchone()
@@ -591,6 +642,30 @@ def _parse_actions(reply: str) -> list[dict]:
                 actions.append({"type": "study_linked", "theory_id": theory_id, "entry_id": entry_id, "stance": stance})
         except Exception as exc:
             actions.append({"type": "error", "detail": f"LINK_STUDY failed: {exc}"})
+        finally:
+            conn.close()
+
+    # LIST_THEORIES — read the theory tree (for linking studies by name)
+    for m in re.finditer(r'\[LIST_THEORIES:\s*([^\|\]]*)\]', reply):
+        q = m.group(1).strip()
+        conn = get_db()
+        try:
+            if q:
+                rows = conn.execute(
+                    """SELECT t.id, t.name, t.status, t.parent_id,
+                              (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro') AS pro_count,
+                              (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra') AS contra_count
+                       FROM theories t WHERE t.name LIKE ? ORDER BY t.name LIMIT 25""",
+                    [f"%{q}%"],
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT t.id, t.name, t.status, t.parent_id,
+                              (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro') AS pro_count,
+                              (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra') AS contra_count
+                       FROM theories t ORDER BY t.name LIMIT 50"""
+                ).fetchall()
+            actions.append({"type": "theories_listed", "query": q, "results": [dict(r) for r in rows]})
         finally:
             conn.close()
 
@@ -664,6 +739,7 @@ Provider: {provider} / Model: {model}
 10. **Books and studies** — When the user mentions a book or study, offer to save it with tags like "book","study","research"
 
 11. **Theory Aggregator** — Build or extend the theory tree (a theory can derive into sub-theories) and attach evidence:
+[LIST_THEORIES: search_or_empty]
 [CREATE_THEORY: name | description | parent_id | supported|contested|refuted|emerging]
 [LINK_STUDY: theory_id | entry_id | pro|contra | note]
 """
