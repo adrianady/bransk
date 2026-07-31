@@ -38,3 +38,16 @@ def test_research_dedupe_on_rerun():
         assert study_count_after_second == study_count_after_first  # no duplicate studies
         assert len(second["entries_created"]) == 1  # only the new report entry
         assert len(second["studies"]) == len(first["studies"])
+
+
+def test_study_pdf_endpoints_and_pdf_path_field():
+    with TestClient(app) as client:
+        study = client.post(
+            "/api/entries",
+            json={"title": "PDF study", "content": "**PDF:** https://example.com/paper.pdf", "study_type": "paper"},
+        ).json()
+        assert "pdf_path" in study and study["pdf_path"] == ""
+        # Not downloaded yet -> 404
+        assert client.get(f"/api/studies/{study['id']}/pdf").status_code == 404
+        # Download attempts the URL; offline sandbox -> graceful 502
+        assert client.post(f"/api/studies/{study['id']}/download").status_code == 502

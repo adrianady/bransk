@@ -20,6 +20,7 @@ class EntryCreate(BaseModel):
     url_validated: bool = False
     design: str = ""
     effect_direction: str = ""
+    pdf_path: str = ""
 
 
 class EntryUpdate(BaseModel):
@@ -36,6 +37,7 @@ class EntryUpdate(BaseModel):
     url_validated: Optional[bool] = None
     design: Optional[str] = None
     effect_direction: Optional[str] = None
+    pdf_path: Optional[str] = None
 
 
 class EntryResponse(BaseModel):
@@ -55,6 +57,7 @@ class EntryResponse(BaseModel):
     url_validated: bool = False
     design: str = ""
     effect_direction: str = ""
+    pdf_path: str = ""
 
 
 # ── Relationship models ──

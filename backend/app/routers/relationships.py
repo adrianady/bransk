@@ -43,7 +43,7 @@ def get_graph_data():
             colors = {1: "#94a3b8", 2: "#6366f1", 3: "#f59e0b", 4: "#ef4444", 5: "#8b5cf6"}
             nodes.append({
                 "id": d["id"],
-                "label": d["title"][:50],
+                "label": (d["title"][:48] + "…") if len(d["title"]) > 48 else d["title"],
                 "title": d["title"],
                 "value": d["importance"],
                 "color": colors.get(d["importance"], "#6366f1"),

@@ -189,6 +189,8 @@ export const api = {
   // Studies (entries with study_type set)
   studies: {
     list: () => request<Entry[]>('/studies'),
+    download: (id: number) => request<{ pdf_path: string }>(`/studies/${id}/download`, { method: 'POST' }),
+    pdfUrl: (id: number) => `${BASE}/studies/${id}/pdf`,
   },
 
   // Theory Aggregator

@@ -88,8 +88,9 @@ export function StudiesView({ onSelectEntry }: Props) {
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map(study => (
-            <button key={study.id} onClick={() => onSelectEntry(study)}
-              className="card text-left hover:border-chrono-300 dark:hover:border-chrono-700 transition-colors flex flex-col"
+            <div key={study.id} onClick={() => onSelectEntry(study)} role="button" tabIndex={0}
+              onKeyDown={e => { if (e.key === 'Enter') onSelectEntry(study) }}
+              className="card text-left cursor-pointer hover:border-chrono-300 dark:hover:border-chrono-700 transition-colors flex flex-col"
             >
               <div className="flex items-start justify-between gap-2 mb-1.5">
                 <h3 className="font-semibold leading-snug">{study.title}</h3>
@@ -127,6 +128,28 @@ export function StudiesView({ onSelectEntry }: Props) {
                   </span>
                 </p>
               )}
+              <div className="flex items-center gap-2 mb-2">
+                {study.pdf_path ? (
+                  <a href={api.studies.pdfUrl(study.id)} target="_blank" rel="noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className="btn-secondary text-xs px-2 py-1 inline-flex items-center gap-1">
+                    📄 Open PDF
+                  </a>
+                ) : (study.source || study.content.includes('**PDF:**')) ? (
+                  <button
+                    onClick={async e => {
+                      e.stopPropagation()
+                      try {
+                        await api.studies.download(study.id)
+                        window.open(api.studies.pdfUrl(study.id), '_blank')
+                      } catch {
+                        alert('PDF download failed — check the study URL.')
+                      }
+                    }}
+                    className="btn-ghost text-xs px-2 py-1"
+                  >⬇️ Download PDF</button>
+                ) : null}
+              </div>
               <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-3 flex-1">
                 {study.content.replace(/[#*`\[\]()]/g, '').slice(0, 300)}
               </p>
@@ -147,7 +170,7 @@ export function StudiesView({ onSelectEntry }: Props) {
                   ))}
                 </div>
               )}
-            </button>
+            </div>
           ))}
         </div>
       )}

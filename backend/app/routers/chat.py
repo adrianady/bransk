@@ -11,8 +11,9 @@ import anyio
 from app.db import get_db
 from app.llm import LLM_PROVIDER, check_deepseek, complete as llm_complete, ping_ollama, stream_complete
 from app.models import ChatRequest
-from app.routers.research import run_research
+from app.routers.research import _set_pdf_path, run_research
 from app.routers.search import _sanitize_fts5
+from app.studies_store import download_study_pdf, extract_pdf_url
 from app.web_search import search_web
 
 logger = logging.getLogger("chronokg.chat")
@@ -81,6 +82,24 @@ async def chat(data: ChatRequest):
         for wr in [a for a in actions if a["type"] == "web_search_request"]:
             results = await search_web(wr["query"], max_results=5)
             actions.append({"type": "web_results", "query": wr["query"], "results": results})
+        # Download study PDFs requested by the model
+        for dr in [a for a in actions if a["type"] == "download_study_request"]:
+            entry_id = dr["entry_id"]
+            conn = get_db()
+            try:
+                row = conn.execute("SELECT * FROM entries WHERE id = ? AND study_type != ''", [entry_id]).fetchone()
+            finally:
+                conn.close()
+            if not row:
+                actions.append({"type": "error", "detail": f"DOWNLOAD_STUDY failed: study #{entry_id} not found"})
+                continue
+            entry = dict(row)
+            fname = await download_study_pdf(entry_id, extract_pdf_url(entry), entry["title"])
+            if fname:
+                _set_pdf_path(entry_id, fname)
+                actions.append({"type": "study_pdf_downloaded", "entry_id": entry_id, "pdf_path": fname})
+            else:
+                actions.append({"type": "error", "detail": f"Could not download PDF for study #{entry_id}"})
         # Agent read-loop: feed tool results back so the model can answer from them
         read_actions = [a for a in actions if a["type"] in _READ_ACTION_TYPES and (a.get("entry") or a.get("results"))]
         if read_actions:
@@ -131,6 +150,25 @@ async def chat_stream(data: ChatRequest):
             for wr in [a for a in actions if a["type"] == "web_search_request"]:
                 results = await search_web(wr["query"], max_results=5)
                 actions.append({"type": "web_results", "query": wr["query"], "results": results})
+
+            # Download study PDFs requested by the model
+            for dr in [a for a in actions if a["type"] == "download_study_request"]:
+                entry_id = dr["entry_id"]
+                conn = get_db()
+                try:
+                    row = conn.execute("SELECT * FROM entries WHERE id = ? AND study_type != ''", [entry_id]).fetchone()
+                finally:
+                    conn.close()
+                if not row:
+                    actions.append({"type": "error", "detail": f"DOWNLOAD_STUDY failed: study #{entry_id} not found"})
+                    continue
+                entry = dict(row)
+                fname = await download_study_pdf(entry_id, extract_pdf_url(entry), entry["title"])
+                if fname:
+                    _set_pdf_path(entry_id, fname)
+                    actions.append({"type": "study_pdf_downloaded", "entry_id": entry_id, "pdf_path": fname})
+                else:
+                    actions.append({"type": "error", "detail": f"Could not download PDF for study #{entry_id}"})
 
             # Agent read-loop: feed tool results back and stream the grounded answer
             read_actions = [a for a in actions if a["type"] in _READ_ACTION_TYPES and (a.get("entry") or a.get("results"))]
@@ -675,6 +713,14 @@ def _parse_actions_inner(reply: str) -> list[dict]:
         if topic:
             actions.append({"type": "research_request", "topic": topic[:300]})
 
+    # DOWNLOAD_STUDY — fetch a study's PDF into the studies folder
+    for m in re.finditer(r'\[DOWNLOAD_STUDY:\s*(\d+)\]', reply):
+        eid = to_int(m.group(1))
+        if eid is None:
+            actions.append({"type": "error", "detail": "DOWNLOAD_STUDY needs a numeric entry id"})
+            continue
+        actions.append({"type": "download_study_request", "entry_id": eid})
+
     return actions
 
 
@@ -742,4 +788,7 @@ Provider: {provider} / Model: {model}
 [LIST_THEORIES: search_or_empty]
 [CREATE_THEORY: name | description | parent_id | supported|contested|refuted|emerging]
 [LINK_STUDY: theory_id | entry_id | pro|contra | note]
+
+12. **Study PDFs** — Download a study's paper into the dedicated studies folder (openable directly in the app):
+[DOWNLOAD_STUDY: entry_id]
 """

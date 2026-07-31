@@ -24,7 +24,7 @@ from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.db import get_db
 from app.llm import LLM_PROVIDER, complete as llm_complete
@@ -36,6 +36,7 @@ from app.models import (
     ResearchStudy,
 )
 from app.web_search import search_web, validate_url
+from app.studies_store import download_study_pdf, extract_pdf_url, pdf_path_for
 
 logger = logging.getLogger("chronokg.research")
 router = APIRouter()
@@ -537,6 +538,12 @@ async def run_research(topic: str, depth: str = "deep", save: bool = True) -> Re
     if save:
         _save_research(result, topic)
         _save_theories(result)
+        if web_available:
+            for s in result.studies:
+                if s.entry_id and s.url:
+                    fname = await download_study_pdf(s.entry_id, s.url, s.title)
+                    if fname:
+                        _set_pdf_path(s.entry_id, fname)
 
     logger.info("Research complete: %d studies, %d theories", len(result.studies), len(result.theories))
     return result
@@ -804,6 +811,12 @@ async def research_stream(data: ResearchRequest):
                 yield _sse({"type": "progress", "phase": "save", "message": "Saving studies, report, graph links and the theory tree..."})
                 _save_research(result, data.topic)
                 _save_theories(result)
+                if web_available:
+                    for s in result.studies:
+                        if s.entry_id and s.url:
+                            fname = await download_study_pdf(s.entry_id, s.url, s.title)
+                            if fname:
+                                _set_pdf_path(s.entry_id, fname)
                 yield _sse({"type": "progress", "phase": "save", "message": f"Saved {len(result.studies)} studies + report + {len(result.theories)} theories."})
 
             yield _sse({"type": "done", "result": result.model_dump()})
@@ -834,3 +847,43 @@ def list_studies(limit: int = 100, offset: int = 0):
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def _set_pdf_path(entry_id: int, fname: str) -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
+            [fname, entry_id],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@router.post("/studies/{entry_id}/download")
+async def download_study_pdf_endpoint(entry_id: int):
+    """Download a study's PDF into the dedicated studies folder."""
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM entries WHERE id = ?", [entry_id]).fetchone()
+        if not row or not row["study_type"]:
+            raise HTTPException(404, "Study not found")
+        entry = dict(row)
+    finally:
+        conn.close()
+    url = extract_pdf_url(entry)
+    fname = await download_study_pdf(entry_id, url, entry["title"])
+    if not fname:
+        raise HTTPException(502, "Could not download the study PDF (missing or unreachable URL)")
+    _set_pdf_path(entry_id, fname)
+    return {"pdf_path": fname}
+
+
+@router.get("/studies/{entry_id}/pdf")
+async def get_study_pdf(entry_id: int):
+    """Serve a downloaded study PDF so it can be opened directly in the app."""
+    path = pdf_path_for(entry_id)
+    if not path:
+        raise HTTPException(404, "PDF not downloaded yet")
+    return FileResponse(str(path), media_type="application/pdf", filename=path.name)

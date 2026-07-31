@@ -49,9 +49,24 @@ def create_entry(data: EntryCreate):
     conn = get_db()
     try:
         cur = conn.execute(
-            """INSERT INTO entries (title, content, entry_date, tags, source, importance)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [data.title, data.content, data.entry_date or None, data.tags, data.source, data.importance]
+            """INSERT INTO entries (title, content, entry_date, tags, source, importance,
+                                    study_type, authors, quality, url_validated, design, effect_direction, pdf_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                data.title,
+                data.content,
+                data.entry_date or None,
+                data.tags,
+                data.source,
+                data.importance,
+                data.study_type,
+                data.authors,
+                data.quality,
+                1 if data.url_validated else 0,
+                data.design,
+                data.effect_direction,
+                data.pdf_path,
+            ]
         )
         conn.commit()
         row = conn.execute("SELECT * FROM entries WHERE id = ?", [cur.lastrowid]).fetchone()
@@ -69,10 +84,11 @@ def update_entry(entry_id: int, data: EntryUpdate):
             raise HTTPException(404, "Entry not found")
 
         updates = {}
-        for field in ("title", "content", "entry_date", "tags", "source", "importance"):
+        for field in ("title", "content", "entry_date", "tags", "source", "importance",
+                      "study_type", "authors", "quality", "url_validated", "design", "effect_direction", "pdf_path"):
             val = getattr(data, field, None)
             if val is not None:
-                updates[field] = val
+                updates[field] = 1 if field == "url_validated" and val else val
         if data.archived is not None:
             updates["archived"] = 1 if data.archived else 0
 

@@ -15,6 +15,7 @@ export interface Entry {
   url_validated: boolean;
   design: string;
   effect_direction: string;
+  pdf_path: string;
 }
 
 export interface Relationship {

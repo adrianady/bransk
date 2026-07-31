@@ -176,6 +176,14 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
                 ) : entry.source}
               </p>
             )}
+            {entry.pdf_path && (
+              <p className="pt-1">
+                <a href={api.studies.pdfUrl(entry.id)} target="_blank" rel="noreferrer"
+                  className="btn-secondary text-xs px-2 py-1 inline-flex items-center gap-1">
+                  📄 Open PDF
+                </a>
+              </p>
+            )}
           </div>
         )}
 

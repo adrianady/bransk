@@ -68,6 +68,11 @@ def test_list_theories_read_tool():
         assert any(r["name"] == "Consolidation theory" for r in listed["results"])
 
 
+def test_download_study_action_parses():
+    acts = _parse("[DOWNLOAD_STUDY: 7]")
+    assert any(a["type"] == "download_study_request" and a["entry_id"] == 7 for a in acts)
+
+
 def test_chat_stream_works_offline_with_mock():
     with TestClient(app) as client:
         resp = client.post("/api/chat/stream", json={"message": "Hello", "history": []})

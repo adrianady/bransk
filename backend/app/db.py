@@ -41,6 +41,7 @@ def init_db():
                 url_validated INTEGER DEFAULT 0, -- source URL reachability check
                 design      TEXT DEFAULT '',   -- study design (RCT, cohort, ...)
                 effect_direction TEXT DEFAULT '', -- positive | negative | mixed | null
+                pdf_path    TEXT DEFAULT '',   -- local file name in the studies folder
                 archived    INTEGER DEFAULT 0
             );
 
@@ -174,6 +175,7 @@ def init_db():
             ("url_validated", "INTEGER DEFAULT 0"),
             ("design", "TEXT DEFAULT ''"),
             ("effect_direction", "TEXT DEFAULT ''"),
+            ("pdf_path", "TEXT DEFAULT ''"),
         ]
         for col, ddl in _add_column:
             try:
