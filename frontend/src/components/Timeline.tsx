@@ -81,7 +81,7 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
         const preview = (e.content_preview || '').slice(0, 200)
         items.add({
           id: e.id,
-          content: `<div style="font-weight:600;font-size:13px;color:${color}">${escapeHtml(e.title)}</div>`,
+          content: `<div style="font-weight:600;font-size:13px;color:#fff;background:${color};border-radius:6px;padding:4px 10px">${escapeHtml(e.title)}</div>`,
           title: `${escapeHtml(e.title)}<br/><b>${escapeHtml(e.entry_date)}</b><br/>${escapeHtml(preview)}`,
           start: e.entry_date,
           group: groupName,
@@ -96,9 +96,10 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
         groupOrder: 'content',
         horizontalScroll: true,
         zoomKey: 'ctrlKey' as const,
-        height: '500px',
-        start: stats?.earliest || undefined,
-        end: stats?.latest || undefined,
+        height: '600px',
+        // No start/end: vis auto-scales the window to the items, so a single
+        // shared date (e.g. several studies from one year) still renders a
+        // usable range instead of a degenerate zero-width window.
       }
 
       const containerElement = containerRef.current

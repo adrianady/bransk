@@ -41,15 +41,17 @@
   font-family: inherit !important;
 }
 .vis-item {
-  background-color: #4c6ef5 !important;
-  border-color: #4263eb !important;
-  color: white !important;
+  background-color: #4c6ef5;
+  border-color: #4263eb;
+  color: white;
   border-radius: 6px !important;
-  padding: 4px 10px !important;
 }
 .vis-item.vis-selected {
   background-color: #364fc7 !important;
   border-color: #2b3da3 !important;
+}
+.vis-panel.vis-center {
+  overflow-y: auto;
 }
 .vis-time-axis .vis-text {
   color: #6b7280 !important;
