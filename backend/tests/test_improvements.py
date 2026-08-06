@@ -53,7 +53,21 @@ def test_recurring_reminder_type_infers_recurrence():
         assert once["recurrence"] is None
 
 
-def test_dismissing_recurring_reminder_schedules_next_occurrence():
+def test_dismissing_recurring_reminder_schedules_next_occurrence(monkeypatch):
+    """Weekly reminder dismissed on Aug 6 must schedule Aug 9. The clock is
+    pinned so the assertion never drifts as wall-clock time moves."""
+    import datetime as _dt
+
+    from app.routers import reminders as rem_mod
+
+    class FakeDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = cls(2026, 8, 6, 10, 0, 0)
+            return base.replace(tzinfo=tz) if tz else base
+
+    monkeypatch.setattr(rem_mod, "datetime", FakeDateTime)
+
     with TestClient(app) as client:
         entry = client.post("/api/entries", json={"title": "E", "content": "c"}).json()
         reminder = client.post(
