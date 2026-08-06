@@ -98,5 +98,30 @@ def test_chat_stream_triggers_research_action():
         assert "research" in types
 
 
+def test_chat_stream_accepts_long_history_messages():
+    """Regression: an AI research reply over 10k chars used to 422 (string_too_long)."""
+    with TestClient(app) as client:
+        long_reply = "research pipeline plan " * 800  # ~26k chars
+        assert len(long_reply) > 10000
+        resp = client.post(
+            "/api/chat/stream",
+            json={
+                "message": "did you finish?",
+                "history": [{"role": "assistant", "content": long_reply}],
+            },
+        )
+        assert resp.status_code == 200
+        assert "data: " in resp.text
+
+
+def test_history_item_extraction_clips_long_content():
+    """LLM assembly truncates each history item to the 10k context budget."""
+    from app.routers.chat import _extract_history_item
+
+    item = _extract_history_item({"role": "assistant", "content": "z" * 15000})
+    assert item["role"] == "assistant"
+    assert len(item["content"]) == 10000
+
+
 def test_web_search_empty_query_short_circuits():
     assert asyncio.run(search_web("")) == []

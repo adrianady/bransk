@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
+import { ArrowLeft, Pencil, Archive, ArchiveRestore, Trash2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
+import { useToast } from './Toast'
 import type { Entry, Relationship, TodoItem, SpacedRepetitionItem, Reminder } from '../lib/types'
 import { EntryForm } from './EntryForm'
 
@@ -9,9 +11,11 @@ interface Props {
   entry: Entry
   onBack: () => void
   onUpdate: (entry: Entry) => void
+  onSelectEntry?: (entry: Entry) => void
 }
 
-export function EntryDetail({ entry, onBack, onUpdate }: Props) {
+export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
+  const toast = useToast()
   const [relationships, setRelationships] = useState<Relationship[]>([])
   const [allEntries, setAllEntries] = useState<Entry[]>([])
   const [showEdit, setShowEdit] = useState(false)
@@ -54,48 +58,73 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
 
   const addRelation = async () => {
     if (!linkTarget) return
-    await api.relationships.create({ from_id: entry.id, to_id: linkTarget, label: linkLabel })
-    const rels = await api.relationships.list(entry.id)
-    setRelationships(rels)
-    setShowLinkPicker(false)
-    setLinkLabel('')
-    setLinkTarget(null)
+    try {
+      await api.relationships.create({ from_id: entry.id, to_id: linkTarget, label: linkLabel })
+      const rels = await api.relationships.list(entry.id)
+      setRelationships(rels)
+      setShowLinkPicker(false)
+      setLinkLabel('')
+      setLinkTarget(null)
+      toast.success('Link added')
+    } catch (err: any) {
+      toast.error('Could not add link: ' + (err?.message || 'unknown error'))
+    }
   }
 
   const addToReview = async () => {
-    const item = await api.spacedRepetition.add(entry.id)
-    setSrItem(item)
+    try {
+      const item = await api.spacedRepetition.add(entry.id)
+      setSrItem(item)
+      toast.success('Added to review schedule')
+    } catch (err: any) {
+      toast.error('Could not add to review: ' + (err?.message || 'unknown error'))
+    }
   }
 
   const addTodo = async () => {
-    const item = await api.todos.create(entry.id)
-    setTodo(item)
-    setTodoDraft({ priority: item.priority, effort: item.effort, due_date: item.due_date || '' })
+    try {
+      const item = await api.todos.create(entry.id)
+      setTodo(item)
+      setTodoDraft({ priority: item.priority, effort: item.effort, due_date: item.due_date || '' })
+      toast.success('Task created')
+    } catch (err: any) {
+      toast.error('Could not create task: ' + (err?.message || 'unknown error'))
+    }
   }
 
   const saveTodoDraft = async () => {
     if (!todo) return
-    const updated = await api.todos.update(entry.id, {
-      priority: todoDraft.priority,
-      effort: todoDraft.effort,
-      due_date: todoDraft.due_date || null,
-    })
-    setTodo(updated)
-    setTodoDraft({ priority: updated.priority, effort: updated.effort, due_date: updated.due_date || '' })
+    try {
+      const updated = await api.todos.update(entry.id, {
+        priority: todoDraft.priority,
+        effort: todoDraft.effort,
+        due_date: todoDraft.due_date || null,
+      })
+      setTodo(updated)
+      setTodoDraft({ priority: updated.priority, effort: updated.effort, due_date: updated.due_date || '' })
+      toast.success('Task details saved')
+    } catch (err: any) {
+      toast.error('Could not save task: ' + (err?.message || 'unknown error'))
+    }
   }
 
   const addReminder = async () => {
     if (!reminderTrigger) return
-    const created = await api.reminders.create(entry.id, {
-      title: reminderTitle,
-      trigger_at: reminderTrigger,
-      reminder_type: reminderType,
-    })
-    setReminders(prev => [...prev, created])
-    setShowReminderForm(false)
-    setReminderTitle('')
-    setReminderTrigger('')
-    setReminderType('once')
+    try {
+      const created = await api.reminders.create(entry.id, {
+        title: reminderTitle,
+        trigger_at: reminderTrigger ? new Date(reminderTrigger).toISOString() : reminderTrigger,
+        reminder_type: reminderType,
+      })
+      setReminders(prev => [...prev, created])
+      setShowReminderForm(false)
+      setReminderTitle('')
+      setReminderTrigger('')
+      setReminderType('once')
+      toast.success('Reminder set')
+    } catch (err: any) {
+      toast.error('Could not create reminder: ' + (err?.message || 'unknown error'))
+    }
   }
 
   const importanceLabel = (n: number) => {
@@ -118,7 +147,9 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
         <div className="flex items-start justify-between mb-3">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <button onClick={onBack} className="btn-ghost p-1">←</button>
+              <button onClick={onBack} className="icon-btn" aria-label="Back to entries" title="Back to entries">
+                <ArrowLeft className="w-5 h-5" />
+              </button>
               <h2 className="text-xl font-bold truncate">{entry.title}</h2>
             </div>
             <div className="flex items-center gap-3 mt-1 text-sm text-gray-500">
@@ -128,21 +159,38 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
             </div>
           </div>
           <div className="flex gap-2">
-            <button onClick={() => setShowEdit(true)} className="btn-ghost">✏️</button>
+            <button onClick={() => setShowEdit(true)} className="icon-btn" aria-label="Edit entry" title="Edit entry">
+              <Pencil className="w-4 h-4" />
+            </button>
             <button
               onClick={async () => {
-                const updated = await api.entries.update(entry.id, { archived: !entry.archived })
-                onUpdate(updated)
+                try {
+                  const updated = await api.entries.update(entry.id, { archived: !entry.archived })
+                  onUpdate(updated)
+                  toast.success(entry.archived ? 'Entry restored' : 'Entry archived')
+                } catch (err: any) {
+                  toast.error('Could not update entry: ' + (err?.message || 'unknown error'))
+                }
               }}
-              className="btn-ghost"
+              className="icon-btn"
               title={entry.archived ? 'Restore entry' : 'Archive entry'}
-            >{entry.archived ? '♻️' : '🗄️'}</button>
+              aria-label={entry.archived ? 'Restore entry' : 'Archive entry'}
+            >
+              {entry.archived ? <ArchiveRestore className="w-4 h-4" /> : <Archive className="w-4 h-4" />}
+            </button>
             <button onClick={async () => {
               if (confirm('Delete this entry?')) {
-                await api.entries.delete(entry.id)
-                onBack()
+                try {
+                  await api.entries.delete(entry.id)
+                  toast.success('Entry deleted')
+                  onBack()
+                } catch (err: any) {
+                  toast.error('Could not delete entry: ' + (err?.message || 'unknown error'))
+                }
               }
-            }} className="btn-ghost text-red-500">🗑️</button>
+            }} className="icon-btn text-red-500" aria-label="Delete entry" title="Delete entry">
+              <Trash2 className="w-4 h-4" />
+            </button>
           </div>
         </div>
 
@@ -216,6 +264,56 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
         ))}
       </div>
 
+      {/* Info Tab */}
+      {activeTab === 'info' && (
+        <div className="card">
+          <h3 className="font-semibold mb-3">Entry details</h3>
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+              <dt className="text-xs text-gray-500 mb-0.5">ID</dt>
+              <dd>#{entry.id}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-gray-500 mb-0.5">Importance</dt>
+              <dd>
+                {'★'.repeat(entry.importance)}{'☆'.repeat(5 - entry.importance)}{' '}
+                <span className="text-gray-500">{importanceLabel(entry.importance)}</span>
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-gray-500 mb-0.5">Status</dt>
+              <dd>{entry.archived ? 'Archived' : 'Active'}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-gray-500 mb-0.5">Graph links</dt>
+              <dd>{relationships.length}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-gray-500 mb-0.5">Created</dt>
+              <dd>{new Date(entry.created_at).toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-gray-500 mb-0.5">Last updated</dt>
+              <dd>{new Date(entry.updated_at).toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-gray-500 mb-0.5">Review schedule</dt>
+              <dd>
+                {srItem
+                  ? srItem.next_review
+                    ? `Due ${new Date(srItem.next_review).toLocaleDateString()}`
+                    : 'Scheduled'
+                  : 'Not in review rotation'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-gray-500 mb-0.5">Reminders</dt>
+              <dd>{reminders.length}</dd>
+            </div>
+          </dl>
+        </div>
+      )}
+
       {/* Links Tab */}
       {activeTab === 'links' && (
         <div className="card">
@@ -247,13 +345,28 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
             <div className="space-y-2">
               {relationships.map(rel => (
                 <div key={rel.id} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm">
-                  <span>
-                    {rel.from_id === entry.id ? '→' : '←'} <strong>{allEntries.find(e => e.id === (rel.from_id === entry.id ? rel.to_id : rel.from_id))?.title || `Entry ${rel.from_id === entry.id ? rel.to_id : rel.from_id}`}</strong>
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <span aria-hidden="true">{rel.from_id === entry.id ? '→' : '←'}</span>
+                    <button
+                      onClick={() => {
+                        const target = allEntries.find(e => e.id === (rel.from_id === entry.id ? rel.to_id : rel.from_id))
+                        if (target && onSelectEntry) onSelectEntry(target)
+                      }}
+                      className={`font-medium truncate ${onSelectEntry ? 'text-chrono-700 hover:underline' : ''}`}
+                      title={onSelectEntry ? 'Open linked entry' : undefined}
+                    >
+                      {allEntries.find(e => e.id === (rel.from_id === entry.id ? rel.to_id : rel.from_id))?.title || `Entry ${rel.from_id === entry.id ? rel.to_id : rel.from_id}`}
+                    </button>
                     {rel.label && <span className="text-gray-500 ml-1">({rel.label})</span>}
                   </span>
                   <button onClick={async () => {
-                    await api.relationships.delete(rel.id)
-                    setRelationships(prev => prev.filter(r => r.id !== rel.id))
+                    try {
+                      await api.relationships.delete(rel.id)
+                      setRelationships(prev => prev.filter(r => r.id !== rel.id))
+                      toast.success('Link removed')
+                    } catch (err: any) {
+                      toast.error('Could not remove link: ' + (err?.message || 'unknown error'))
+                    }
                   }} className="text-red-400 hover:text-red-600 text-xs">Remove</button>
                 </div>
               ))}
@@ -271,8 +384,12 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
               <label className="flex items-center gap-2">
                 <input type="checkbox" checked={todo.completed}
                   onChange={async () => {
-                    const updated = await api.todos.update(entry.id, { completed: !todo.completed })
-                    setTodo(updated)
+                    try {
+                      const updated = await api.todos.update(entry.id, { completed: !todo.completed })
+                      setTodo(updated)
+                    } catch (err: any) {
+                      toast.error('Could not update task: ' + (err?.message || 'unknown error'))
+                    }
                   }}
                   className="rounded" />
                 <span className={todo.completed ? 'line-through text-gray-400' : ''}>
@@ -317,8 +434,13 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
               </div>
               <button onClick={saveTodoDraft} className="btn-secondary text-sm">Save task details</button>
               <button onClick={async () => {
-                await api.todos.delete(entry.id)
-                setTodo(null)
+                try {
+                  await api.todos.delete(entry.id)
+                  setTodo(null)
+                  toast.success('Task removed')
+                } catch (err: any) {
+                  toast.error('Could not remove task: ' + (err?.message || 'unknown error'))
+                }
               }} className="btn-ghost text-sm text-red-500">Remove task</button>
             </div>
           ) : (
@@ -368,13 +490,18 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
                   <div>
                     <p className="font-medium">{rem.title || 'Reminder'}</p>
                     <p className="text-xs text-gray-500">
-                      {rem.trigger_at.replace('T', ' ')} · {rem.reminder_type}
+                      {new Date(rem.trigger_at).toLocaleString()} · {rem.reminder_type}
                       {rem.notified ? ' · ✅ notified' : ' · ⏳ pending'}
                     </p>
                   </div>
                   <button onClick={async () => {
-                    await api.reminders.delete(entry.id, rem.id)
-                    setReminders(prev => prev.filter(r => r.id !== rem.id))
+                    try {
+                      await api.reminders.delete(entry.id, rem.id)
+                      setReminders(prev => prev.filter(r => r.id !== rem.id))
+                      toast.success('Reminder removed')
+                    } catch (err: any) {
+                      toast.error('Could not remove reminder: ' + (err?.message || 'unknown error'))
+                    }
                   }} className="text-red-400 hover:text-red-600 text-xs">Remove</button>
                 </div>
               ))}
@@ -398,8 +525,13 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
                 <div className="flex gap-1">
                   {[0, 1, 2, 3, 4, 5].map(q => (
                     <button key={q} onClick={async () => {
-                      const updated = await api.spacedRepetition.review(srItem.id, q)
-                      setSrItem(updated)
+                      try {
+                        const updated = await api.spacedRepetition.review(srItem.id, q)
+                        setSrItem(updated)
+                        toast.success(`Rated ${q}/6 — next review ${updated.next_review ? new Date(updated.next_review).toLocaleDateString() : 'today'}`)
+                      } catch (err: any) {
+                        toast.error('Could not submit rating: ' + (err?.message || 'unknown error'))
+                      }
                     }}
                       className="btn-ghost text-xs px-2 py-1"
                     >{q}</button>
@@ -407,8 +539,13 @@ export function EntryDetail({ entry, onBack, onUpdate }: Props) {
                 </div>
               </div>
               <button onClick={async () => {
-                await api.spacedRepetition.remove(entry.id)
-                setSrItem(null)
+                try {
+                  await api.spacedRepetition.remove(entry.id)
+                  setSrItem(null)
+                  toast.success('Removed from review')
+                } catch (err: any) {
+                  toast.error('Could not remove from review: ' + (err?.message || 'unknown error'))
+                }
               }} className="btn-ghost text-sm text-red-500 mt-2">Remove from review</button>
             </div>
           ) : (

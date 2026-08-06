@@ -7,10 +7,14 @@ backend/data/studies). Files are named `<entry_id>-<slug>.pdf` so a study's
 entry links unambiguously to its downloaded paper.
 """
 import logging
+import ipaddress
 import os
 import re
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
+import anyio
 import httpx
 
 logger = logging.getLogger("chronokg.studies")
@@ -21,9 +25,52 @@ MAX_SIZE = 150 * 1024 * 1024  # 150 MB safety cap
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ChronoKG/0.1"}
 
 
+def assert_public_download_url(url: str) -> None:
+    """Raise ValueError when *url* could target a private/internal host.
+
+    Study URLs come from LLM output and web search, so downloads are checked
+    before every HTTP hop (initial request + redirects) to prevent SSRF-style
+    fetches of localhost, LAN, or link-local addresses.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+    if parsed.port is not None and parsed.port not in (80, 443):
+        raise ValueError(f"Non-standard port: {parsed.port}")
+    host = parsed.hostname or ""
+    if not host:
+        raise ValueError("URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        raise ValueError(f"Host does not resolve: {host}") from exc
+    for info in infos:
+        address = info[4][0]
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise ValueError(f"Refusing to download from non-public address: {address}")
+
+
 def ensure_dir() -> Path:
     STUDIES_DIR.mkdir(parents=True, exist_ok=True)
     return STUDIES_DIR
+
+
+def is_valid_pdf_file(path) -> bool:
+    """True when *path* exists, is non-empty and starts with the PDF magic
+    bytes. Many blocked/redirected downloads save an HTML error page with a
+    .pdf name; this check rejects those so garbage never reaches the app."""
+    try:
+        p = Path(path)
+        if not p.exists() or p.stat().st_size == 0:
+            return False
+        with open(p, "rb") as fh:
+            return fh.read(5) == b"%PDF-"
+    except OSError:
+        return False
 
 
 def _slugify(title: str, max_len: int = 60) -> str:
@@ -59,18 +106,37 @@ async def download_study_pdf(entry_id: int, url: str, title: str):
     url = (url or "").strip()
     if not url.lower().startswith(("http://", "https://")):
         return None
+    try:
+        await anyio.to_thread.run_sync(assert_public_download_url, url)
+    except ValueError as exc:
+        logger.info("Blocked unsafe download URL for entry %s: %s", entry_id, exc)
+        return None
 
     fname = pdf_filename(entry_id, title)
     dest = ensure_dir() / fname
-    if dest.exists() and dest.stat().st_size > 0:
+    if is_valid_pdf_file(dest):
         return fname
+    # A stale/blocked download may have left an HTML page named .pdf — replace it.
+    if dest.exists():
+        dest.unlink(missing_ok=True)
 
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True, headers=_UA) as client:
+        async def _guard_hop(response: httpx.Response) -> None:
+            try:
+                await anyio.to_thread.run_sync(assert_public_download_url, str(response.url))
+            except ValueError as exc:
+                raise httpx.HTTPError(f"Blocked redirect to non-public URL: {exc}") from exc
+
+        async with httpx.AsyncClient(
+            timeout=60.0,
+            follow_redirects=True,
+            headers=_UA,
+            event_hooks={"response": [_guard_hop]},
+            max_redirects=8,
+        ) as client:
             async with client.stream("GET", url) as resp:
                 resp.raise_for_status()
                 ctype = resp.headers.get("content-type", "").lower()
-                looks_like_pdf = ".pdf" in url.lower() or "pdf" in ctype or "octet-stream" in ctype
                 size = 0
                 with open(dest, "wb") as out:
                     async for chunk in resp.aiter_bytes(65536):
@@ -78,9 +144,13 @@ async def download_study_pdf(entry_id: int, url: str, title: str):
                         if size > MAX_SIZE:
                             break
                         out.write(chunk)
-        if size == 0 or size > MAX_SIZE or (not looks_like_pdf and size < 200 * 1024):
+        valid = is_valid_pdf_file(dest) and size <= MAX_SIZE
+        if not valid:
             dest.unlink(missing_ok=True)
-            logger.info("Rejected download for entry %s (%s bytes, %s)", entry_id, size, ctype)
+            logger.info(
+                "Rejected download for entry %s (%s bytes, ctype=%s, not a valid PDF)",
+                entry_id, size, ctype,
+            )
             return None
         logger.info("Downloaded study PDF for entry %s: %s", entry_id, fname)
         return fname

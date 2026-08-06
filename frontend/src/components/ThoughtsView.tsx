@@ -1,8 +1,14 @@
 import { useState, useEffect } from 'react'
 import { api } from '../lib/api'
+import { useToast } from './Toast'
 import type { Thought, Entry, Tag } from '../lib/types'
 
-export function ThoughtsView() {
+interface Props {
+  onSelectEntry?: (entry: Entry) => void
+}
+
+export function ThoughtsView({ onSelectEntry }: Props) {
+  const toast = useToast()
   const [thoughts, setThoughts] = useState<Thought[]>([])
   const [entries, setEntries] = useState<Record<number, Entry[]>>({})
   const [allTags, setAllTags] = useState<Tag[]>([])
@@ -23,6 +29,8 @@ export function ThoughtsView() {
         const ents = await api.thoughts.entries(selectedThought)
         setEntries(prev => ({ ...prev, [selectedThought]: ents }))
       }
+    } catch (err: any) {
+      toast.error('Could not load thoughts: ' + (err?.message || 'unknown error'))
     } finally {
       setLoading(false)
     }
@@ -67,14 +75,18 @@ export function ThoughtsView() {
     const name = newName.trim()
     if (!name) return
     const tagIds = selectedTagIds.join(',')
-    if (editing) {
-      await api.thoughts.update(editing.id, { name, description: newDescription, tag_ids: tagIds })
-    } else {
-      await api.thoughts.create({ name, description: newDescription, tag_ids: tagIds })
+    try {
+      if (editing) {
+        await api.thoughts.update(editing.id, { name, description: newDescription, tag_ids: tagIds })
+      } else {
+        await api.thoughts.create({ name, description: newDescription, tag_ids: tagIds })
+      }
+      setShowForm(false)
+      setEditing(null)
+      await loadThoughts()
+    } catch (err: any) {
+      toast.error('Could not save thought: ' + (err?.message || 'unknown error'))
     }
-    setShowForm(false)
-    setEditing(null)
-    await loadThoughts()
   }
 
   if (loading) return <div className="text-center py-8 text-gray-500">Loading thoughts...</div>
@@ -157,14 +169,24 @@ export function ThoughtsView() {
                 </div>
                 <div className="flex gap-1 shrink-0">
                   <button onClick={(e) => { e.stopPropagation(); openEdit(thought) }}
-                    className="btn-ghost p-1 text-xs">✏️</button>
+                    className="btn-ghost p-1 text-xs"
+                    aria-label={`Edit thought ${thought.name}`}
+                    title="Edit thought"
+                  >✏️</button>
                   <button onClick={async (e) => {
                     e.stopPropagation()
                     if (confirm('Delete this thought?')) {
-                      await api.thoughts.delete(thought.id)
-                      await loadThoughts()
+                      try {
+                        await api.thoughts.delete(thought.id)
+                        await loadThoughts()
+                      } catch (err: any) {
+                        toast.error('Could not delete thought: ' + (err?.message || 'unknown error'))
+                      }
                     }
-                  }} className="btn-ghost p-1 text-red-400 text-xs">✕</button>
+                  }} className="btn-ghost p-1 text-red-400 text-xs"
+                    aria-label={`Delete thought ${thought.name}`}
+                    title="Delete thought"
+                  >✕</button>
                 </div>
               </div>
 
@@ -175,10 +197,17 @@ export function ThoughtsView() {
                   </p>
                   <div className="space-y-1 max-h-40 overflow-y-auto">
                     {(entries[thought.id] || []).map(entry => (
-                      <div key={entry.id} className="text-sm p-1.5 bg-gray-50 dark:bg-gray-800 rounded">
+                      <button
+                        key={entry.id}
+                        onClick={() => onSelectEntry?.(entry)}
+                        className={`text-sm p-1.5 bg-gray-50 dark:bg-gray-800 rounded text-left w-full ${
+                          onSelectEntry ? 'hover:bg-chrono-50 dark:hover:bg-chrono-900/20' : ''
+                        }`}
+                        title={onSelectEntry ? 'Open entry' : undefined}
+                      >
                         <p className="font-medium truncate">{entry.title}</p>
                         {entry.entry_date && <p className="text-xs text-gray-500">{entry.entry_date}</p>}
-                      </div>
+                      </button>
                     ))}
                   </div>
                 </div>

@@ -1,4 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useCallback, useState, useEffect } from 'react'
+import {
+  CalendarDays, Network, BookOpenText, Dna, FileText, RotateCcw, ListChecks, Lightbulb,
+  Bot, Sun, Moon, Search, Plus, Download, Upload, AlertTriangle, RefreshCw, Settings2,
+} from 'lucide-react'
 import { TimelineView } from './components/Timeline'
 import { GraphView } from './components/GraphView'
 import { ChatPanel } from './components/ChatPanel'
@@ -10,25 +14,46 @@ import { ThoughtsView } from './components/ThoughtsView'
 import { StudiesView } from './components/StudiesView'
 import { TheoriesView } from './components/TheoriesView'
 import { api } from './lib/api'
-import type { Entry, TimelineEntry } from './lib/types'
+import { useToast } from './components/Toast'
+import { AiStatusModal } from './components/AiStatusModal'
+import type { Entry, TimelineEntry, Tag } from './lib/types'
 
 type View = 'timeline' | 'graph' | 'studies' | 'theories' | 'entries' | 'review' | 'todos' | 'thoughts'
 
 export default function App() {
+  const toast = useToast()
   const [view, setView] = useState<View>('timeline')
   const [showEntryForm, setShowEntryForm] = useState(false)
+  const [showAiStatus, setShowAiStatus] = useState(false)
   const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [showChat, setShowChat] = useState(false)
-  const [darkMode, setDarkMode] = useState(
-    () => window.matchMedia('(prefers-color-scheme: dark)').matches
-  )
+  const [darkMode, setDarkMode] = useState(() => {
+    const stored = localStorage.getItem('chronokg-theme')
+    if (stored === 'light') return false
+    if (stored === 'dark') return true
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
+  })
 
   const toggleDark = () => {
     const next = !darkMode
     setDarkMode(next)
+    localStorage.setItem('chronokg-theme', next ? 'dark' : 'light')
     document.documentElement.classList.toggle('dark', next)
   }
+
+  // Follow the OS theme only while the user hasn't made an explicit choice.
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = (e: MediaQueryListEvent) => {
+      if (!localStorage.getItem('chronokg-theme')) {
+        setDarkMode(e.matches)
+        document.documentElement.classList.toggle('dark', e.matches)
+      }
+    }
+    mq.addEventListener?.('change', onChange)
+    return () => mq.removeEventListener?.('change', onChange)
+  }, [])
 
   // Keep the root <html> dark class in sync on first mount too, so canvas
   // visualizations (vis-network/vis-timeline) can read the active theme.
@@ -37,33 +62,33 @@ export default function App() {
   }, [darkMode])
 
   // Async handler to fetch full Entry from Timeline/Graph selection
-  const handleSelectTimelineEntry = async (item: TimelineEntry) => {
+  const handleSelectTimelineEntry = useCallback(async (item: TimelineEntry) => {
     setLoadingDetail(true)
     setView('entries')
     try {
       const fullEntry = await api.entries.get(item.id)
       setSelectedEntry(fullEntry)
     } catch (err) {
-      console.error('Failed to fetch entry detail:', err)
+      toast.error('Failed to fetch entry detail: ' + (err instanceof Error ? err.message : 'unknown error'))
     } finally {
       setLoadingDetail(false)
     }
-  }
+  }, [toast])
 
-  const handleSelectStudy = (entry: Entry) => {
+  const handleSelectStudy = useCallback((entry: Entry) => {
     setSelectedEntry(entry)
     setView('entries')
-  }
+  }, [])
 
-  const navItems: { id: View; label: string; icon: string }[] = [
-    { id: 'timeline', label: 'Timeline', icon: '📅' },
-    { id: 'graph', label: 'Graph', icon: '🕸️' },
-    { id: 'studies', label: 'Studies', icon: '📚' },
-    { id: 'theories', label: 'Theories', icon: '🧬' },
-    { id: 'entries', label: 'Entries', icon: '📝' },
-    { id: 'review', label: 'Review', icon: '🔄' },
-    { id: 'todos', label: 'Tasks', icon: '✅' },
-    { id: 'thoughts', label: 'Thoughts', icon: '💭' },
+  const navItems: { id: View; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+    { id: 'timeline', label: 'Timeline', icon: CalendarDays },
+    { id: 'graph', label: 'Graph', icon: Network },
+    { id: 'studies', label: 'Studies', icon: BookOpenText },
+    { id: 'theories', label: 'Theories', icon: Dna },
+    { id: 'entries', label: 'Entries', icon: FileText },
+    { id: 'review', label: 'Review', icon: RotateCcw },
+    { id: 'todos', label: 'Tasks', icon: ListChecks },
+    { id: 'thoughts', label: 'Thoughts', icon: Lightbulb },
   ]
 
   return (
@@ -72,7 +97,7 @@ export default function App() {
         {/* Sidebar */}
         <nav className="w-16 lg:w-48 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 flex flex-col shrink-0">
           <div className="p-3 lg:p-4 border-b border-gray-200 dark:border-gray-700">
-            <h1 className="hidden lg:block text-lg font-bold text-chrono-600">ChronoKG</h1>
+            <h1 className="hidden lg:block text-lg font-bold text-chrono-700">ChronoKG</h1>
             <span className="lg:hidden text-xl">🧠</span>
           </div>
 
@@ -80,6 +105,8 @@ export default function App() {
             {navItems.map(item => (
               <button
                 key={item.id}
+                title={item.label}
+                aria-current={view === item.id ? 'page' : undefined}
                 onClick={() => {
                   if (item.id === 'entries') setSelectedEntry(null)
                   setView(item.id)
@@ -90,26 +117,38 @@ export default function App() {
                     : 'text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
                 }`}
               >
-                <span className="text-lg">{item.icon}</span>
+                <item.icon className="w-5 h-5 shrink-0" />
                 <span className="hidden lg:block">{item.label}</span>
               </button>
             ))}
           </div>
 
           <div className="p-2 border-t border-gray-200 dark:border-gray-700 space-y-1">
-            <button onClick={() => setShowChat(!showChat)}
+            <button onClick={() => setShowChat(!showChat)} title="AI Chat"
+              aria-expanded={showChat}
+              aria-label="Toggle AI Chat panel"
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
                 showChat ? 'bg-chrono-100 text-chrono-700 dark:bg-chrono-900/30' : 'text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
               }`}
             >
-              <span className="text-lg">🤖</span>
+              <Bot className="w-5 h-5 shrink-0" />
               <span className="hidden lg:block">AI Chat</span>
             </button>
             <button onClick={toggleDark}
+              title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
               className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800"
             >
-              <span className="text-lg">{darkMode ? '☀️' : '🌙'}</span>
+              {darkMode ? <Sun className="w-5 h-5 shrink-0" /> : <Moon className="w-5 h-5 shrink-0" />}
               <span className="hidden lg:block">{darkMode ? 'Light' : 'Dark'}</span>
+            </button>
+            <button onClick={() => setShowAiStatus(true)}
+              title="AI status & settings"
+              aria-label="AI status & settings"
+              className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800"
+            >
+              <Settings2 className="w-5 h-5 shrink-0" />
+              <span className="hidden lg:block">AI Status</span>
             </button>
           </div>
         </nav>
@@ -139,7 +178,7 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <h2 className="text-xl font-bold">{selectedEntry ? selectedEntry.title : 'Entries'}</h2>
                   <button onClick={() => setShowEntryForm(true)} className="btn-primary">
-                    + New Entry
+                    <Plus className="w-4 h-4" /> New Entry
                   </button>
                 </div>
                 {loadingDetail ? (
@@ -149,6 +188,7 @@ export default function App() {
                     entry={selectedEntry}
                     onBack={() => setSelectedEntry(null)}
                     onUpdate={(e) => setSelectedEntry(e)}
+                    onSelectEntry={handleSelectStudy}
                   />
                 ) : (
                   <EntryList onSelect={setSelectedEntry} />
@@ -156,14 +196,14 @@ export default function App() {
               </div>
             )}
             {view === 'review' && <ReviewPanel />}
-            {view === 'todos' && <TodoList />}
-            {view === 'thoughts' && <ThoughtsView />}
+            {view === 'todos' && <TodoList onSelectEntry={handleSelectStudy} />}
+            {view === 'thoughts' && <ThoughtsView onSelectEntry={handleSelectStudy} />}
           </div>
         </main>
 
         {/* AI Chat Panel */}
         {showChat && (
-          <aside className="w-[22rem] lg:w-[30rem] xl:w-[34rem] shrink-0 border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 flex flex-col">
+          <aside className="w-full sm:w-[22rem] lg:w-[30rem] xl:w-[34rem] shrink-0 border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 flex flex-col">
             <ChatPanel onClose={() => setShowChat(false)} />
           </aside>
         )}
@@ -180,13 +220,17 @@ export default function App() {
           }}
         />
       )}
+
+      {showAiStatus && <AiStatusModal onClose={() => setShowAiStatus(false)} />}
     </div>
   )
 }
 
 function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
+  const toast = useToast()
   const [entries, setEntries] = useState<Entry[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [offset, setOffset] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [showArchived, setShowArchived] = useState(false)
@@ -196,6 +240,7 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
 
   const load = async (nextOffset = 0, archived = showArchived) => {
     setLoading(true)
+    setError('')
     try {
       const data = await api.entries.list({ limit: 100, offset: nextOffset, archived })
       if (nextOffset === 0) setEntries(data)
@@ -203,7 +248,7 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       setHasMore(data.length === 100)
       setOffset(nextOffset)
     } catch (err) {
-      console.error('Failed to load entries:', err)
+      setError(err instanceof Error ? err.message : 'Failed to load entries')
     } finally {
       setLoading(false)
     }
@@ -223,7 +268,7 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
     try {
       setSearchResults(await api.search(q))
     } catch (err) {
-      console.error('Search failed:', err)
+      toast.error('Search failed: ' + (err instanceof Error ? err.message : 'unknown error'))
       setSearchResults([])
     } finally {
       setSearching(false)
@@ -232,8 +277,17 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
 
   const exportData = async () => {
     try {
-      const [entriesData, relationships, tags] = await Promise.all([
-        api.entries.list({ limit: 500 }),
+      // Export everything, not just the first 500 entries: page through the
+      // whole list until the API returns fewer than a full page.
+      const entriesData: Entry[] = []
+      let offset = 0
+      while (true) {
+        const page = await api.entries.list({ limit: 500, offset })
+        entriesData.push(...page)
+        if (page.length < 500) break
+        offset += 500
+      }
+      const [relationships, tags] = await Promise.all([
         api.relationships.list(),
         api.tags.list(),
       ])
@@ -252,7 +306,7 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       a.click()
       URL.revokeObjectURL(url)
     } catch (err: any) {
-      alert('Export failed: ' + err.message)
+      toast.error('Export failed: ' + (err?.message || 'unknown error'))
     }
   }
 
@@ -262,36 +316,85 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       if (!Array.isArray(data.entries)) throw new Error('Not a ChronoKG export file')
       if (!confirm(`Import ${data.entries.length} entries, ${(data.tags || []).length} tags, ${(data.relationships || []).length} relationships?`)) return
 
+      // Pre-fetch existing tags and entries once for deduping
+      const [existingTags, existingEntries] = await Promise.all([
+        api.tags.list().catch(() => [] as Tag[]),
+        api.entries.list({ limit: 500 }).catch(() => [] as Entry[]),
+      ])
+      const existingTagNames = new Set<string>(existingTags.map(t => String(t.name).toLowerCase()))
+      const existingTitles = new Set<string>(existingEntries.map(e => e.title.trim().toLowerCase().replace(/\s+/g, ' ')))
+
+      const normalizeTitle = (t: any) => String(t).trim().toLowerCase().replace(/\s+/g, ' ')
+      const isDuplicateKeyError = (err: any) => {
+        if (!err) return false
+        const msg = `${err.status ?? ''} ${err.detail ?? ''} ${err.message ?? ''}`
+        return err.status === 409 || /duplicate|unique|already exists/i.test(msg)
+      }
+
       const idMap: Record<number, number> = {}
       let created = 0
+      let skipped = 0
+      let failed = 0
+
       for (const e of data.entries) {
         if (e.archived) continue
-        const entry = await api.entries.create({
-          title: String(e.title).slice(0, 500),
-          content: e.content || '',
-          entry_date: e.entry_date || null,
-          tags: e.tags || '',
-          source: e.source || '',
-          importance: e.importance ?? 3,
-        })
-        idMap[e.id] = entry.id
-        created++
+        const normTitle = normalizeTitle(e.title)
+        if (!normTitle) { failed++; continue }
+        if (existingTitles.has(normTitle)) { skipped++; continue }
+        try {
+          const entry = await api.entries.create({
+            title: String(e.title).slice(0, 500),
+            content: e.content || '',
+            entry_date: e.entry_date || null,
+            tags: e.tags || '',
+            source: e.source || '',
+            importance: e.importance ?? 3,
+            study_type: e.study_type || '',
+            authors: e.authors || '',
+            quality: e.quality ?? null,
+            url_validated: !!e.url_validated,
+            design: e.design || '',
+            effect_direction: e.effect_direction || '',
+            // pdf_path is intentionally not restored: the PDF file itself is
+            // not part of the export, so a stale path would render dead links.
+          })
+          idMap[e.id] = entry.id
+          created++
+          existingTitles.add(normTitle)
+        } catch (err: any) {
+          if (isDuplicateKeyError(err)) { skipped++ }
+          else failed++
+        }
       }
       for (const t of data.tags || []) {
-        if (t.name) await api.tags.create({ name: String(t.name), color: t.color })
+        if (!t.name) continue
+        const tagName = String(t.name)
+        const normName = tagName.toLowerCase()
+        if (existingTagNames.has(normName)) { skipped++; continue }
+        try {
+          await api.tags.create({ name: tagName, color: t.color })
+          existingTagNames.add(normName)
+        } catch (err: any) {
+          if (isDuplicateKeyError(err)) { skipped++ }
+          else failed++
+        }
       }
       for (const r of data.relationships || []) {
         const from = idMap[r.from_id]
         const to = idMap[r.to_id]
         if (from && to && from !== to) {
-          try { await api.relationships.create({ from_id: from, to_id: to, label: r.label || '' }) } catch { /* dedupe */ }
+          try { await api.relationships.create({ from_id: from, to_id: to, label: r.label || '' }) }
+          catch (err: any) {
+            if (isDuplicateKeyError(err)) { skipped++ }
+            else failed++
+          }
         }
       }
-      alert(`Import complete: ${created} entries restored`)
+      toast.success(`Imported ${created} entries, skipped ${skipped} duplicates, ${failed} failed`)
       setSearchResults(null)
       load(0, showArchived)
     } catch (err: any) {
-      alert('Import failed: ' + err.message)
+      toast.error('Import failed: ' + (err?.message || 'unknown error'))
     }
   }
 
@@ -308,18 +411,23 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
             onKeyDown={e => e.key === 'Enter' && runSearch()}
             className="input flex-1"
             placeholder="Search entries (full-text)..."
+            aria-label="Search entries (full-text)"
           />
-          <button onClick={runSearch} disabled={searching} className="btn-secondary">🔎</button>
+          <button onClick={runSearch} disabled={searching} className="btn-secondary" aria-label="Search">
+            <Search className="w-4 h-4" />
+          </button>
         </div>
         <button
           onClick={() => setShowArchived(!showArchived)}
           className={`btn-ghost text-sm ${showArchived ? 'text-chrono-600' : ''}`}
         >
-          {showArchived ? '📦 Archived' : '🗄️ Show archived'}
+          {showArchived ? 'Archived' : 'Show archived'}
         </button>
-        <button onClick={exportData} className="btn-ghost text-sm">⬇️ Export</button>
+        <button onClick={exportData} className="btn-ghost text-sm">
+          <Download className="w-4 h-4" /> Export
+        </button>
         <label className="btn-ghost text-sm cursor-pointer">
-          ⬆️ Import
+          <Upload className="w-4 h-4" /> Import
           <input
             type="file"
             accept=".json,application/json"
@@ -335,6 +443,15 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
 
       {searching ? (
         <div className="text-center py-8 text-gray-500">Searching...</div>
+      ) : error && entries.length === 0 ? (
+        <div className="card text-center py-10 border-red-200 dark:border-red-900 space-y-3">
+          <p className="text-sm text-red-600 dark:text-red-400 flex items-center justify-center gap-2">
+            <AlertTriangle className="w-4 h-4" /> {error}
+          </p>
+          <button onClick={() => load(0, showArchived)} className="btn-secondary text-sm">
+            <RefreshCw className="w-4 h-4" /> Retry
+          </button>
+        </div>
       ) : searchResults !== null ? (
         searchResults.length === 0 ? (
           <div className="card text-center py-10 text-gray-500">No results for "{query.trim()}"</div>
@@ -355,6 +472,16 @@ function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       ) : (
         <>
           <p className="text-sm text-gray-500">{entries.length} entries {showArchived ? '(archived)' : ''}</p>
+          {error && (
+            <div className="card border-red-200 dark:border-red-900 text-sm text-red-600 dark:text-red-400 flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4" /> {error}
+              </span>
+              <button onClick={() => load(0, showArchived)} className="btn-ghost text-sm">
+                <RefreshCw className="w-4 h-4" /> Retry
+              </button>
+            </div>
+          )}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {entries.map(entry => (
               <button key={entry.id} onClick={() => onSelect(entry)}

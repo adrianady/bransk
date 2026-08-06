@@ -6,6 +6,25 @@
   body {
     @apply antialiased;
   }
+  /* Visible keyboard focus everywhere (WCAG 2.4.7). */
+  :focus-visible {
+    outline: 2px solid #4c6ef5;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .dark :focus-visible {
+    outline-color: #748ffc;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
   /* Default text color for dark mode; explicit `dark:text-*` classes win. */
   .dark {
     color: #e5e7eb;
@@ -29,7 +48,7 @@
     @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors;
   }
   .btn-primary {
-    @apply btn bg-chrono-600 text-white hover:bg-chrono-700;
+    @apply btn bg-chrono-700 text-white hover:bg-chrono-800;
   }
   .btn-secondary {
     @apply btn bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600;
@@ -48,6 +67,9 @@
   }
   .badge {
     @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .icon-btn {
+    @apply inline-flex items-center justify-center rounded-lg p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors;
   }
 }
 

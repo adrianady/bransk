@@ -212,6 +212,8 @@ export interface TheoryNode {
   status: TheoryStatus;
   pro_count: number;
   contra_count: number;
+  pro_weight: number;
+  contra_weight: number;
   children: TheoryNode[];
 }
 

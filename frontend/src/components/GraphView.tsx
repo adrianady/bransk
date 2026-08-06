@@ -27,8 +27,10 @@ type Period = 'all' | 'year' | 'decade'
 export function GraphView({ onSelectEntry }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const networkRef = useRef<any>(null)
+  const requestSeq = useRef(0)
   const [graphData, setGraphData] = useState<GraphData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [visLoaded, setVisLoaded] = useState(false)
   const [entries, setEntries] = useState<TimelineEntry[]>([])
   const [tagFilter, setTagFilter] = useState('')
@@ -50,20 +52,29 @@ export function GraphView({ onSelectEntry }: Props) {
     return () => observer.disconnect()
   }, [])
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const [graph, timeline] = await Promise.all([
-          api.relationships.graph(),
-          api.timeline.get(),
-        ])
-        setGraphData(graph)
-        setEntries(timeline.entries)
-      } finally {
-        setLoading(false)
-      }
+  const loadData = async () => {
+    const seq = ++requestSeq.current
+    setLoading(true)
+    setError('')
+    try {
+      const [graph, timeline] = await Promise.all([
+        api.relationships.graph(),
+        api.timeline.get(),
+      ])
+      if (seq !== requestSeq.current) return
+      setGraphData(graph)
+      setEntries(timeline.entries)
+    } catch (err) {
+      if (seq !== requestSeq.current) return
+      setError(err instanceof Error ? err.message : 'Failed to load the graph')
+    } finally {
+      if (seq === requestSeq.current) setLoading(false)
     }
-    load()
+  }
+
+  useEffect(() => {
+    loadData()
+    return () => { requestSeq.current++ }
   }, [])
 
   const allTags = useMemo(() => {
@@ -138,7 +149,9 @@ export function GraphView({ onSelectEntry }: Props) {
         nodes: {
           shape: 'dot',
           scaling: { min: 12, max: 32, label: { min: 10, max: 22, drawThreshold: 14 } },
-          font: { size: 13, face: 'Inter, sans-serif', color: isDark ? '#e5e7eb' : '#374151' },
+          font: { size: 12, face: 'Inter, sans-serif', color: isDark ? '#e5e7eb' : '#374151' },
+          // Wrap long study/theory titles instead of clipping them.
+          widthConstraint: { maximum: 260 },
           shadow: true,
           labelHighlightBold: true,
         },
@@ -200,12 +213,21 @@ export function GraphView({ onSelectEntry }: Props) {
 
   if (loading) return <div className="text-center py-8 text-gray-500">Loading graph...</div>
 
+  if (error && !graphData) {
+    return (
+      <div className="card text-center py-12 border-red-200 dark:border-red-900">
+        <p className="text-red-600 dark:text-red-400 mb-2">⚠️ {error}</p>
+        <button onClick={loadData} className="btn-secondary">↻ Retry</button>
+      </div>
+    )
+  }
+
   if (!graphData || graphData.nodes.length === 0) {
     return (
       <div className="card text-center py-12">
         <p className="text-gray-500 mb-2">No graph data yet.</p>
         <p className="text-sm text-gray-400">Create entries and link them to see the knowledge graph.</p>
-        <button onClick={() => window.location.reload()} className="btn-secondary mt-4">Refresh</button>
+        <button onClick={loadData} className="btn-secondary mt-4">↻ Refresh</button>
       </div>
     )
   }

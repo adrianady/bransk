@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
+import { useToast } from './Toast'
 import type { MaintenanceReport, SpacedRepetitionItem } from '../lib/types'
 
 export function ReviewPanel() {
@@ -150,6 +151,7 @@ function IntegrityMode() {
 // ── Spaced repetition mode (preserved) ─────────────────────────────────────
 
 function SpacedRepetitionMode() {
+  const toast = useToast()
   const [queue, setQueue] = useState<SpacedRepetitionItem[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [showAnswer, setShowAnswer] = useState(false)
@@ -162,6 +164,8 @@ function SpacedRepetitionMode() {
       setQueue(items)
       setCurrentIndex(0)
       setShowAnswer(false)
+    } catch (err: any) {
+      toast.error('Could not load review queue: ' + (err?.message || 'unknown error'))
     } finally {
       setLoading(false)
     }
@@ -171,12 +175,16 @@ function SpacedRepetitionMode() {
 
   const submitRating = async (quality: number) => {
     const item = queue[currentIndex]
-    await api.spacedRepetition.review(item.id, quality)
-    if (currentIndex < queue.length - 1) {
-      setCurrentIndex(prev => prev + 1)
-      setShowAnswer(false)
-    } else {
-      await loadQueue()
+    try {
+      await api.spacedRepetition.review(item.id, quality)
+      if (currentIndex < queue.length - 1) {
+        setCurrentIndex(prev => prev + 1)
+        setShowAnswer(false)
+      } else {
+        await loadQueue()
+      }
+    } catch (err: any) {
+      toast.error('Could not submit rating: ' + (err?.message || 'unknown error'))
     }
   }
 
@@ -265,7 +273,7 @@ function SpacedRepetitionMode() {
                   { q: 5, label: 'Perfect recall', color: 'bg-green-500' },
                 ].map(({ q, label, color }) => (
                   <button key={q} onClick={() => submitRating(q)}
-                    className={`${color} text-white rounded-lg px-3 py-4 text-sm font-medium hover:opacity-90 transition-opacity`}
+                    className={`${color} text-gray-900 rounded-lg px-3 py-4 text-sm font-medium hover:opacity-90 transition-opacity`}
                   >
                     {q}
                     <br />

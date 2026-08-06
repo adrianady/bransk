@@ -13,6 +13,37 @@ from app.models import Theory, TheoryCreate, TheoryNode, TheoryUpdate, TheoryEvi
 router = APIRouter()
 
 
+def _status_from_evidence(pro: int, contra: int) -> str:
+    """Derive a theory status from its evidence balance (matches the
+    maintenance-mode recompute so the tree always tells one consistent story)."""
+    if pro and contra:
+        return "contested"
+    if pro and not contra:
+        return "supported"
+    if contra and not pro:
+        return "refuted"
+    return "emerging"
+
+
+def _recompute_status(conn, theory_id: int) -> str:
+    """Recalculate and persist a theory's status from its evidence balance."""
+    row = conn.execute(
+        """SELECT
+               SUM(CASE WHEN stance = 'pro' THEN 1 ELSE 0 END) AS pro,
+               SUM(CASE WHEN stance = 'contra' THEN 1 ELSE 0 END) AS contra
+           FROM theory_evidence WHERE theory_id = ?""",
+        [theory_id],
+    ).fetchone()
+    pro = row["pro"] or 0
+    contra = row["contra"] or 0
+    status = _status_from_evidence(pro, contra)
+    conn.execute(
+        "UPDATE theories SET status = ?, updated_at = datetime('now') WHERE id = ?",
+        [status, theory_id],
+    )
+    return status
+
+
 def _fetch_theory(conn, theory_id: int) -> dict:
     row = conn.execute("SELECT * FROM theories WHERE id = ?", [theory_id]).fetchone()
     if not row:
@@ -38,14 +69,16 @@ def get_theory_tree():
         rows = conn.execute(
             """SELECT t.*,
                       (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro') AS pro_count,
-                      (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra') AS contra_count
+                      (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra') AS contra_count,
+                      (SELECT COALESCE(SUM(te.weight), 0) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro') AS pro_weight,
+                      (SELECT COALESCE(SUM(te.weight), 0) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra') AS contra_weight
                FROM theories t
                ORDER BY t.name"""
         ).fetchall()
         nodes = {r["id"]: TheoryNode(**dict(r)) for r in rows}
         roots = []
         for node in nodes.values():
-            if node.parent_id and node.parent_id in nodes:
+            if node.parent_id and node.parent_id in nodes and node.parent_id != node.id:
                 nodes[node.parent_id].children.append(node)
             else:
                 roots.append(node)
@@ -173,6 +206,7 @@ def add_evidence(theory_id: int, data: TheoryEvidenceIn):
                VALUES (?, ?, ?, ?, ?)""",
             [theory_id, data.entry_id, data.stance, data.note, data.weight],
         )
+        _recompute_status(conn, theory_id)
         conn.commit()
         row = conn.execute(
             """SELECT te.id, te.theory_id, te.entry_id, e.title AS entry_title,
@@ -197,6 +231,8 @@ def delete_evidence(theory_id: int, evidence_id: int):
             "DELETE FROM theory_evidence WHERE id = ? AND theory_id = ?",
             [evidence_id, theory_id],
         )
+        if cur.rowcount:
+            _recompute_status(conn, theory_id)
         conn.commit()
         if cur.rowcount == 0:
             raise HTTPException(404, "Evidence not found")

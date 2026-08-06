@@ -38,7 +38,9 @@ def _execute_search(q: str, from_date: Optional[str], to_date: Optional[str], ta
     try:
         safe_query = _sanitize_fts5(q)
         params: list = [safe_query]
-        where_extra = []
+        # Archived entries must never surface in search results (consistent
+        # with chat context building and /entries?archived=false).
+        where_extra = ["e.archived = 0"]
 
         if from_date:
             where_extra.append("e.entry_date >= ?")
@@ -50,8 +52,10 @@ def _execute_search(q: str, from_date: Optional[str], to_date: Optional[str], ta
             for t in tags.split(","):
                 t = t.strip()
                 if t:
-                    where_extra.append("e.tags LIKE ?")
-                    params.append(f"%{t}%")
+                    # Exact token match on comma boundaries: '%ann%' would
+                    # also match 'annual'; this only matches the whole tag.
+                    where_extra.append("(',' || e.tags || ',') LIKE '%,' || ? || ',%'")
+                    params.append(t)
 
         extra_sql = f" AND {' AND '.join(where_extra)}" if where_extra else ""
 

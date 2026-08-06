@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Plus } from 'lucide-react'
 import 'vis-timeline/styles/vis-timeline-graph2d.min.css'
 import { api } from '../lib/api'
 import type { TimelineEntry, TimelineStats } from '../lib/types'
@@ -22,9 +23,11 @@ const escapeHtml = (s: string) =>
 export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<any>(null)
+  const requestSeq = useRef(0)
   const [entries, setEntries] = useState<TimelineEntry[]>([])
   const [stats, setStats] = useState<TimelineStats | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [filterTag, setFilterTag] = useState('')
   const [filterFrom, setFilterFrom] = useState('')
   const [filterTo, setFilterTo] = useState('')
@@ -37,25 +40,42 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
   }, [])
 
   const loadEntries = async () => {
+    const seq = ++requestSeq.current
     setLoading(true)
+    setError('')
     try {
       const data = await api.timeline.get({
         from_date: filterFrom || undefined,
         to_date: filterTo || undefined,
         tags: filterTag || undefined,
       })
+      if (seq !== requestSeq.current) return
       setEntries(data.entries)
       const s = await api.timeline.stats()
+      if (seq !== requestSeq.current) return
       setStats(s)
       const tags = new Set<string>()
       data.entries.forEach(e => e.tags.split(',').map(t => t.trim()).filter(Boolean).forEach(t => tags.add(t)))
+      // Include tags that exist but have no entry in the current view, so the
+      // filter never hides a tag the user can't otherwise select.
+      try {
+        const all = await api.tags.list()
+        all.forEach(t => { if (t.name) tags.add(t.name) })
+      } catch { /* tag list is best-effort */ }
+      if (seq !== requestSeq.current) return
       setAllTags(Array.from(tags).sort())
+    } catch (err) {
+      if (seq !== requestSeq.current) return
+      setError(err instanceof Error ? err.message : 'Failed to load the timeline')
     } finally {
-      setLoading(false)
+      if (seq === requestSeq.current) setLoading(false)
     }
   }
 
-  useEffect(() => { loadEntries() }, [filterTag, filterFrom, filterTo])
+  useEffect(() => {
+    loadEntries()
+    return () => { requestSeq.current++ }
+  }, [filterTag, filterFrom, filterTo])
 
   useEffect(() => {
     if (!containerRef.current || entries.length === 0 || !visLoaded) return
@@ -139,15 +159,17 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
           <h2 className="text-xl font-bold">Timeline</h2>
           {stats && <p className="text-sm text-gray-500">{stats.total} entries · {stats.earliest || 'no dates'} → {stats.latest || 'no dates'}</p>}
         </div>
-        <button onClick={onCreateEntry} className="btn-primary">+ New Entry</button>
+        <button onClick={onCreateEntry} className="btn-primary">
+          <Plus className="w-4 h-4" /> New Entry
+        </button>
       </div>
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3 mb-4">
         <input type="date" value={filterFrom} onChange={e => setFilterFrom(e.target.value)}
-          className="input w-auto" placeholder="From date" />
+          className="input w-auto" aria-label="From date" />
         <input type="date" value={filterTo} onChange={e => setFilterTo(e.target.value)}
-          className="input w-auto" placeholder="To date" />
+          className="input w-auto" aria-label="To date" />
         <select value={filterTag} onChange={e => setFilterTag(e.target.value)}
           className="input w-auto">
           <option value="">All tags</option>
@@ -162,12 +184,27 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
       {/* Timeline */}
       {loading ? (
         <div className="text-center py-8 text-gray-500">Loading timeline...</div>
-      ) : entries.filter(e => e.entry_date).length === 0 ? (
-        <div className="card text-center py-8">
-          <p className="text-gray-500 mb-2">No dated entries on the timeline yet.</p>
-          <p className="text-sm text-gray-400">Create an entry with a date to see it here.</p>
-          <button onClick={onCreateEntry} className="btn-primary mt-4">Create your first entry</button>
+      ) : error && entries.length === 0 ? (
+        <div className="card text-center py-8 border-red-200 dark:border-red-900">
+          <p className="text-red-600 dark:text-red-400 mb-2">⚠️ {error}</p>
+          <button onClick={loadEntries} className="btn-secondary">↻ Retry</button>
         </div>
+      ) : entries.filter(e => e.entry_date).length === 0 ? (
+        entries.length > 0 ? (
+          <div className="card text-center py-8">
+            <p className="text-gray-500 mb-2">No dated entries match the current filters.</p>
+            <button
+              onClick={() => { setFilterFrom(''); setFilterTo(''); setFilterTag('') }}
+              className="btn-ghost text-sm"
+            >Clear filters</button>
+          </div>
+        ) : (
+          <div className="card text-center py-8">
+            <p className="text-gray-500 mb-2">No dated entries on the timeline yet.</p>
+            <p className="text-sm text-gray-400">Create an entry with a date to see it here.</p>
+            <button onClick={onCreateEntry} className="btn-primary mt-4">Create your first entry</button>
+          </div>
+        )
       ) : (
         <>
           {/* Importance legend */}

@@ -8,3 +8,8 @@ frontend/dist/
 .agents/
 CHRONOKG_DETAILED_REVIEW.md
 .DS_Store
+.chunkhound/
+.chunkhound.db
+.chunkhound.db.root.json
+.chunkhound.json
+.pytest_cache/

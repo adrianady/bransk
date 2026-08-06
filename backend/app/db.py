@@ -17,6 +17,9 @@ def get_db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Avoid "database is locked" failures when the LLM action parser or the
+    # background scheduler writes concurrently with other requests.
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -136,6 +139,33 @@ def init_db():
                 model       TEXT DEFAULT '',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            -- AI call observability (provider, latency, failures)
+            CREATE TABLE IF NOT EXISTS ai_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider    TEXT DEFAULT '',
+                model       TEXT DEFAULT '',
+                endpoint    TEXT DEFAULT '',
+                ok          INTEGER DEFAULT 1,
+                error       TEXT DEFAULT '',
+                latency_ms  INTEGER DEFAULT 0,
+                prompt_chars INTEGER DEFAULT 0,
+                reply_chars INTEGER DEFAULT 0,
+                prompt_tokens INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- PDF full-text chunks for semantic retrieval (RAG over papers)
+            CREATE TABLE IF NOT EXISTS documents (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                chunk_index INTEGER DEFAULT 0,
+                content     TEXT NOT NULL,
+                embedding   TEXT DEFAULT '',  -- JSON float array
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_documents_entry ON documents(entry_id);
         """)
 
         # Create FTS5 virtual table for full-text search
@@ -180,6 +210,17 @@ def init_db():
         for col, ddl in _add_column:
             try:
                 conn.execute(f"ALTER TABLE entries ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        # ── Migration: AI observability token counters (added later) ──
+        for col, ddl in [
+            ("prompt_tokens", "INTEGER DEFAULT 0"),
+            ("completion_tokens", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE ai_events ADD COLUMN {col} {ddl}")
                 conn.commit()
             except sqlite3.OperationalError:
                 pass  # column already exists

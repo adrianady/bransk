@@ -3,9 +3,10 @@ import type { Entry, Relationship, Tag, TimelineEntry, TimelineStats, GraphData,
 // Dynamic API Base URL resolution with fallback to relative /api proxy
 const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/api';
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function request<T>(path: string, options?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s network timeout
+  const timeoutMs = options?.timeoutMs ?? 30000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(`${BASE}${path}`, {
@@ -24,7 +25,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   } catch (err: any) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
-      throw new Error('Request timed out after 30 seconds');
+      throw new Error(`Request timed out after ${timeoutMs / 1000} seconds`);
     }
     throw err;
   }
@@ -112,6 +113,11 @@ export const api = {
       clear: () => request<void>('/chat/history', { method: 'DELETE' }),
     },
     health: () => request<ProviderHealth>('/chat/health'),
+    confirm: (confirmId: string, approve = true) =>
+      request<{ status: string; result?: { type: string; entry_id?: number } }>('/chat/confirm', {
+        method: 'POST',
+        body: JSON.stringify({ confirm_id: confirmId, approve }),
+      }),
   },
 
   // Spaced Repetition
@@ -176,6 +182,7 @@ export const api = {
       request<ResearchResult>('/research', {
         method: 'POST',
         body: JSON.stringify({ topic, depth, save }),
+        timeoutMs: 300000, // deep research runs many LLM + web calls
       }),
     stream: (topic: string, depth: 'quick' | 'deep' = 'deep', save = true, signal?: AbortSignal) =>
       fetch(`${BASE}/research/stream`, {
@@ -189,8 +196,16 @@ export const api = {
   // Studies (entries with study_type set)
   studies: {
     list: () => request<Entry[]>('/studies'),
-    download: (id: number) => request<{ pdf_path: string }>(`/studies/${id}/download`, { method: 'POST' }),
-    downloadAll: () => request<{ downloaded: number[]; failed: { id: number; title: string }[] }>('/studies/download-all', { method: 'POST' }),
+    download: (id: number) =>
+      request<{ pdf_path: string; indexed_chunks?: number }>(`/studies/${id}/download`, { method: 'POST' }),
+    downloadAll: () =>
+      request<{ downloaded: number[]; failed: { id: number; title: string }[]; indexed_chunks?: number }>(
+        '/studies/download-all',
+        {
+          method: 'POST',
+          timeoutMs: 300000, // batch downloads can take minutes
+        },
+      ),
     pdfUrl: (id: number) => `${BASE}/studies/${id}/pdf`,
   },
 
@@ -213,11 +228,19 @@ export const api = {
 
   // Data integrity / re-analysis
   maintenance: {
-    analyze: (signal?: AbortSignal) =>
-      fetch(`${BASE}/maintenance/analyze`, {
+    analyze: (signal?: AbortSignal) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      const onExternalAbort = () => controller.abort();
+      signal?.addEventListener('abort', onExternalAbort);
+      return fetch(`${BASE}/maintenance/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal,
-      }),
+        signal: controller.signal,
+      }).finally(() => {
+        clearTimeout(timeoutId);
+        signal?.removeEventListener('abort', onExternalAbort);
+      });
+    },
   },
 };

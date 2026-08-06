@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import { useToast } from './Toast'
 import type { Entry, TheoryEvidence, TheoryNode, TheoryStatus } from '../lib/types'
 
 interface Props {
@@ -24,12 +25,15 @@ const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 export function TheoriesView({ onSelectEntry }: Props) {
+  const toast = useToast()
   const containerRef = useRef<HTMLDivElement>(null)
   const networkRef = useRef<any>(null)
+  const fitTimerRef = useRef<number | null>(null)
   const [tree, setTree] = useState<TheoryNode[]>([])
   const [theories, setTheories] = useState<TheoryNode[]>([])
   const [allEntries, setAllEntries] = useState<Entry[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [visLoaded, setVisLoaded] = useState(false)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [evidence, setEvidence] = useState<TheoryEvidence[]>([])
@@ -43,6 +47,7 @@ export function TheoriesView({ onSelectEntry }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true)
+    setError('')
     try {
       const [treeData, entries] = await Promise.all([
         api.theories.tree(),
@@ -54,6 +59,8 @@ export function TheoriesView({ onSelectEntry }: Props) {
       visit(treeData)
       setTheories(flat)
       setAllEntries(entries)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load the theory tree')
     } finally {
       setLoading(false)
     }
@@ -78,13 +85,18 @@ export function TheoriesView({ onSelectEntry }: Props) {
     const nodes: any[] = []
     const edges: any[] = []
     const visit = (node: TheoryNode) => {
+      const hasEvidence = node.pro_count + node.contra_count > 0
       nodes.push({
         id: `t${node.id}`,
-        label: node.name.length > 42 ? node.name.slice(0, 40) + '…' : node.name,
+        // Evidence signal is the core datum of this view — show it on the node
+        // itself instead of hiding it in the tooltip.
+        label: hasEvidence ? `${node.name}\n↗ ${node.pro_count}   ↘ ${node.contra_count}` : node.name,
         shape: 'box',
         margin: { top: 8, right: 12, bottom: 8, left: 12 },
         color: { background: statusColors[node.status], border: '#1f2937' },
-        font: { color: '#ffffff', size: 13, face: 'Inter, sans-serif' },
+        font: { color: '#1f2937', size: 13, face: 'Inter, sans-serif' },
+        // Wrap long theory names instead of truncating them.
+        widthConstraint: { maximum: 260 },
         shadow: true,
         title:
           `<b>${escapeHtml(node.name)}</b><br/>` +
@@ -130,7 +142,7 @@ export function TheoriesView({ onSelectEntry }: Props) {
           font: { size: 10, color: '#94a3b8' },
           smooth: { enabled: true, type: 'cubicBezier', roundness: 0.5 },
         },
-        interaction: { hover: true, tooltipDelay: 150 },
+        interaction: { hover: true, tooltipDelay: 150, selectable: true, multiselect: false },
       })
       networkRef.current = net
       net.on('click', (props: { nodes: string[] }) => {
@@ -138,17 +150,30 @@ export function TheoriesView({ onSelectEntry }: Props) {
           setSelectedId(Number(String(props.nodes[0]).replace('t', '')))
         }
       })
-      setTimeout(() => net.fit({ animation: false }), 60)
+      fitTimerRef.current = window.setTimeout(() => {
+        if (networkRef.current) net.fit({ animation: false })
+      }, 60)
     }
     init()
     return () => {
       isMounted = false
+      if (fitTimerRef.current) {
+        clearTimeout(fitTimerRef.current)
+        fitTimerRef.current = null
+      }
       if (networkRef.current) {
         networkRef.current.destroy()
         networkRef.current = null
       }
     }
   }, [visLoaded, nodes, edges])
+
+  // Keep the canvas selection in sync when a node is picked from the list.
+  useEffect(() => {
+    if (networkRef.current && selectedId != null) {
+      networkRef.current.selectNodes([`t${selectedId}`])
+    }
+  }, [selectedId, visLoaded])
 
   const selected = selectedId ? theories.find(t => t.id === selectedId) : null
   const proEvidence = evidence.filter(e => e.stance === 'pro')
@@ -157,42 +182,66 @@ export function TheoriesView({ onSelectEntry }: Props) {
 
   const saveEdit = async () => {
     if (!selectedId) return
-    await api.theories.update(selectedId, {
-      name: editForm.name.trim() || selected?.name,
-      description: editForm.description,
-      status: editForm.status,
-      parent_id: editForm.parent_id ? Number(editForm.parent_id) : null,
-    })
-    await load()
+    try {
+      await api.theories.update(selectedId, {
+        name: editForm.name.trim() || selected?.name,
+        description: editForm.description,
+        status: editForm.status,
+        parent_id: editForm.parent_id ? Number(editForm.parent_id) : null,
+      })
+      await load()
+      toast.success('Theory updated')
+    } catch (err: any) {
+      toast.error('Could not save theory: ' + (err?.message || 'unknown error'))
+    }
   }
 
   const addEvidence = async () => {
     if (!selectedId || !evForm.entry_id) return
-    await api.theories.addEvidence(selectedId, {
-      entry_id: Number(evForm.entry_id),
-      stance: evForm.stance,
-      note: evForm.note,
-      weight: evForm.weight,
-    })
-    setEvForm({ entry_id: '', stance: 'pro', note: '', weight: 3 })
-    setShowAddEvidence(false)
-    await Promise.all([api.theories.evidence(selectedId).then(setEvidence), load()])
+    try {
+      await api.theories.addEvidence(selectedId, {
+        entry_id: Number(evForm.entry_id),
+        stance: evForm.stance,
+        note: evForm.note,
+        weight: evForm.weight,
+      })
+      setEvForm({ entry_id: '', stance: 'pro', note: '', weight: 3 })
+      setShowAddEvidence(false)
+      await Promise.all([api.theories.evidence(selectedId).then(setEvidence), load()])
+      toast.success('Evidence linked')
+    } catch (err: any) {
+      toast.error('Could not link evidence: ' + (err?.message || 'unknown error'))
+    }
   }
 
   const addSubTheory = async () => {
     if (!selectedId || !subForm.name.trim()) return
-    await api.theories.create({
-      name: subForm.name.trim(),
-      description: subForm.description,
-      parent_id: selectedId,
-      status: 'emerging',
-    })
-    setSubForm({ name: '', description: '' })
-    setShowAddSub(false)
-    await load()
+    try {
+      await api.theories.create({
+        name: subForm.name.trim(),
+        description: subForm.description,
+        parent_id: selectedId,
+        status: 'emerging',
+      })
+      setSubForm({ name: '', description: '' })
+      setShowAddSub(false)
+      await load()
+      toast.success('Sub-theory created')
+    } catch (err: any) {
+      toast.error('Could not create sub-theory: ' + (err?.message || 'unknown error'))
+    }
   }
 
   if (loading) return <div className="text-center py-8 text-gray-500">Loading theory aggregator...</div>
+
+  if (error && theories.length === 0) {
+    return (
+      <div className="card text-center py-12 border-red-200 dark:border-red-900">
+        <p className="text-red-600 dark:text-red-400 mb-2">⚠️ {error}</p>
+        <button onClick={() => load()} className="btn-secondary">↻ Retry</button>
+      </div>
+    )
+  }
 
   return (
     <div>
@@ -203,17 +252,29 @@ export function TheoriesView({ onSelectEntry }: Props) {
             {theories.length} theories · {totalEvidence} evidence links · a theory can derive into sub-theories
           </p>
         </div>
-        <button onClick={() => setShowCreate(true)} className="btn-primary">+ New Theory</button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => networkRef.current?.fit({ animation: true })}
+            className="btn-secondary"
+            title="Fit the tree into view"
+            aria-label="Reset tree view"
+          >⛶ Reset view</button>
+          <button onClick={() => setShowCreate(true)} className="btn-primary">+ New Theory</button>
+        </div>
       </div>
 
       {/* Status legend */}
       <div className="flex flex-wrap gap-3 mb-3 px-1 text-xs text-gray-500">
-        {(Object.keys(statusLabels) as TheoryStatus[]).map(s => (
+      {(Object.keys(statusLabels) as TheoryStatus[]).map(s => (
           <span key={s} className="flex items-center gap-1.5">
             <span className="w-3 h-3 rounded inline-block" style={{ background: statusColors[s] }} />
             {statusLabels[s]}
           </span>
         ))}
+        <span className="flex items-center gap-1.5 text-gray-400">
+          nodes show <span className="font-medium text-green-600 dark:text-green-400">↗ pro</span>
+          <span className="font-medium text-red-600 dark:text-red-400">↘ contra</span> evidence counts
+        </span>
       </div>
 
       {theories.length === 0 ? (
@@ -225,7 +286,25 @@ export function TheoriesView({ onSelectEntry }: Props) {
           <button onClick={() => setShowCreate(true)} className="btn-primary mt-4">Create your first theory</button>
         </div>
       ) : (
-        <div className="card mb-4" style={{ height: '52vh' }} ref={containerRef} />
+        <>
+          <div className="card mb-2" style={{ height: '52vh' }} ref={containerRef} />
+          {/* Keyboard-accessible fallback list (vis-network canvas is not
+              keyboard-navigable) — every node is reachable and selectable. */}
+          <div className="card mb-4 p-3 max-h-64 overflow-y-auto" aria-label="Theory tree list">
+            <h3 className="font-semibold text-sm mb-2">Theory tree (keyboard accessible)</h3>
+            <ul className="space-y-0.5">
+              {tree.map(root => (
+                <TreeNodeRow
+                  key={root.id}
+                  node={root}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  depth={0}
+                />
+              ))}
+            </ul>
+          </div>
+        </>
       )}
 
       {/* Create root theory */}
@@ -290,9 +369,14 @@ export function TheoriesView({ onSelectEntry }: Props) {
                 <button
                   onClick={async () => {
                     if (confirm('Delete this theory? Evidence is removed; sub-theories become roots.')) {
-                      await api.theories.delete(selected.id)
-                      setSelectedId(null)
-                      await load()
+                      try {
+                        await api.theories.delete(selected.id)
+                        setSelectedId(null)
+                        await load()
+                        toast.success('Theory deleted')
+                      } catch (err: any) {
+                        toast.error('Could not delete theory: ' + (err?.message || 'unknown error'))
+                      }
                     }
                   }}
                   className="btn-ghost text-sm text-red-500"
@@ -360,9 +444,16 @@ export function TheoriesView({ onSelectEntry }: Props) {
                         }}
                       >{ev.entry_title}</button>
                       <button onClick={async () => {
-                        await api.theories.removeEvidence(selected.id, ev.id)
-                        await Promise.all([api.theories.evidence(selected.id).then(setEvidence), load()])
-                      }} className="text-red-400 text-xs shrink-0">✕</button>
+                        try {
+                          await api.theories.removeEvidence(selected.id, ev.id)
+                          await Promise.all([api.theories.evidence(selected.id).then(setEvidence), load()])
+                        } catch (err: any) {
+                          toast.error('Could not remove evidence: ' + (err?.message || 'unknown error'))
+                        }
+                      }} className="text-red-400 text-xs shrink-0"
+                        aria-label={`Remove evidence: ${ev.entry_title}`}
+                        title="Remove evidence"
+                      >✕</button>
                     </div>
                   ))}
                   {proEvidence.length === 0 && <p className="text-xs text-gray-400">No supporting studies yet.</p>}
@@ -381,9 +472,16 @@ export function TheoriesView({ onSelectEntry }: Props) {
                         }}
                       >{ev.entry_title}</button>
                       <button onClick={async () => {
-                        await api.theories.removeEvidence(selected.id, ev.id)
-                        await Promise.all([api.theories.evidence(selected.id).then(setEvidence), load()])
-                      }} className="text-red-400 text-xs shrink-0">✕</button>
+                        try {
+                          await api.theories.removeEvidence(selected.id, ev.id)
+                          await Promise.all([api.theories.evidence(selected.id).then(setEvidence), load()])
+                        } catch (err: any) {
+                          toast.error('Could not remove evidence: ' + (err?.message || 'unknown error'))
+                        }
+                      }} className="text-red-400 text-xs shrink-0"
+                        aria-label={`Remove evidence: ${ev.entry_title}`}
+                        title="Remove evidence"
+                      >✕</button>
                     </div>
                   ))}
                   {contraEvidence.length === 0 && <p className="text-xs text-gray-400">No contradicting studies yet.</p>}
@@ -394,5 +492,51 @@ export function TheoriesView({ onSelectEntry }: Props) {
         </div>
       )}
     </div>
+  )
+}
+
+
+function TreeNodeRow({ node, selectedId, onSelect, depth }: {
+  node: TheoryNode
+  selectedId: number | null
+  onSelect: (id: number) => void
+  depth: number
+}) {
+  const hasEvidence = node.pro_count + node.contra_count > 0
+  return (
+    <li>
+      <button
+        onClick={() => onSelect(node.id)}
+        aria-pressed={selectedId === node.id}
+        className={`w-full text-left text-sm flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors ${
+          selectedId === node.id ? 'bg-chrono-100 text-chrono-700 dark:bg-chrono-900/40 dark:text-chrono-300' : ''
+        }`}
+        title={node.description || node.name}
+      >
+        <span className="inline-block shrink-0" style={{ width: depth * 18 }} aria-hidden="true" />
+        <span className="w-2.5 h-2.5 rounded-full shrink-0 inline-block" style={{ background: statusColors[node.status] }} aria-hidden="true" />
+        <span className="min-w-0 truncate">{node.name}</span>
+        {hasEvidence && (
+          <span className="text-xs text-gray-500 shrink-0">
+            <span className="text-green-600 dark:text-green-400">↗{node.pro_count}</span>{' '}
+            <span className="text-red-600 dark:text-red-400">↘{node.contra_count}</span>
+          </span>
+        )}
+        <span className="text-[10px] uppercase tracking-wide text-gray-400 shrink-0">{statusLabels[node.status]}</span>
+      </button>
+      {node.children.length > 0 && (
+        <ul>
+          {node.children.map(child => (
+            <TreeNodeRow
+              key={child.id}
+              node={child}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              depth={depth + 1}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
   )
 }

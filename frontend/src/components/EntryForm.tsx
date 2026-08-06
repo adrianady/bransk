@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
+import { X } from 'lucide-react'
 import { api } from '../lib/api'
+import { useToast } from './Toast'
 import type { Entry, Tag } from '../lib/types'
 
 interface Props {
@@ -9,6 +11,7 @@ interface Props {
 }
 
 export function EntryForm({ onClose, onSaved, editEntry }: Props) {
+  const toast = useToast()
   const [title, setTitle] = useState(editEntry?.title || '')
   const [content, setContent] = useState(editEntry?.content || '')
   const [entryDate, setEntryDate] = useState(editEntry?.entry_date || '')
@@ -26,6 +29,15 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
   useEffect(() => {
     api.tags.list().then(setAllTags)
   }, [])
+
+  // Esc closes the modal.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
 
   const addTag = (tagName: string) => {
     const current = tags.split(',').map(t => t.trim()).filter(Boolean)
@@ -52,6 +64,7 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
           authors: isStudy ? authors.trim() : '',
           quality: isStudy ? quality : null,
         })
+        toast.success('Entry updated')
         onSaved(updated)
       } else {
         const created = await api.entries.create({
@@ -65,21 +78,27 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
           authors: isStudy ? authors.trim() : '',
           quality: isStudy ? quality : null,
         })
+        toast.success('Entry created')
         onSaved(created)
       }
     } catch (err: any) {
-      alert('Error saving: ' + err.message)
+      toast.error('Error saving: ' + (err?.message || 'unknown error'))
     } finally {
       setSaving(false)
     }
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
           <h2 className="text-lg font-bold">{editEntry ? 'Edit Entry' : 'New Entry'}</h2>
-          <button onClick={onClose} className="btn-ghost p-1 text-xl">✕</button>
+          <button onClick={onClose} className="icon-btn" aria-label="Close dialog" title="Close (Esc)">
+            <X className="w-5 h-5" />
+          </button>
         </div>
 
         <div className="p-4 space-y-4">

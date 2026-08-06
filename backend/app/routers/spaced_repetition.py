@@ -48,7 +48,7 @@ def get_review_queue():
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT * FROM spaced_repetition WHERE next_review IS NULL OR next_review <= datetime('now') ORDER BY next_review ASC"
+            "SELECT * FROM spaced_repetition WHERE next_review IS NULL OR julianday(next_review) <= julianday('now') ORDER BY next_review ASC"
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -102,7 +102,7 @@ def submit_review(item_id: int, data: ReviewSubmit):
         ef, interval, reps = _sm2_calc(
             data.quality, item["ease_factor"], item["interval"], item["repetitions"]
         )
-        next_review = (datetime.now(timezone.utc) + timedelta(days=interval)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        next_review = (datetime.now(timezone.utc) + timedelta(days=interval)).strftime("%Y-%m-%dT%H:%M:%S")
 
         # Record review
         conn.execute(

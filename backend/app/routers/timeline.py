@@ -19,7 +19,15 @@ def get_timeline(
 ):
     conn = get_db()
     try:
-        where = ["e.archived = 0"]
+        # Only ISO YYYY-MM-DD dates belong on the timeline — free-text values
+        # (e.g. a description pasted into the date field) would break both the
+        # chronological ordering and the vis-timeline parser. Undated entries
+        # (NULL) are kept: the UI lists them below the chart and the chart
+        # itself skips them.
+        where = [
+            "e.archived = 0",
+            "(e.entry_date IS NULL OR e.entry_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')",
+        ]
         params: list = []
 
         if from_date:
@@ -32,8 +40,9 @@ def get_timeline(
             for t in tags.split(","):
                 t = t.strip()
                 if t:
-                    where.append("e.tags LIKE ?")
-                    params.append(f"%{t}%")
+                    # Exact token match on comma boundaries, not substring.
+                    where.append("(',' || e.tags || ',') LIKE '%,' || ? || ',%'")
+                    params.append(t)
 
         where_sql = " AND ".join(where)
 
@@ -76,7 +85,10 @@ def timeline_stats():
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT MIN(entry_date) as earliest, MAX(entry_date) as latest, COUNT(*) as total FROM entries WHERE archived = 0 AND entry_date IS NOT NULL"
+            """SELECT MIN(entry_date) as earliest, MAX(entry_date) as latest, COUNT(*) as total
+               FROM entries
+               WHERE archived = 0
+                 AND entry_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'"""
         ).fetchone()
         return dict(row) if row else {"earliest": None, "latest": None, "total": 0}
     finally:

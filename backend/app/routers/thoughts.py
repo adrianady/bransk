@@ -98,8 +98,8 @@ def get_thought_entries(thought_id: int):
         if not tag_names:
             return []
 
-        like_clauses = " OR ".join("tags LIKE ?" for _ in tag_names)
-        params = [f"%{t}%" for t in tag_names]
+        like_clauses = " OR ".join("(',' || tags || ',') LIKE '%,' || ? || ',%'" for _ in tag_names)
+        params = list(tag_names)
         rows = conn.execute(
             f"SELECT id, title, entry_date, tags, importance FROM entries WHERE archived = 0 AND ({like_clauses}) ORDER BY entry_date DESC LIMIT 100",
             params

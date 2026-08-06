@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
+import { Download, RefreshCw, FileText } from 'lucide-react'
 import { api } from '../lib/api'
+import { useToast } from './Toast'
 import type { Entry } from '../lib/types'
 
 interface Props {
@@ -16,6 +18,7 @@ const typeColors: Record<string, string> = {
 }
 
 export function StudiesView({ onSelectEntry }: Props) {
+  const toast = useToast()
   const [studies, setStudies] = useState<Entry[]>([])
   const [theoryLinks, setTheoryLinks] = useState<Record<number, { theory_name: string; stance: string }[]>>({})
   const [loading, setLoading] = useState(true)
@@ -45,10 +48,14 @@ export function StudiesView({ onSelectEntry }: Props) {
     setDownloadingAll(true)
     try {
       const res = await api.studies.downloadAll()
-      alert(`Downloaded ${res.downloaded.length} PDFs${res.failed.length ? `, ${res.failed.length} failed (offline or unreachable)` : ''}.`)
+      toast.success(
+        `Downloaded ${res.downloaded.length} PDFs` +
+        (res.indexed_chunks ? `, indexed ${res.indexed_chunks} text chunks` : '') +
+        (res.failed.length ? `, ${res.failed.length} failed (offline, blocked, or not a real PDF)` : '')
+      )
       await load()
     } catch (err: any) {
-      alert('Batch download failed: ' + (err?.message || 'unknown error'))
+      toast.error('Batch download failed: ' + (err?.message || 'unknown error'))
     } finally {
       setDownloadingAll(false)
     }
@@ -74,9 +81,12 @@ export function StudiesView({ onSelectEntry }: Props) {
         </div>
         <div className="flex gap-2">
           <button onClick={downloadAll} disabled={downloadingAll} className="btn-secondary">
-            {downloadingAll ? '⬇️ Downloading...' : '⬇️ Download all PDFs'}
+            <Download className="w-4 h-4" />
+            {downloadingAll ? 'Downloading...' : 'Download all PDFs'}
           </button>
-          <button onClick={load} className="btn-secondary">↻ Refresh</button>
+          <button onClick={load} className="btn-secondary" aria-label="Refresh studies">
+            <RefreshCw className="w-4 h-4" />
+          </button>
         </div>
       </div>
 
@@ -88,8 +98,8 @@ export function StudiesView({ onSelectEntry }: Props) {
         </select>
         <select value={filterQuality} onChange={e => setFilterQuality(Number(e.target.value))} className="input w-auto">
           <option value={0}>Any quality</option>
-          <option value={4}>4★ and up</option>
           <option value={3}>3★ and up</option>
+          <option value={4}>4★ and up</option>
         </select>
         {(filterType || filterQuality > 0) && (
           <button onClick={() => { setFilterType(''); setFilterQuality(0) }} className="btn-ghost text-sm">Clear filters</button>
@@ -162,11 +172,13 @@ export function StudiesView({ onSelectEntry }: Props) {
                         await api.studies.download(study.id)
                         window.open(api.studies.pdfUrl(study.id), '_blank')
                       } catch {
-                        alert('PDF download failed — check the study URL.')
+                        toast.error('PDF download failed — check the study URL.')
                       }
                     }}
                     className="btn-ghost text-xs px-2 py-1"
-                  >⬇️ Download PDF</button>
+                  >
+                    <FileText className="w-3.5 h-3.5" /> Download PDF
+                  </button>
                 ) : null}
               </div>
               <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-3 flex-1">

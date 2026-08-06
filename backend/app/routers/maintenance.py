@@ -21,7 +21,8 @@ from fastapi.responses import StreamingResponse
 
 from app.db import get_db, rebuild_fts
 from app.llm import LLM_PROVIDER, complete as llm_complete
-from app.studies_store import pdf_path_for
+from app.studies_store import is_valid_pdf_file, pdf_path_for
+from app.pdf_rag import index_pdf
 
 logger = logging.getLogger("chronokg.maintenance")
 router = APIRouter()
@@ -181,15 +182,23 @@ async def _reanalyze_pdf(entry: dict, report: dict) -> None:
         if LLM_PROVIDER == "mock":
             data = _mock_reanalysis(entry["title"])
         else:
-            _, _, reply = await llm_complete(
-                [
-                    {"role": "system", "content": _REANALYZE_PROMPT},
-                    {"role": "user", "content": f"PDF TEXT EXCERPT:\n{text[:8000]}"},
-                ],
-                temperature=0.2,
-                json_mode=True,
-            )
-            data = _extract_json(reply)
+            data = None
+            for attempt in range(2):
+                try:
+                    _, _, reply = await llm_complete(
+                        [
+                            {"role": "system", "content": _REANALYZE_PROMPT},
+                            {"role": "user", "content": f"PDF TEXT EXCERPT:\n{text[:8000]}"},
+                        ],
+                        temperature=0.2 if attempt == 0 else 0.0,
+                        json_mode=True,
+                    )
+                    data = _extract_json(reply)
+                    break
+                except Exception:
+                    if attempt == 0:
+                        continue
+                    raise
 
         if not data.get("readable", True):
             report["pdfs_unreadable"] += 1
@@ -248,6 +257,7 @@ async def maintenance_analyze():
             "pdfs_reanalyzed": 0,
             "pdfs_unreadable": 0,
             "pdf_errors": 0,
+            "pdfs_indexed": 0,
             "evidence_removed": 0,
             "theories_updated": 0,
             "undated_entries": 0,
@@ -355,13 +365,30 @@ async def maintenance_analyze():
             finally:
                 conn.close()
             for entry in studies:
-                if pdf_path_for(entry["id"]):
+                path = pdf_path_for(entry["id"])
+                if path:
                     report["pdfs_found"] += 1
+                    if not is_valid_pdf_file(path):
+                        # Blocked/redirected downloads sometimes leave an HTML
+                        # page named .pdf; it cannot be read or indexed. The
+                        # downloader now refuses such files, so re-downloading
+                        # replaces them.
+                        report["pdfs_unreadable"] += 1
+                        report["pdf_errors"] += 1
+                        continue
                     yield _sse({"type": "progress", "phase": "pdfs", "message": f"Re-analyzing PDF for: {entry['title'][:60]}"})
                     await _reanalyze_pdf(entry, report)
+                    indexed = await index_pdf(entry["id"], path)
+                    if indexed:
+                        report["pdfs_indexed"] += indexed
 
             if report["pdfs_found"] == 0:
                 report["warnings"].append("No downloaded PDFs found in the studies folder.")
+            elif report["pdfs_unreadable"] > 0:
+                report["warnings"].append(
+                    f"{report['pdfs_unreadable']} stored PDF(s) are not valid PDF files "
+                    "(blocked or error-page downloads) — use Download all PDFs to retry them."
+                )
             if report["undated_entries"] > 0:
                 report["warnings"].append(f"{report['undated_entries']} entries have no date and stay off the timeline.")
 

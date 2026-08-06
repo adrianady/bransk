@@ -21,8 +21,10 @@ def list_entries(
         where = ["archived = ?"]
         params: list = [1 if archived else 0]
         if tag:
-            where.append("tags LIKE ?")
-            params.append(f"%{tag}%")
+            # Exact token match on comma boundaries ('%ann%' would also match
+            # 'annual'; this only matches the whole comma-separated tag).
+            where.append("(',' || tags || ',') LIKE '%,' || ? || ',%'")
+            params.append(tag)
         rows = conn.execute(
             f"SELECT * FROM entries WHERE {' AND '.join(where)} ORDER BY entry_date IS NULL, entry_date DESC, created_at DESC LIMIT ? OFFSET ?",
             [*params, limit, offset]

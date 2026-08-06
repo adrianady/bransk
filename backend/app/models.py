@@ -13,10 +13,10 @@ class EntryCreate(BaseModel):
     entry_date: Optional[str] = None  # ISO date or None
     tags: str = ""
     source: str = ""
-    importance: int = 1
+    importance: int = Field(1, ge=1, le=5)
     study_type: str = ""
     authors: str = ""
-    quality: Optional[int] = None
+    quality: Optional[int] = Field(None, ge=1, le=5)
     url_validated: bool = False
     design: str = ""
     effect_direction: str = ""
@@ -29,11 +29,11 @@ class EntryUpdate(BaseModel):
     entry_date: Optional[str] = None
     tags: Optional[str] = None
     source: Optional[str] = None
-    importance: Optional[int] = None
+    importance: Optional[int] = Field(None, ge=1, le=5)
     archived: Optional[bool] = None
     study_type: Optional[str] = None
     authors: Optional[str] = None
-    quality: Optional[int] = None
+    quality: Optional[int] = Field(None, ge=1, le=5)
     url_validated: Optional[bool] = None
     design: Optional[str] = None
     effect_direction: Optional[str] = None
@@ -77,8 +77,8 @@ class RelationshipResponse(BaseModel):
 
 # ── Tag models ──
 class TagCreate(BaseModel):
-    name: str
-    color: str = "#6366f1"
+    name: str = Field(..., min_length=1, max_length=100)
+    color: str = Field("#6366f1", max_length=20)
 
 
 class TagResponse(BaseModel):
@@ -114,16 +114,23 @@ class TimelineResponse(BaseModel):
 # ── Chat models ──
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern="^(user|assistant|system)$")
-    content: str = Field(..., max_length=10000)
+    # Long AI research replies can exceed the old 10k cap; keep the validation
+    # generous and let the LLM-assembly step truncate per-message context.
+    content: str = Field(..., max_length=100000)
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=10000)
+    message: str = Field(..., min_length=1, max_length=100000)
     history: list[ChatMessage] = Field(default_factory=list, max_length=100)
 
 
 class ChatResponse(BaseModel):
     reply: str
+
+
+class ConfirmRequest(BaseModel):
+    confirm_id: str = Field(..., min_length=1, max_length=64)
+    approve: bool = True
 
 
 # ── Spaced Repetition models ──
@@ -145,15 +152,15 @@ class ReviewSubmit(BaseModel):
 # ── Todo models ──
 class TodoCreate(BaseModel):
     due_date: Optional[str] = None
-    priority: str = "normal"
-    effort: str = "m"
+    priority: str = Field("normal", pattern="^(critical|important|normal)$")
+    effort: str = Field("m", pattern="^(s|m|l|xl)$")
 
 
 class TodoUpdate(BaseModel):
     due_date: Optional[str] = None
     completed: Optional[bool] = None
-    priority: Optional[str] = None
-    effort: Optional[str] = None
+    priority: Optional[str] = Field(None, pattern="^(critical|important|normal)$")
+    effort: Optional[str] = Field(None, pattern="^(s|m|l|xl)$")
 
 
 class TodoResponse(BaseModel):
@@ -168,9 +175,9 @@ class TodoResponse(BaseModel):
 # ── Reminder models ──
 class ReminderCreate(BaseModel):
     title: str = ""
-    trigger_at: str
-    reminder_type: str = "once"
-    recurrence: Optional[str] = None
+    trigger_at: str = Field(..., min_length=1, max_length=40)
+    reminder_type: str = Field("once", pattern="^(once|daily|weekly|monthly)$")
+    recurrence: Optional[str] = Field(None, pattern="^(daily|weekly|monthly)$")
 
 
 class ReminderResponse(BaseModel):
@@ -296,6 +303,8 @@ class TheoryNode(BaseModel):
     status: str = "emerging"
     pro_count: int = 0
     contra_count: int = 0
+    pro_weight: int = 0
+    contra_weight: int = 0
     children: list["TheoryNode"] = Field(default_factory=list)
 
 

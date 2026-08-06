@@ -1,9 +1,12 @@
 """
 ChronoKG — FastAPI Application
 """
+import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
+
+import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -11,8 +14,9 @@ from app.db import init_db
 from app.routers import (
     entries, search, timeline, relationships,
     chat, tags, spaced_repetition, todos, reminders, thoughts,
-    research, theory, maintenance
+    research, theory, maintenance, ai
 )
+from app.routers.reminders import advance_overdue_recurring
 
 # Structured Python Logging Configuration
 logging.basicConfig(
@@ -23,13 +27,33 @@ logging.basicConfig(
 logger = logging.getLogger("chronokg")
 
 
+async def _reminder_ticker() -> None:
+    """Periodically advance dismissed recurring reminders that are past due."""
+    while True:
+        try:
+            advanced = await anyio.to_thread.run_sync(advance_overdue_recurring)
+            if advanced:
+                logger.info("Advanced %d recurring reminder(s)", advanced)
+        except Exception:
+            logger.exception("Reminder scheduler tick failed")
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing ChronoKG Database Schema & FTS5 Index...")
     init_db()
+    ticker = asyncio.create_task(_reminder_ticker())
     logger.info("ChronoKG Backend Startup Complete.")
-    yield
-    logger.info("ChronoKG Backend Shutting Down.")
+    try:
+        yield
+    finally:
+        ticker.cancel()
+        try:
+            await ticker
+        except asyncio.CancelledError:
+            pass
+        logger.info("ChronoKG Backend Shutting Down.")
 
 
 app = FastAPI(
@@ -66,6 +90,7 @@ app.include_router(thoughts.router, prefix="/api", tags=["thoughts"])
 app.include_router(research.router, prefix="/api", tags=["research"])
 app.include_router(theory.router, prefix="/api", tags=["theory"])
 app.include_router(maintenance.router, prefix="/api", tags=["maintenance"])
+app.include_router(ai.router, prefix="/api", tags=["ai"])
 
 
 @app.get("/api/health")
