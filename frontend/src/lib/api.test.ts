@@ -96,6 +96,30 @@ describe('auth token', () => {
     expect(new Headers(init.headers).get('Authorization')).toBeNull()
   })
 
+  it('drops a malformed Unicode token before building request headers', async () => {
+    setAuthToken(`${'a'.repeat(165)}\uFFFD`)
+    const fetchMock = stubFetch(async (_url, init) => {
+      // Simulate the browser's conversion of RequestInit.headers to ByteString.
+      new Headers(init?.headers)
+      return jsonResponse([])
+    })
+
+    await expect(api.entries.list()).resolves.toEqual([])
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(new Headers(init.headers).get('Authorization')).toBeNull()
+    expect(getAuthToken()).toBe('')
+  })
+
+  it('trims a pasted token and removes embedded control characters', () => {
+    setAuthToken(' valid-token \n')
+    expect(getAuthToken()).toBe('valid-token')
+
+    setAuthToken('valid\ntoken')
+    expect(getAuthToken()).toBe('')
+    expect(localStorage.getItem('chronokg-token')).toBeNull()
+  })
+
   it('remembering and clearing the token round-trips', () => {
     expect(getAuthToken()).toBe('')
     setAuthToken('t')

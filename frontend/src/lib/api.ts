@@ -66,7 +66,20 @@ export const AUTH_EVENT = 'chronokg:unauthorized';
 
 export function getAuthToken(): string {
   try {
-    return localStorage.getItem(TOKEN_KEY) || '';
+    const stored = localStorage.getItem(TOKEN_KEY) || '';
+    const token = stored.trim();
+    // A damaged/copied token can contain Unicode replacement characters or
+    // control bytes. Fetch's Headers conversion throws before a request is
+    // sent when that happens, preventing the app from starting at all.
+    if (token && /[^\t\x20-\x7E\x80-\xFF]/.test(token)) {
+      localStorage.removeItem(TOKEN_KEY);
+      return '';
+    }
+    if (stored !== token) {
+      if (token) localStorage.setItem(TOKEN_KEY, token);
+      else localStorage.removeItem(TOKEN_KEY);
+    }
+    return token;
   } catch {
     return '';
   }

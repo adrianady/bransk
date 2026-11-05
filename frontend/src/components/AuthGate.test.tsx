@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AUTH_EVENT, clearAuthToken } from '../lib/api'
+import { AUTH_EVENT, clearAuthToken, setAuthToken } from '../lib/api'
 import { AuthGate } from './AuthGate'
 
 function stubStatus(required: boolean) {
@@ -41,6 +41,16 @@ describe('AuthGate', () => {
 
     expect(await screen.findByText('app ready')).toBeInTheDocument()
     expect(localStorage.getItem('chronokg-token')).toBe('secret')
+  })
+
+  it('asks again when the saved token contains invalid header characters', async () => {
+    stubStatus(true)
+    setAuthToken(`${'a'.repeat(165)}\uFFFD`)
+
+    render(<AuthGate><div>app ready</div></AuthGate>)
+
+    expect(await screen.findByText('Acces protejat')).toBeInTheDocument()
+    expect(localStorage.getItem('chronokg-token')).toBeNull()
   })
 
   it('comes back when the server rejects the stored token', async () => {
