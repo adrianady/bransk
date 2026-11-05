@@ -26,12 +26,19 @@ def _status_from_evidence(pro: int, contra: int) -> str:
 
 
 def _recompute_status(conn, theory_id: int) -> str:
-    """Recalculate and persist a theory's status from its evidence balance."""
+    """Recalculate and persist a theory's status from its evidence balance.
+
+    Archived entries are not evidence any more: they stay in the table (so
+    un-archiving restores them) but they must not decide whether a theory is
+    supported or refuted, or the tree would disagree with the evidence list.
+    """
     row = conn.execute(
         """SELECT
-               SUM(CASE WHEN stance = 'pro' THEN 1 ELSE 0 END) AS pro,
-               SUM(CASE WHEN stance = 'contra' THEN 1 ELSE 0 END) AS contra
-           FROM theory_evidence WHERE theory_id = ?""",
+               SUM(CASE WHEN te.stance = 'pro' THEN 1 ELSE 0 END) AS pro,
+               SUM(CASE WHEN te.stance = 'contra' THEN 1 ELSE 0 END) AS contra
+           FROM theory_evidence te
+           JOIN entries e ON e.id = te.entry_id AND e.archived = 0
+           WHERE te.theory_id = ?""",
         [theory_id],
     ).fetchone()
     pro = row["pro"] or 0
@@ -68,10 +75,14 @@ def get_theory_tree():
     try:
         rows = conn.execute(
             """SELECT t.*,
-                      (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro') AS pro_count,
-                      (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra') AS contra_count,
-                      (SELECT COALESCE(SUM(te.weight), 0) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro') AS pro_weight,
-                      (SELECT COALESCE(SUM(te.weight), 0) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra') AS contra_weight
+                      (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro'
+                         AND te.entry_id IN (SELECT id FROM entries WHERE archived = 0)) AS pro_count,
+                      (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra'
+                         AND te.entry_id IN (SELECT id FROM entries WHERE archived = 0)) AS contra_count,
+                      (SELECT COALESCE(SUM(te.weight), 0) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro'
+                         AND te.entry_id IN (SELECT id FROM entries WHERE archived = 0)) AS pro_weight,
+                      (SELECT COALESCE(SUM(te.weight), 0) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'contra'
+                         AND te.entry_id IN (SELECT id FROM entries WHERE archived = 0)) AS contra_weight
                FROM theories t
                ORDER BY t.name"""
         ).fetchall()
@@ -167,6 +178,7 @@ def list_evidence(theory_id: int):
                FROM theory_evidence te
                JOIN entries e ON e.id = te.entry_id
                WHERE te.theory_id = ?
+                 AND e.archived = 0
                ORDER BY te.stance, e.entry_date IS NULL, e.entry_date""",
             [theory_id],
         ).fetchall()
@@ -186,6 +198,7 @@ def list_all_evidence():
                FROM theory_evidence te
                JOIN theories t ON t.id = te.theory_id
                JOIN entries e ON e.id = te.entry_id
+               WHERE e.archived = 0
                ORDER BY t.name, e.title"""
         ).fetchall()
         return [dict(r) for r in rows]

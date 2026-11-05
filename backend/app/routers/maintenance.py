@@ -23,6 +23,8 @@ from app.db import get_db, rebuild_fts
 from app.llm import LLM_PROVIDER, complete as llm_complete
 from app.studies_store import is_valid_pdf_file, pdf_path_for
 from app.pdf_rag import index_pdf
+from app.study_dedup import same_study
+from app.tagging import normalize_tags, tag_names
 
 logger = logging.getLogger("chronokg.maintenance")
 router = APIRouter()
@@ -31,21 +33,25 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _REANALYSIS_START = "<!-- reanalysis -->"
 _REANALYSIS_END = "<!-- /reanalysis -->"
 
-_REANALYZE_PROMPT = """You are a research librarian re-reading a downloaded study PDF. From the text excerpt below, produce structured metadata.
+_REANALYZE_PROMPT = """You are a senior scientific bibliographer and research librarian re-evaluating an empirical study PDF.
+From the excerpt below, extract structured metadata with rigorous academic precision.
 Return ONLY JSON with this exact shape:
 {
   "readable": true,
-  "title": "exact study title",
-  "authors": "author names",
+  "title": "exact formal study title",
+  "authors": "author names (e.g. Lead Author et al. or comma-separated)",
   "year": 2016,
-  "study_type": "peer-reviewed paper",
-  "design": "RCT | cohort | review | ...",
+  "study_type": "peer-reviewed paper | preprint | systematic review | meta-analysis | book chapter",
+  "design": "RCT | cohort | cross-sectional | case-control | systematic review | meta-analysis | qualitative | other",
   "effect_direction": "positive | negative | mixed | null | unknown",
-  "key_findings": ["finding 1", "finding 2"],
+  "key_findings": ["finding 1 with quantitative effect/mechanism", "finding 2"],
   "quality": 4,
-  "summary": "2-3 sentence summary"
+  "summary": "2-3 sentence rigorous academic summary (sample size N, methodology/intervention, and primary causal or empirical conclusion)"
 }
-If the excerpt contains no readable text (scanned PDF without text layer), return {"readable": false}.
+Rules:
+- Quality score (1-5) must follow the hierarchy of evidence: 5 = multi-center blinded RCT or definitive meta-analysis, 4 = controlled experimental trial or prospective cohort, 3 = observational / cross-sectional, 2 = preliminary / underpowered, 1 = opinion / descriptive.
+- In 'key_findings' and 'summary', prioritize reporting concrete effect sizes (Cohen's d, OR, r) and specific biological/cognitive/experimental mechanisms whenever present.
+- If the excerpt contains no readable text (e.g., scanned PDF without OCR/text layer), return {"readable": false}.
 REANALYZE marker: REANALYZE"""
 
 
@@ -53,14 +59,136 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _merge_duplicate_studies(conn, report: dict) -> None:
+    """Fuse study entries that describe the same paper into one row.
+
+    Duplicates were created before `app.study_dedup` existed: the research
+    pipeline compared normalized titles for equality, so a title the model cut
+    short ("... and the brain: A systematic review of ...") landed as a second
+    row pointing at the same article.
+
+    Nothing is lost: evidence, relationships, todos, reminders and the review
+    schedule of the dropped row are moved onto the one that stays, and any field
+    it was missing (doi, source, pdf_path, quality, design...) is filled in from
+    it first. The row that stays is the oldest, i.e. the one whose id the rest
+    of the app already refers to.
+    """
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            """SELECT id, title, source, doi, pdf_path, authors, design, effect_direction,
+                      quality, entry_date, tags, content, study_type, importance,
+                      url_validated, created_at
+               FROM entries
+               WHERE archived = 0
+                 AND (study_type != '' OR tags LIKE '%study%' OR tags LIKE '%pdf%'
+                      OR (pdf_path IS NOT NULL AND pdf_path != ''))
+               ORDER BY id"""
+        ).fetchall()
+    ]
+
+    merged = dropped = 0
+    kept_ids: set[int] = set()
+
+    for i, first in enumerate(rows):
+        if first["id"] in kept_ids:
+            continue
+        group = [first]
+        for other in rows[i + 1:]:
+            if other["id"] in kept_ids:
+                continue
+            if same_study(first["title"], first["source"], other["title"], other["source"]):
+                group.append(other)
+        if len(group) < 2:
+            continue
+
+        keep = group[0]
+        kept_ids.add(keep["id"])
+        for dup in group[1:]:
+            # Move the links first: they point at the row that disappears.
+            for table, column in (
+                ("theory_evidence", "entry_id"),
+                ("relationships", "from_id"),
+                ("relationships", "to_id"),
+                ("todos", "entry_id"),
+                ("reminders", "entry_id"),
+                ("spaced_repetition", "entry_id"),
+                ("documents", "entry_id"),
+            ):
+                if table in ("todos", "spaced_repetition"):
+                    # both tables allow a single row per entry
+                    if conn.execute(
+                        f"SELECT 1 FROM {table} WHERE {column} = ?", [keep["id"]]
+                    ).fetchone():
+                        conn.execute(f"DELETE FROM {table} WHERE {column} = ?", [dup["id"]])
+                        continue
+                elif table == "theory_evidence":
+                    # UNIQUE(theory_id, entry_id, stance): drop what would clash
+                    conn.execute(
+                        """DELETE FROM theory_evidence
+                           WHERE entry_id = ?
+                             AND (theory_id, stance) IN (
+                                 SELECT theory_id, stance FROM theory_evidence WHERE entry_id = ?)""",
+                        [dup["id"], keep["id"]],
+                    )
+                elif table == "relationships":
+                    # UNIQUE(from_id, to_id, label): a move can collide from
+                    # either end, so discard the duplicate rows first.
+                    other_col = "to_id" if column == "from_id" else "from_id"
+                    conn.execute(
+                        f"""DELETE FROM relationships
+                            WHERE {column} = ?
+                              AND ({other_col}, label) IN (
+                                  SELECT {other_col}, label FROM relationships WHERE {column} = ?)""",
+                        [dup["id"], keep["id"]],
+                    )
+                conn.execute(
+                    f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                    [keep["id"], dup["id"]],
+                )
+
+            # Then fill whatever the surviving row was missing.
+            fields = {}
+            for field in ("doi", "doi_source", "pdf_path", "authors", "design",
+                          "effect_direction", "entry_date", "bib_title", "bib_authors",
+                          "bib_year", "doi_checked_at"):
+                value = dup.get(field)
+                if value and not keep.get(field):
+                    fields[field] = value
+                    keep[field] = value
+            if dup.get("quality") and not keep.get("quality"):
+                fields["quality"] = dup["quality"]
+                keep["quality"] = dup["quality"]
+            if dup.get("url_validated") and not keep.get("url_validated"):
+                fields["url_validated"] = 1
+            if dup.get("source") and not keep.get("source"):
+                fields["source"] = dup["source"]
+                keep["source"] = dup["source"]
+            # Re-analysis sections and findings are worth keeping together.
+            extra = (dup.get("content") or "").strip()
+            if extra and extra not in (keep.get("content") or ""):
+                fields["content"] = ((keep.get("content") or "").rstrip()
+                                     + "\n\n" + extra)[:20000]
+                keep["content"] = fields["content"]
+            if fields:
+                set_clause = ", ".join(f"{k} = ?" for k in fields)
+                conn.execute(
+                    f"UPDATE entries SET {set_clause}, updated_at = datetime('now') WHERE id = ?",
+                    [*fields.values(), keep["id"]],
+                )
+
+            conn.execute("DELETE FROM entries WHERE id = ?", [dup["id"]])
+            dropped += 1
+        merged += 1
+
+    report["duplicates_merged"] = dropped
+    report["duplicate_groups"] = merged
+
+
 def _clean_tags(tags: str) -> str:
-    seen, out = set(), []
-    for part in re.split(r"[|,;]", tags or ""):
-        part = part.strip().strip('"').strip()
-        if part and part.lower() not in seen:
-            seen.add(part.lower())
-            out.append(part)
-    return ", ".join(out)[:500]
+    # One implementation with the write paths and the repair script, so a tag
+    # accepted by /entries can never be "repaired" differently here.
+    return normalize_tags(tags, sep=", ")
 
 
 def _norm_updates(entry: dict) -> dict:
@@ -238,6 +366,62 @@ async def _reanalyze_pdf(entry: dict, report: dict) -> None:
         report["pdf_errors"] += 1
 
 
+@router.post("/maintenance/tags")
+def normalize_tag_vocabulary(dry_run: bool = True):
+    """Repair the tag vocabulary only — no PDF re-reading, no model call.
+
+    The full re-analysis (`/maintenance/analyze`) also fixes tags, but it walks
+    every PDF and can take minutes. This is the surgical version: drop the
+    dates and stop words, de-duplicate, and fill the `tags` table from the
+    column that is actually used, so the two views stop disagreeing.
+
+    Default is a dry run; pass `?dry_run=false` to write.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT id, title, tags FROM entries ORDER BY id").fetchall()
+        changes: list[tuple[int, str, str, str]] = []
+        wanted: set[str] = set()
+        for row in rows:
+            old = row["tags"] or ""
+            new = normalize_tags(old)
+            wanted.update(tag_names(new))
+            if new != old.strip():
+                changes.append((row["id"], row["title"] or "", old, new))
+
+        existing = {r["name"] for r in conn.execute("SELECT name FROM tags").fetchall()}
+        missing = sorted(wanted - existing)
+
+        inserted = 0
+        if not dry_run:
+            for entry_id, _title, _old, new in changes:
+                conn.execute(
+                    "UPDATE entries SET tags = ?, updated_at = datetime('now') WHERE id = ?",
+                    [new, entry_id],
+                )
+            for name in missing:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO tags (name) VALUES (?)",
+                    [name],
+                )
+                inserted += max(cur.rowcount or 0, 0)
+            conn.commit()
+
+        return {
+            "dry_run": dry_run,
+            "entries_scanned": len(rows),
+            "entries_changed": len(changes),
+            "tags_missing_from_table": len(missing),
+            "tags_inserted": 0 if dry_run else inserted,
+            "samples": [
+                {"id": entry_id, "title": title[:80], "before": old[:160], "after": new[:160]}
+                for entry_id, title, old, new in changes[:10]
+            ],
+        }
+    finally:
+        conn.close()
+
+
 @router.post("/maintenance/analyze")
 async def maintenance_analyze():
     """Full re-analysis: normalize data, rebuild index, re-read PDFs, recompute theories."""
@@ -260,6 +444,8 @@ async def maintenance_analyze():
             "pdfs_indexed": 0,
             "evidence_removed": 0,
             "theories_updated": 0,
+            "duplicates_merged": 0,
+            "duplicate_groups": 0,
             "undated_entries": 0,
             "entries_active": 0,
             "relationships_count": 0,
@@ -319,6 +505,9 @@ async def maintenance_analyze():
                 # Evidence hygiene
                 cur = conn.execute("DELETE FROM theory_evidence WHERE entry_id NOT IN (SELECT id FROM entries)")
                 report["evidence_removed"] = cur.rowcount
+
+                # Duplicate studies: same paper inserted twice by an older run.
+                _merge_duplicate_studies(conn, report)
 
                 report["relationships_count"] = conn.execute("SELECT COUNT(*) FROM relationships").fetchone()[0]
                 report["theories_count"] = conn.execute("SELECT COUNT(*) FROM theories").fetchone()[0]

@@ -1,9 +1,29 @@
 """
-ChronoKG — Pydantic models for API request/response.
+Bransk — Pydantic models for API request/response.
 """
+import re
 from datetime import date, datetime
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# A DOI is "10.<registrant>/<suffix>". Accept it with or without the
+# https://doi.org/ prefix, strip the prefix, and refuse anything else rather
+# than storing a value that will resolve to a different paper.
+_DOI_RE = re.compile(r"^10\.\d{4,9}/[^\s]+$")
+_DOI_PREFIX_RE = re.compile(r"^(?:https?://)?(?:dx\.)?doi\.org/", re.IGNORECASE)
+
+
+def normalize_doi(value: str) -> str:
+    """Return the bare DOI, or raise ValueError when it is not one."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    text = _DOI_PREFIX_RE.sub("", text).strip()
+    if not _DOI_RE.match(text):
+        raise ValueError(
+            "A DOI looks like 10.1038/nrn.2016.44 (optionally as https://doi.org/10.1038/nrn.2016.44)"
+        )
+    return text
 
 
 # ── Entry models ──
@@ -21,6 +41,15 @@ class EntryCreate(BaseModel):
     design: str = ""
     effect_direction: str = ""
     pdf_path: str = ""
+    # A real bibliographic identifier (e.g. 10.1038/nrn.2016.44). Kept apart
+    # from `source`, whose URL is often wrong. Validated at the model level so a
+    # typo can never become a DOI that resolves to a different paper.
+    doi: str = ""
+
+    @field_validator("doi")
+    @classmethod
+    def _check_doi(cls, value):
+        return normalize_doi(value)
 
 
 class EntryUpdate(BaseModel):
@@ -38,6 +67,12 @@ class EntryUpdate(BaseModel):
     design: Optional[str] = None
     effect_direction: Optional[str] = None
     pdf_path: Optional[str] = None
+    doi: Optional[str] = None
+
+    @field_validator("doi")
+    @classmethod
+    def _check_doi(cls, value):
+        return normalize_doi(value) if value is not None else value
 
 
 class EntryResponse(BaseModel):
@@ -58,6 +93,14 @@ class EntryResponse(BaseModel):
     design: str = ""
     effect_direction: str = ""
     pdf_path: str = ""
+    # Real bibliographic identifiers (resolved against Crossref), kept apart
+    # from the unreliable `source` URL the research pipeline produced.
+    doi: str = ""
+    doi_source: str = ""
+    doi_checked_at: str = ""
+    bib_title: str = ""
+    bib_authors: str = ""
+    bib_year: str = ""
 
 
 # ── Relationship models ──
@@ -101,6 +144,7 @@ class TimelineEntry(BaseModel):
     tags: str
     importance: int
     relationship_count: int = 0
+    has_relationships: bool = False
     content_preview: str = ""
 
 
@@ -268,6 +312,29 @@ class ResearchResult(BaseModel):
     entries_created: list[int] = Field(default_factory=list)
     relationships_created: int = 0
     report_entry_id: Optional[int] = None
+
+
+# ── Thesis project feedback ──
+class ProjectFeedbackItem(BaseModel):
+    level: str = ""
+    message: str = ""
+    action: str = ""
+
+
+class ProjectFeedback(BaseModel):
+    """The Feedback tab: rule-based checks plus the reviewer text, once generated.
+
+    `reviewer`, `generated_at`, `cached` and `needs_generation` are optional and
+    defaulted so a client that only reads `items`/`reviewer` keeps working: GET
+    never carries a reviewer any more (it answers without an LLM call), POST
+    either returns fresh text or the stored one.
+    """
+    items: list[ProjectFeedbackItem] = Field(default_factory=list)
+    reviewer: Optional[str] = None
+    from_llm: bool = False
+    generated_at: Optional[str] = None
+    cached: bool = False
+    needs_generation: bool = True
 
 
 # ── Theory Aggregator models ──

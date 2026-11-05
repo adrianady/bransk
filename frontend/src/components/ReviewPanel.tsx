@@ -3,20 +3,20 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
 import { useToast } from './Toast'
-import type { MaintenanceReport, SpacedRepetitionItem } from '../lib/types'
+import type { MaintenanceReport, SpacedRepetitionItem, TagCleanupReport } from '../lib/types'
 
 export function ReviewPanel() {
   const [mode, setMode] = useState<'integrity' | 'sr'>('integrity')
 
   return (
     <div>
-      <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 mb-4">
+      <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 mb-4 overflow-x-auto no-scrollbar flex-nowrap">
         {([
-          { id: 'integrity' as const, label: '🔬 Data integrity', desc: 'Re-analyze and repair all data' },
-          { id: 'sr' as const, label: '🔄 Spaced repetition', desc: 'Review schedule (SM-2)' },
+          { id: 'integrity' as const, label: '🔬 Integritatea datelor', desc: 'Reanalizează și repară toate datele' },
+          { id: 'sr' as const, label: '🔄 Repetiție spațiată', desc: 'Program de verificări (SM-2)' },
         ]).map(tab => (
           <button key={tab.id} onClick={() => setMode(tab.id)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            className={`px-3 sm:px-4 py-2 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 ${
               mode === tab.id
                 ? 'border-chrono-600 text-chrono-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -34,10 +34,30 @@ export function ReviewPanel() {
 // ── Data integrity & re-analysis mode ──────────────────────────────────────
 
 function IntegrityMode() {
+  const toast = useToast()
   const [running, setRunning] = useState(false)
   const [log, setLog] = useState<{ phase: string; message: string }[]>([])
   const [report, setReport] = useState<MaintenanceReport | null>(null)
   const [error, setError] = useState('')
+  const [tagReport, setTagReport] = useState<TagCleanupReport | null>(null)
+  const [tagRunning, setTagRunning] = useState(false)
+
+  const runTags = async (dryRun: boolean) => {
+    setTagRunning(true)
+    try {
+      const result = await api.maintenance.normalizeTags(dryRun)
+      setTagReport(result)
+      if (!dryRun) {
+        toast.success(
+          `Etichete curățate: ${result.entries_changed} intrări, ${result.tags_inserted} etichete adăugate în tabelă.`,
+        )
+      }
+    } catch (err) {
+      toast.error('Curățarea etichetelor a eșuat: ' + (err instanceof Error ? err.message : ''))
+    } finally {
+      setTagRunning(false)
+    }
+  }
 
   const run = async () => {
     setRunning(true)
@@ -50,7 +70,7 @@ function IntegrityMode() {
         const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }))
         throw new Error(err.detail || `HTTP ${response.status}`)
       }
-      if (!response.body) throw new Error('No response body')
+      if (!response.body) throw new Error('Răspuns fără conținut')
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
@@ -68,38 +88,82 @@ function IntegrityMode() {
             const parsed = JSON.parse(data)
             if (parsed.type === 'progress') setLog(prev => [...prev, { phase: parsed.phase, message: parsed.message }])
             else if (parsed.type === 'done') setReport(parsed.report)
-            else if (parsed.type === 'error') setError(parsed.content || 'Re-analysis failed')
+            else if (parsed.type === 'error') setError(parsed.content || 'Reanaliza a eșuat')
           } catch { /* skip malformed frames */ }
         }
       }
     } catch (err: any) {
-      setError(err?.message || 'Re-analysis failed')
+      setError(err?.message || 'Reanaliza a eșuat')
     } finally {
       setRunning(false)
     }
   }
 
   const stats = report ? [
-    { label: 'Entries scanned', value: report.entries_scanned },
-    { label: 'Entries fixed', value: report.entries_fixed },
-    { label: 'Dates fixed', value: report.dates_fixed },
-    { label: 'Bad links removed', value: report.relationships_removed + report.self_links_removed },
-    { label: 'PDFs re-read', value: report.pdfs_found, sub: `${report.pdfs_reanalyzed} re-analyzed` },
-    { label: 'Theories updated', value: report.theories_updated },
+    { label: 'Intrări scanate', value: report.entries_scanned },
+    { label: 'Intrări reparate', value: report.entries_fixed },
+    { label: 'Date reparate', value: report.dates_fixed },
+    { label: 'Legături greșite șterse', value: report.relationships_removed + report.self_links_removed },
+    { label: 'PDF-uri recitite', value: report.pdfs_found, sub: `${report.pdfs_reanalyzed} reanalizate` },
+    { label: 'Teorii actualizate', value: report.theories_updated },
   ] : []
 
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="text-xl font-bold mb-1">Data Integrity & Re-analysis</h2>
+        <h2 className="text-xl font-bold mb-1">Integritatea datelor și reanaliză</h2>
         <p className="text-sm text-gray-500 mb-4">
-          Scans the whole knowledge base and repairs it so the graphs, the chronological timeline and the theory tree are correct:
-          normalizes entries (dates, tags, titles), cleans broken relationships, rebuilds the search index,
-          re-reads every downloaded study PDF with the AI, and recomputes theory statuses from pro/contra evidence.
+          Scanează toată baza de cunoștințe și o repară, ca grafurile, cronologia și arborele teoriilor să fie corecte:
+          normalizează intrările (date, etichete, titluri), curăță legăturile rupte, reconstruiește indexul de căutare,
+          recitește cu AI fiecare PDF de studiu descărcat și recalculează starea teoriilor din dovezile pro și contra.
         </p>
         <button onClick={run} disabled={running} className="btn-primary">
-          {running ? 'Re-analyzing...' : '🔬 Run full re-analysis'}
+          {running ? 'Se reanalizează…' : '🔬 Pornește reanaliza completă'}
         </button>
+      </div>
+
+      <div className="card">
+        <h3 className="font-semibold mb-1">Etichete</h3>
+        <p className="text-sm text-gray-500 mb-3">
+          Curăță doar vocabularul de etichete: scoate datele și cuvintele de umplutură
+          („the”, „of”), elimină duplicatele și umple tabela <code>tags</code> din
+          coloana folosită de filtre. Nu recitește PDF-uri și nu cheamă modelul.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => runTags(true)} disabled={tagRunning} className="btn-secondary text-sm">
+            {tagRunning ? 'Verific…' : 'Verifică (probă)'}
+          </button>
+          {tagReport?.dry_run && tagReport.entries_changed > 0 && (
+            <button onClick={() => runTags(false)} disabled={tagRunning} className="btn-primary text-sm">
+              Aplică pe {tagReport.entries_changed} intrări
+            </button>
+          )}
+        </div>
+
+        {tagReport && (
+          <div className="mt-3 text-sm text-gray-600 dark:text-gray-400 space-y-2">
+            <p>
+              {tagReport.entries_changed === 0
+                ? 'Etichetele sunt deja curate.'
+                : `${tagReport.entries_changed} din ${tagReport.entries_scanned} intrări de schimbat.`}
+              {tagReport.dry_run
+                ? ` ${tagReport.tags_missing_from_table} etichete lipsesc din tabelă.`
+                : ` ${tagReport.tags_inserted} etichete adăugate în tabelă.`}
+            </p>
+            {tagReport.samples.length > 0 && (
+              <ul className="space-y-1 text-xs">
+                {tagReport.samples.map(sample => (
+                  <li key={sample.id} className="min-w-0">
+                    <span className="font-medium">#{sample.id}</span> {sample.title}
+                    <span className="block text-gray-400 break-words">
+                      {sample.before || '(gol)'} → {sample.after || '(gol)'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
 
       {log.length > 0 && (
@@ -113,7 +177,7 @@ function IntegrityMode() {
       )}
 
       {error && (
-        <div className="card border-red-300 dark:border-red-900 text-sm text-red-600 dark:text-red-400">
+        <div className="card border-madder/30 text-sm text-madder">
           ⚠️ {error}
         </div>
       )}
@@ -131,12 +195,12 @@ function IntegrityMode() {
           </div>
 
           <div className="card text-sm space-y-1 text-gray-600 dark:text-gray-400">
-            <p>🗂️ {report.entries_active} active entries · 🔗 {report.relationships_count} relationships · 🧬 {report.theories_count} theories</p>
-            <p>🔄 FTS index rebuilt: {report.fts_rebuilt ? 'yes' : 'no'} · ⚠️ {report.pdfs_unreadable} unreadable PDFs · ❌ {report.pdf_errors} PDF errors</p>
+            <p>🗂️ {report.entries_active} intrări active · 🔗 {report.relationships_count} relații · 🧬 {report.theories_count} teorii</p>
+            <p>🔄 Index FTS reconstruit: {report.fts_rebuilt ? 'da' : 'nu'} · ⚠️ {report.pdfs_unreadable} PDF-uri ilizibile · ❌ {report.pdf_errors} erori PDF</p>
             {report.warnings.length > 0 && (
               <div className="pt-2 space-y-1">
                 {report.warnings.map((w, i) => (
-                  <p key={i} className="text-amber-600 dark:text-amber-400">⚠️ {w}</p>
+                  <p key={i} className="text-brass">⚠️ {w}</p>
                 ))}
               </div>
             )}
@@ -165,7 +229,7 @@ function SpacedRepetitionMode() {
       setCurrentIndex(0)
       setShowAnswer(false)
     } catch (err: any) {
-      toast.error('Could not load review queue: ' + (err?.message || 'unknown error'))
+      toast.error('Coada de verificări nu s-a putut încărca: ' + (err?.message || 'eroare necunoscută'))
     } finally {
       setLoading(false)
     }
@@ -184,7 +248,7 @@ function SpacedRepetitionMode() {
         await loadQueue()
       }
     } catch (err: any) {
-      toast.error('Could not submit rating: ' + (err?.message || 'unknown error'))
+      toast.error('Nota nu s-a putut trimite: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
@@ -206,15 +270,15 @@ function SpacedRepetitionMode() {
     }
   }, [queue])
 
-  if (loading) return <div className="text-center py-8 text-gray-500">Loading review queue...</div>
+  if (loading) return <div className="text-center py-8 text-gray-500">Se încarcă coada de verificări…</div>
 
   if (queue.length === 0) {
     return (
       <div className="card text-center py-12">
-        <h2 className="text-xl font-bold mb-2">Spaced Repetition Review</h2>
-        <p className="text-gray-500 mb-4">No entries due for review!</p>
-        <p className="text-sm text-gray-400">Add entries to review from their detail page. Check back later for scheduled reviews.</p>
-        <button onClick={loadQueue} className="btn-secondary mt-4">Refresh</button>
+        <h2 className="text-xl font-bold mb-2">Verificare cu repetiție spațiată</h2>
+        <p className="text-gray-500 mb-4">Nicio intrare de verificat acum!</p>
+        <p className="text-sm text-gray-400">Adaugă intrări la verificare din pagina lor de detaliu. Revino mai târziu pentru verificările programate.</p>
+        <button onClick={loadQueue} className="btn-secondary mt-4">Reîmprospătează</button>
       </div>
     )
   }
@@ -225,30 +289,28 @@ function SpacedRepetitionMode() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-xl font-bold">Spaced Repetition Review</h2>
-          <p className="text-sm text-gray-500">{currentIndex + 1} of {queue.length} due · SM-2 Algorithm</p>
+          <h2 className="text-xl font-bold">Verificare cu repetiție spațiată</h2>
+          <p className="text-sm text-gray-500">{currentIndex + 1} din {queue.length} scadente · algoritmul SM-2</p>
         </div>
-        <button onClick={loadQueue} className="btn-secondary">↻ Refresh</button>
+        <button onClick={loadQueue} className="btn-secondary">↻ Reîmprospătează</button>
       </div>
 
       <div className="card max-w-2xl mx-auto">
         <div className="flex items-center gap-2 mb-4">
-          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-            current.repetitions === 0 ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
-          }`}>
-            {current.repetitions === 0 ? 'New' : `Review #${current.repetitions}`}
+          <span className={`badge ${current.repetitions === 0 ? 'badge-verdigris' : 'badge-accent'}`}>
+            {current.repetitions === 0 ? 'Nouă' : `Verificarea nr. ${current.repetitions}`}
           </span>
           <span className="text-xs text-gray-500">EF: {current.ease_factor.toFixed(2)}</span>
         </div>
 
         <h3 className="text-lg font-semibold mb-4">
-          {entryTitles[current.entry_id] || `Entry #${current.entry_id}`}
+          {entryTitles[current.entry_id] || `Intrarea nr. ${current.entry_id}`}
         </h3>
 
         {!showAnswer ? (
           <button onClick={() => setShowAnswer(true)}
             className="btn-primary w-full py-4 text-lg">
-            Show Answer
+            Arată răspunsul
           </button>
         ) : (
           <div>
@@ -258,19 +320,19 @@ function SpacedRepetitionMode() {
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{entryContents[current.entry_id]}</ReactMarkdown>
                 </div>
               ) : (
-                <p className="text-sm text-gray-500 italic">This entry has no content — rate your recall of the title above.</p>
+                <p className="text-sm text-gray-500 italic">Intrarea asta nu are conținut — notează-ți recunoașterea după titlul de mai sus.</p>
               )}
             </div>
             <div className="space-y-2">
-              <p className="text-sm font-medium text-gray-500 mb-2">Rate your recall:</p>
+              <p className="text-sm font-medium text-gray-500 mb-2">Cât de bine ți-ai amintit:</p>
               <div className="grid grid-cols-3 gap-2">
                 {[
-                  { q: 0, label: 'Complete blackout', color: 'bg-red-500' },
-                  { q: 1, label: 'Failed after seeing', color: 'bg-red-400' },
-                  { q: 2, label: 'Failed, but familiar', color: 'bg-orange-400' },
-                  { q: 3, label: 'Hard to recall', color: 'bg-yellow-400' },
-                  { q: 4, label: 'Recalled after pause', color: 'bg-lime-500' },
-                  { q: 5, label: 'Perfect recall', color: 'bg-green-500' },
+                  { q: 0, label: 'Blank total', color: 'bg-madder' },
+                  { q: 1, label: 'Greșit, apoi mi-am amintit', color: 'bg-madder/80' },
+                  { q: 2, label: 'Greșit, dar familiar', color: 'bg-brass/70' },
+                  { q: 3, label: 'Greu de reamintit', color: 'bg-brass' },
+                  { q: 4, label: 'Reamintit după o pauză', color: 'bg-verdigris/70' },
+                  { q: 5, label: 'Reamintit perfect', color: 'bg-verdigris' },
                 ].map(({ q, label, color }) => (
                   <button key={q} onClick={() => submitRating(q)}
                     className={`${color} text-gray-900 rounded-lg px-3 py-4 text-sm font-medium hover:opacity-90 transition-opacity`}

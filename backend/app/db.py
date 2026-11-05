@@ -1,5 +1,5 @@
 """
-ChronoKG — SQLite database setup with FTS5 full-text search.
+Bransk — SQLite database setup with FTS5 full-text search.
 """
 import sqlite3
 import os
@@ -161,11 +161,109 @@ def init_db():
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
                 chunk_index INTEGER DEFAULT 0,
+                page_number INTEGER DEFAULT NULL, -- 1-based PDF page; NULL for legacy/unverifiable chunks
                 content     TEXT NOT NULL,
                 embedding   TEXT DEFAULT '',  -- JSON float array
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_documents_entry ON documents(entry_id);
+
+            -- User personal notes per study / PDF (with course context and page refs)
+            CREATE TABLE IF NOT EXISTS study_notes (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id       INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                course_context TEXT DEFAULT '',  -- e.g. "Cursul de Neuroștiințe", "Seminarul 4"
+                content        TEXT NOT NULL,    -- user note text
+                page_number    INTEGER DEFAULT NULL, -- page reference in PDF
+                created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_study_notes_entry ON study_notes(entry_id);
+
+            -- Provenance for notes written from a PDF page or saved AI answer.
+            -- A note may cite multiple retrieved chunks; legacy notes remain valid
+            -- and simply have no rows here.
+            CREATE TABLE IF NOT EXISTS study_note_sources (
+                note_id     INTEGER NOT NULL REFERENCES study_notes(id) ON DELETE CASCADE,
+                document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (note_id, document_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_sources_document ON study_note_sources(document_id);
+        """)
+
+        # ── Thesis project: the single "centre" of the app ──
+        # One row holds the licence/dissertation the user is writing: its
+        # title (editable at any time), the paper type, and the outline with
+        # the text written into each section (structure_json).
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS project (
+                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                title          TEXT NOT NULL DEFAULT '',
+                work_type      TEXT NOT NULL DEFAULT 'licenta',
+                field          TEXT NOT NULL DEFAULT '',
+                description    TEXT NOT NULL DEFAULT '',
+                research_q     TEXT NOT NULL DEFAULT '',
+                methodology    TEXT NOT NULL DEFAULT '',
+                deadline       TEXT DEFAULT '',
+                structure_json TEXT NOT NULL DEFAULT '[]',
+                plan_json      TEXT NOT NULL DEFAULT '{}',
+                analysis_json  TEXT NOT NULL DEFAULT '',
+                analysis_at    TEXT NOT NULL DEFAULT '',
+                analysis_key   TEXT NOT NULL DEFAULT '',
+                feedback_json  TEXT NOT NULL DEFAULT '',
+                feedback_at    TEXT NOT NULL DEFAULT '',
+                feedback_key   TEXT NOT NULL DEFAULT '',
+                created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Brainstorming notes for the thesis: hunches, links, possible
+            -- variables, things to read. Kept apart from entries because they
+            -- are half-formed by nature and must not pollute the timeline.
+            CREATE TABLE IF NOT EXISTS project_ideas (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                text        TEXT NOT NULL,
+                category    TEXT NOT NULL DEFAULT 'general',
+                section_id  TEXT DEFAULT '',
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_ideas_category ON project_ideas(category);
+
+            -- Small key/value settings that the user changes from the UI.
+            -- The chosen model lives here, not in .env: .env is a file for
+            -- secrets and defaults, a model choice is a preference the app
+            -- must be able to change without a restart.
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Thesis claims are anchored to a section ID from structure_json.
+            -- Evidence connects a claim to a real study and optionally to the
+            -- exact PDF fragment and/or a saved note that supports it.
+            CREATE TABLE IF NOT EXISTS project_claims (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                section_id  TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_claims_section ON project_claims(section_id);
+
+            CREATE TABLE IF NOT EXISTS project_claim_evidence (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                claim_id    INTEGER NOT NULL REFERENCES project_claims(id) ON DELETE CASCADE,
+                entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+                note_id     INTEGER REFERENCES study_notes(id) ON DELETE SET NULL,
+                relation    TEXT NOT NULL DEFAULT 'supports'
+                            CHECK(relation IN ('supports','contradicts','contextualizes')),
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_claim_evidence_claim ON project_claim_evidence(claim_id);
+            CREATE INDEX IF NOT EXISTS idx_claim_evidence_entry ON project_claim_evidence(entry_id);
         """)
 
         # Create FTS5 virtual table for full-text search
@@ -193,6 +291,18 @@ def init_db():
                 INSERT INTO entries_fts(rowid, title, content, tags)
                 VALUES (new.id, new.title, new.content, new.tags);
             END;
+        """)
+
+        # ── Indexes on the hot read paths ──
+        # /studies and /timeline filter on `archived` and order by date, and the
+        # timeline counts relationships in both directions once per row. Without
+        # these, SQLite scans entries and builds a temp B-tree for every list.
+        # Idempotent so a database created before them gains them on next boot.
+        conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_entries_archived_date ON entries(archived, entry_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_entries_updated ON entries(archived, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_rel_from ON relationships(from_id);
+            CREATE INDEX IF NOT EXISTS idx_rel_to ON relationships(to_id);
         """)
 
         conn.commit()
@@ -224,6 +334,54 @@ def init_db():
                 conn.commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
+
+        # ── Migration: the research plan, the analysis and feedback caches ──
+        # plan_json holds participants, instruments, hypotheses, ethics and the
+        # schedule — the things a thesis needs that are not the outline.
+        # analysis_*/feedback_* keep the last generated text, keyed by a
+        # fingerprint of the inputs, so opening a tab no longer pays for an LLM
+        # call and only an explicit POST does.
+        for col, ddl in [
+            ("plan_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("analysis_json", "TEXT NOT NULL DEFAULT ''"),
+            ("analysis_at", "TEXT NOT NULL DEFAULT ''"),
+            ("analysis_key", "TEXT NOT NULL DEFAULT ''"),
+            ("feedback_json", "TEXT NOT NULL DEFAULT ''"),
+            ("feedback_at", "TEXT NOT NULL DEFAULT ''"),
+            ("feedback_key", "TEXT NOT NULL DEFAULT ''"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE project ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        # ── Migration: real bibliographic identifiers ──
+        # The research pipeline produced plausible-but-wrong source URLs; a DOI
+        # resolved against Crossref is the only trustworthy identifier, so it
+        # lives in its own column with a confidence note beside it.
+        for col, ddl in [
+            ("doi", "TEXT DEFAULT ''"),
+            ("doi_source", "TEXT DEFAULT ''"),
+            ("doi_checked_at", "TEXT DEFAULT ''"),
+            ("bib_title", "TEXT DEFAULT ''"),
+            ("bib_authors", "TEXT DEFAULT ''"),
+            ("bib_year", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE entries ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        # ── Migration: page-level PDF provenance ──
+        # Old chunks intentionally stay NULL: chunk order is not a trustworthy
+        # substitute for the source PDF page.
+        try:
+            conn.execute("ALTER TABLE documents ADD COLUMN page_number INTEGER DEFAULT NULL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     finally:
         conn.close()
 

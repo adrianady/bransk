@@ -1,7 +1,12 @@
 __pycache__/
 *.pyc
 backend/data/
+backend/.venv/
+backend/.venv-test/
 .env
+# Backups and variants too (.env.backup-*, .env.local, …). The plain `.env`
+# pattern does not catch them, and a backup holds the same API key.
+.env.*
 !backend/.env.example
 frontend/node_modules/
 frontend/dist/
@@ -13,3 +18,6 @@ CHRONOKG_DETAILED_REVIEW.md
 .chunkhound.db.root.json
 .chunkhound.json
 .pytest_cache/
+.coverage
+# OpenCode project config contains the API key — never commit it
+opencode.json

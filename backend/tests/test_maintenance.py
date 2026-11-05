@@ -26,8 +26,18 @@ def test_maintenance_normalizes_entries_and_recomputes_theories():
             "title": "  Messy Entry  ",
             "content": "x",
             "entry_date": "2016 some description",
-            "tags": "2016-01-01 | a,b, a",
+            "tags": "alpha",
         })
+        # Make the row dirty on purpose: the API normalizes tags on write now,
+        # so only a pre-existing row can exercise the maintenance repair.
+        from app.db import get_db
+
+        conn = get_db()
+        try:
+            conn.execute("UPDATE entries SET tags = ? WHERE id = 1", ["2016-01-01 | alpha,beta, alpha"])
+            conn.commit()
+        finally:
+            conn.close()
         theory = client.post("/api/theories", json={"name": "Theory T", "status": "emerging"}).json()
         study = client.post("/api/entries", json={"title": "Study S", "content": "c", "study_type": "paper"}).json()
         client.post(f"/api/theories/{theory['id']}/evidence", json={"entry_id": study["id"], "stance": "pro"})
@@ -42,7 +52,7 @@ def test_maintenance_normalizes_entries_and_recomputes_theories():
         entries = {e["id"]: e for e in client.get("/api/entries").json()}
         messy = entries[1]
         assert messy["entry_date"] == "2016-01-01"
-        assert "|" not in messy["tags"]
+        assert messy["tags"] == "alpha, beta"
         assert messy["title"] == "Messy Entry"
         # pro evidence -> supported
         assert client.get("/api/theories").json()[0]["status"] == "supported"

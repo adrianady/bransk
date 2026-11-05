@@ -22,7 +22,7 @@ logger = logging.getLogger("chronokg.studies")
 STUDIES_DIR = Path(os.getenv("CHRONOKG_STUDIES_DIR", str(Path(__file__).parent.parent / "data" / "studies")))
 MAX_SIZE = 150 * 1024 * 1024  # 150 MB safety cap
 
-_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ChronoKG/0.1"}
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Bransk/0.1"}
 
 
 def assert_public_download_url(url: str) -> None:

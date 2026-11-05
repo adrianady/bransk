@@ -1,26 +1,76 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Pencil, Archive, ArchiveRestore, Trash2 } from 'lucide-react'
+import { ArrowLeft, Pencil, Archive, ArchiveRestore, Trash2, GraduationCap } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
+import { subjectTags } from '../lib/tags'
 import { useToast } from './Toast'
-import type { Entry, Relationship, TodoItem, SpacedRepetitionItem, Reminder } from '../lib/types'
+import type { Entry, Relationship, TodoItem, SpacedRepetitionItem, Reminder, StudyQASource, StudyThesisEvidenceLink } from '../lib/types'
+import { StudyQA } from './StudyQA'
 import { EntryForm } from './EntryForm'
+import { StudyPdfModal } from './StudyPdfModal'
+
+// Wide markdown tables scroll inside their panel on a phone instead of widening
+// the page; the table itself stays `display: table`, so desktop alignment is
+// untouched. `markdown-table-wrap` lives in index.css.
+function getMarkdownComponents(entryTitle?: string) {
+  const normTitle = entryTitle ? entryTitle.trim().toLowerCase().replace(/[\s\-_]+/g, ' ') : ''
+  return {
+    table: ({ node: _node, ...props }: React.ComponentProps<'table'> & { node?: unknown }) => (
+      <div className="markdown-table-wrap">
+        <table {...props} />
+      </div>
+    ),
+    h1: ({ children, ...props }: React.ComponentProps<'h1'>) => {
+      const text = String(children || '').trim().toLowerCase().replace(/[\s\-_]+/g, ' ')
+      // Avoid repeating the exact same title if the entry body starts with # Title
+      if (normTitle && (text === normTitle || normTitle.includes(text) || text.includes(normTitle))) {
+        return null
+      }
+      return <h2 className="text-base sm:text-lg font-bold mt-4 mb-2 text-gray-900 dark:text-gray-100" {...props}>{children}</h2>
+    },
+    h2: ({ ...props }: React.ComponentProps<'h2'>) => (
+      <h3 className="text-sm sm:text-base font-semibold mt-3 mb-1.5 text-gray-900 dark:text-gray-100" {...props} />
+    ),
+  }
+}
 
 interface Props {
   entry: Entry
   onBack: () => void
   onUpdate: (entry: Entry) => void
   onSelectEntry?: (entry: Entry) => void
+  onOpenProjectClaim?: (sectionId: string, claimId: number) => void
+  initialPdfSource?: StudyQASource | null
+  onPdfSourceConsumed?: () => void
+  backLabel?: string
 }
 
-export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
+const CANONICAL_RELATIONS = [
+  { value: 'causes', label: 'cauzează (determinare cauzală directă)' },
+  { value: 'modulates', label: 'modulează (reglează sau ajustează activitatea)' },
+  { value: 'inhibits', label: 'inhibă (blochează sau suprimă)' },
+  { value: 'supports', label: 'susține (dovezi empirice pro)' },
+  { value: 'contradicts', label: 'contrazice (dovezi empirice contra)' },
+  { value: 'derives_from', label: 'derivă din (filiație conceptuală)' },
+  { value: 'extends', label: 'extinde (dezvoltă teoria sau metoda)' },
+  { value: 'precedes', label: 'precede (precursor cronologic)' },
+  { value: 'includes', label: 'include (conține ca parte integrantă)' },
+  { value: 'influences', label: 'influențează (impact indirect)' },
+  { value: 'correlates_with', label: 'corelează cu (asociere statistică)' },
+]
+
+export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProjectClaim, initialPdfSource, onPdfSourceConsumed, backLabel }: Props) {
   const toast = useToast()
   const [relationships, setRelationships] = useState<Relationship[]>([])
   const [allEntries, setAllEntries] = useState<Entry[]>([])
   const [showEdit, setShowEdit] = useState(false)
+  const [pdfModalOpen, setPdfModalOpen] = useState(false)
+  const [pdfSource, setPdfSource] = useState<StudyQASource | null>(null)
+  const [thesisEvidence, setThesisEvidence] = useState<StudyThesisEvidenceLink[]>([])
   const [showLinkPicker, setShowLinkPicker] = useState(false)
-  const [linkLabel, setLinkLabel] = useState('')
+  const [selectedKind, setSelectedKind] = useState('causes')
+  const [mechanismText, setMechanismText] = useState('')
   const [linkTarget, setLinkTarget] = useState<number | null>(null)
   const [todo, setTodo] = useState<TodoItem | null>(null)
   const [todoDraft, setTodoDraft] = useState<{ priority: string; effort: string; due_date: string }>({ priority: 'normal', effort: 'm', due_date: '' })
@@ -30,7 +80,7 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
   const [reminderTitle, setReminderTitle] = useState('')
   const [reminderTrigger, setReminderTrigger] = useState('')
   const [reminderType, setReminderType] = useState('once')
-  const [activeTab, setActiveTab] = useState<'info' | 'links' | 'todo' | 'review' | 'reminders'>('info')
+  const [activeTab, setActiveTab] = useState<'info' | 'links' | 'todo' | 'review' | 'reminders' | 'qa'>('info')
 
   useEffect(() => {
     Promise.all([
@@ -54,20 +104,31 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
     api.reminders.list().then(rs => {
       setReminders(rs.filter(r => r.entry_id === entry.id))
     })
+    api.project.evidenceForStudy(entry.id)
+      .then(setThesisEvidence)
+      .catch(() => setThesisEvidence([]))
   }, [entry.id])
+
+  useEffect(() => {
+    if (!initialPdfSource || initialPdfSource.entry_id !== entry.id) return
+    setPdfSource(initialPdfSource)
+    setPdfModalOpen(true)
+    onPdfSourceConsumed?.()
+  }, [entry.id, initialPdfSource?.document_id])
 
   const addRelation = async () => {
     if (!linkTarget) return
     try {
-      await api.relationships.create({ from_id: entry.id, to_id: linkTarget, label: linkLabel })
+      const fullLabel = mechanismText.trim() ? `${selectedKind} | ${mechanismText.trim()}` : selectedKind
+      await api.relationships.create({ from_id: entry.id, to_id: linkTarget, label: fullLabel })
       const rels = await api.relationships.list(entry.id)
       setRelationships(rels)
       setShowLinkPicker(false)
-      setLinkLabel('')
+      setMechanismText('')
       setLinkTarget(null)
-      toast.success('Link added')
+      toast.success('Legătură științifică adăugată')
     } catch (err: any) {
-      toast.error('Could not add link: ' + (err?.message || 'unknown error'))
+      toast.error('Legătura nu a putut fi adăugată: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
@@ -75,9 +136,9 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
     try {
       const item = await api.spacedRepetition.add(entry.id)
       setSrItem(item)
-      toast.success('Added to review schedule')
+      toast.success('Adăugată în programul de recapitulare')
     } catch (err: any) {
-      toast.error('Could not add to review: ' + (err?.message || 'unknown error'))
+      toast.error('Nu a putut fi adăugată la recapitulare: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
@@ -86,9 +147,9 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
       const item = await api.todos.create(entry.id)
       setTodo(item)
       setTodoDraft({ priority: item.priority, effort: item.effort, due_date: item.due_date || '' })
-      toast.success('Task created')
+      toast.success('Sarcină creată')
     } catch (err: any) {
-      toast.error('Could not create task: ' + (err?.message || 'unknown error'))
+      toast.error('Sarcina nu a putut fi creată: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
@@ -102,9 +163,9 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
       })
       setTodo(updated)
       setTodoDraft({ priority: updated.priority, effort: updated.effort, due_date: updated.due_date || '' })
-      toast.success('Task details saved')
+      toast.success('Detaliile sarcinii au fost salvate')
     } catch (err: any) {
-      toast.error('Could not save task: ' + (err?.message || 'unknown error'))
+      toast.error('Sarcina nu a putut fi salvată: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
@@ -121,21 +182,21 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
       setReminderTitle('')
       setReminderTrigger('')
       setReminderType('once')
-      toast.success('Reminder set')
+      toast.success('Reamintire setată')
     } catch (err: any) {
-      toast.error('Could not create reminder: ' + (err?.message || 'unknown error'))
+      toast.error('Reamintirea nu a putut fi creată: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
   const importanceLabel = (n: number) => {
-    const labels: Record<number, string> = { 1: 'Low', 2: 'Medium', 3: 'Important', 4: 'Very Important', 5: 'Critical' }
-    return labels[n] || 'Normal'
+    const labels: Record<number, string> = { 1: 'Scăzută', 2: 'Medie', 3: 'Importantă', 4: 'Foarte importantă', 5: 'Critică' }
+    return labels[n] || 'Normală'
   }
 
   const qualityLabel = (n: number | null) => {
     if (!n) return ''
     const labels: Record<number, string> = {
-      1: 'Weak', 2: 'Limited', 3: 'Moderate', 4: 'Strong', 5: 'High quality',
+      1: 'Slabă', 2: 'Limitată', 3: 'Moderată', 4: 'Puternică', 5: 'Calitate ridicată',
     }
     return labels[n] || ''
   }
@@ -144,22 +205,27 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
     <div className="space-y-4">
       {/* Header */}
       <div className="card">
-        <div className="flex items-start justify-between mb-3">
+        <div className="flex items-start justify-between mb-3 gap-2">
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <button onClick={onBack} className="icon-btn" aria-label="Back to entries" title="Back to entries">
+            <div className="flex items-center gap-2 mb-1">
+              <button onClick={onBack} className="icon-btn shrink-0" aria-label="Înapoi" title={backLabel || "Înapoi"}>
                 <ArrowLeft className="w-5 h-5" />
               </button>
-              <h2 className="text-xl font-bold truncate">{entry.title}</h2>
+              {backLabel && (
+                <button onClick={onBack} className="text-xs text-chrono-600 dark:text-chrono-400 hover:underline font-medium shrink-0">
+                  {backLabel}
+                </button>
+              )}
             </div>
-            <div className="flex items-center gap-3 mt-1 text-sm text-gray-500">
+            <h2 className="text-base sm:text-xl font-bold leading-snug break-words line-clamp-3">{entry.title}</h2>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-xs sm:text-sm text-gray-500 min-w-0">
               {entry.entry_date && <span>📅 {entry.entry_date}</span>}
               <span>⭐ {importanceLabel(entry.importance)}</span>
-              {entry.source && <span>📚 {entry.source}</span>}
+              {entry.source && <span className="break-all min-w-0">📚 {entry.source}</span>}
             </div>
           </div>
-          <div className="flex gap-2">
-            <button onClick={() => setShowEdit(true)} className="icon-btn" aria-label="Edit entry" title="Edit entry">
+          <div className="flex gap-1.5 shrink-0">
+            <button onClick={() => setShowEdit(true)} className="icon-btn" aria-label="Editează intrarea" title="Editează intrarea">
               <Pencil className="w-4 h-4" />
             </button>
             <button
@@ -167,28 +233,28 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
                 try {
                   const updated = await api.entries.update(entry.id, { archived: !entry.archived })
                   onUpdate(updated)
-                  toast.success(entry.archived ? 'Entry restored' : 'Entry archived')
+                  toast.success(entry.archived ? 'Intrare restaurată' : 'Intrare arhivată')
                 } catch (err: any) {
-                  toast.error('Could not update entry: ' + (err?.message || 'unknown error'))
+                  toast.error('Intrarea nu a putut fi actualizată: ' + (err?.message || 'eroare necunoscută'))
                 }
               }}
               className="icon-btn"
-              title={entry.archived ? 'Restore entry' : 'Archive entry'}
-              aria-label={entry.archived ? 'Restore entry' : 'Archive entry'}
+              title={entry.archived ? 'Restaurează intrarea' : 'Arhivează intrarea'}
+              aria-label={entry.archived ? 'Restaurează intrarea' : 'Arhivează intrarea'}
             >
               {entry.archived ? <ArchiveRestore className="w-4 h-4" /> : <Archive className="w-4 h-4" />}
             </button>
             <button onClick={async () => {
-              if (confirm('Delete this entry?')) {
+              if (confirm('Ștergi această intrare?')) {
                 try {
                   await api.entries.delete(entry.id)
-                  toast.success('Entry deleted')
+                  toast.success('Intrare ștearsă')
                   onBack()
                 } catch (err: any) {
-                  toast.error('Could not delete entry: ' + (err?.message || 'unknown error'))
+                  toast.error('Intrarea nu a putut fi ștearsă: ' + (err?.message || 'eroare necunoscută'))
                 }
               }
-            }} className="icon-btn text-red-500" aria-label="Delete entry" title="Delete entry">
+            }} className="icon-btn text-madder" aria-label="Șterge intrarea" title="Șterge intrarea">
               <Trash2 className="w-4 h-4" />
             </button>
           </div>
@@ -196,7 +262,7 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
 
         {entry.tags && (
           <div className="flex gap-1 flex-wrap mb-3">
-            {entry.tags.split(',').map(t => t.trim()).filter(Boolean).map(t => (
+            {subjectTags(entry.tags).map(t => (
               <span key={t} className="badge bg-chrono-100 text-chrono-700 dark:bg-chrono-900/50 dark:text-chrono-400">{t}</span>
             ))}
           </div>
@@ -204,32 +270,64 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
 
         {/* Study metadata */}
         {entry.study_type && (
-          <div className="mb-4 p-3 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-900 text-sm space-y-1">
+          <div className="mb-4 p-3 rounded-lg bg-accent-soft border border-accent/20 text-sm space-y-1">
             <div className="flex flex-wrap gap-x-4 gap-y-1">
-              <span className="badge bg-indigo-100 text-indigo-700 dark:bg-indigo-900/60 dark:text-indigo-300">{entry.study_type}</span>
+              <span className="badge badge-accent">{entry.study_type}</span>
               {entry.entry_date && <span>📅 {entry.entry_date.slice(0, 4)}</span>}
               {entry.quality != null && (
                 <span title={qualityLabel(entry.quality)}>
                   {'★'.repeat(entry.quality)}{'☆'.repeat(5 - entry.quality)}
-                  <span className="text-gray-500 ml-1">quality {entry.quality}/5</span>
+                  <span className="text-gray-500 ml-1">calitate {entry.quality}/5</span>
                 </span>
               )}
             </div>
-            {entry.authors && <p className="text-gray-600 dark:text-gray-400"><strong>Authors:</strong> {entry.authors}</p>}
+            {entry.authors && <p className="text-gray-600 dark:text-gray-400"><strong>Autori:</strong> {entry.authors}</p>}
+            {/* A DOI resolved against Crossref is the trustworthy identifier.
+                The stored `source` URL came from the research pipeline and is
+                often wrong, so it is shown as "unverified" beside it. */}
+            {entry.doi && (
+              <p className="text-gray-700 dark:text-gray-300">
+                <strong>DOI:</strong>{' '}
+                <a
+                  href={`https://doi.org/${entry.doi}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-chrono-600 hover:underline break-all"
+                >
+                  {entry.doi}
+                </a>
+                <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-verdigris-soft text-verdigris">
+                  verificat Crossref
+                </span>
+              </p>
+            )}
+            {entry.bib_year && (
+              <p className="text-gray-600 dark:text-gray-400 text-xs">
+                <strong>An bibliografic:</strong> {entry.bib_year}
+              </p>
+            )}
             {entry.source && (
               <p className="text-gray-600 dark:text-gray-400 break-all">
-                <strong>Source:</strong>{' '}
+                <strong>Sursă:</strong>{' '}
                 {entry.source.startsWith('http') ? (
                   <a href={entry.source} target="_blank" rel="noreferrer" className="text-chrono-600 hover:underline">{entry.source}</a>
                 ) : entry.source}
+                {entry.doi && (
+                  <span className="ml-1.5 text-[10px] text-brass">
+                    (link original — nu corespunde mereu cu lucrarea)
+                  </span>
+                )}
               </p>
             )}
             {entry.pdf_path && (
               <p className="pt-1">
-                <a href={api.studies.pdfUrl(entry.id)} target="_blank" rel="noreferrer"
-                  className="btn-secondary text-xs px-2 py-1 inline-flex items-center gap-1">
-                  📄 Open PDF
-                </a>
+                <button
+                  type="button"
+                  onClick={() => { setPdfSource(null); setPdfModalOpen(true) }}
+                  className="btn-secondary text-xs px-2.5 py-1 inline-flex items-center gap-1.5 font-semibold text-chrono-700 dark:text-chrono-300 bg-chrono-50 dark:bg-chrono-950/60 border border-chrono-200 dark:border-chrono-800 hover:bg-chrono-100 dark:hover:bg-chrono-900 transition-colors"
+                >
+                  📄 Citește PDF & Notițe
+                </button>
               </p>
             )}
           </div>
@@ -238,28 +336,29 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
         {/* Content */}
         <div className="prose prose-sm dark:prose-invert max-w-none mt-4">
           {entry.content ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={getMarkdownComponents(entry.title)}>{entry.content}</ReactMarkdown>
           ) : (
-            <p className="text-gray-400 italic">No content</p>
+            <p className="text-gray-400 italic">Fără conținut</p>
           )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700">
-        {(['info', 'links', 'todo', 'review', 'reminders'] as const).map(tab => (
+      <div className="flex gap-1 overflow-x-auto no-scrollbar pb-px flex-nowrap border-b border-gray-200 dark:border-gray-700">
+        {(['info', 'links', 'todo', 'review', 'reminders', 'qa'] as const).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            className={`px-2.5 sm:px-4 py-2 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === tab
                 ? 'border-chrono-600 text-chrono-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'info' && '📋 Info'}
-            {tab === 'links' && `🔗 Links (${relationships.length})`}
-            {tab === 'todo' && '✅ Todo'}
-            {tab === 'review' && '🔄 Review'}
-            {tab === 'reminders' && `⏰ Reminders (${reminders.length})`}
+            {tab === 'info' && '📋 Informații'}
+            {tab === 'links' && `🔗 Legături (${relationships.length})`}
+            {tab === 'todo' && '✅ Sarcini'}
+            {tab === 'review' && '🔄 Recapitulare'}
+            {tab === 'reminders' && `⏰ Reamintiri (${reminders.length})`}
+            {tab === 'qa' && '💬 Întrebări'}
           </button>
         ))}
       </div>
@@ -267,47 +366,47 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
       {/* Info Tab */}
       {activeTab === 'info' && (
         <div className="card">
-          <h3 className="font-semibold mb-3">Entry details</h3>
+          <h3 className="font-semibold mb-3">Detalii intrare</h3>
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
             <div>
               <dt className="text-xs text-gray-500 mb-0.5">ID</dt>
               <dd>#{entry.id}</dd>
             </div>
             <div>
-              <dt className="text-xs text-gray-500 mb-0.5">Importance</dt>
+              <dt className="text-xs text-gray-500 mb-0.5">Importanță</dt>
               <dd>
                 {'★'.repeat(entry.importance)}{'☆'.repeat(5 - entry.importance)}{' '}
                 <span className="text-gray-500">{importanceLabel(entry.importance)}</span>
               </dd>
             </div>
             <div>
-              <dt className="text-xs text-gray-500 mb-0.5">Status</dt>
-              <dd>{entry.archived ? 'Archived' : 'Active'}</dd>
+              <dt className="text-xs text-gray-500 mb-0.5">Stare</dt>
+              <dd>{entry.archived ? 'Arhivată' : 'Activă'}</dd>
             </div>
             <div>
-              <dt className="text-xs text-gray-500 mb-0.5">Graph links</dt>
+              <dt className="text-xs text-gray-500 mb-0.5">Legături în graf</dt>
               <dd>{relationships.length}</dd>
             </div>
             <div>
-              <dt className="text-xs text-gray-500 mb-0.5">Created</dt>
+              <dt className="text-xs text-gray-500 mb-0.5">Creată</dt>
               <dd>{new Date(entry.created_at).toLocaleString()}</dd>
             </div>
             <div>
-              <dt className="text-xs text-gray-500 mb-0.5">Last updated</dt>
+              <dt className="text-xs text-gray-500 mb-0.5">Ultima actualizare</dt>
               <dd>{new Date(entry.updated_at).toLocaleString()}</dd>
             </div>
             <div>
-              <dt className="text-xs text-gray-500 mb-0.5">Review schedule</dt>
+              <dt className="text-xs text-gray-500 mb-0.5">Program de recapitulare</dt>
               <dd>
                 {srItem
                   ? srItem.next_review
-                    ? `Due ${new Date(srItem.next_review).toLocaleDateString()}`
-                    : 'Scheduled'
-                  : 'Not in review rotation'}
+                    ? `Scadentă ${new Date(srItem.next_review).toLocaleDateString()}`
+                    : 'Programată'
+                  : 'Nu este în rotația de recapitulare'}
               </dd>
             </div>
             <div>
-              <dt className="text-xs text-gray-500 mb-0.5">Reminders</dt>
+              <dt className="text-xs text-gray-500 mb-0.5">Reamintiri</dt>
               <dd>{reminders.length}</dd>
             </div>
           </dl>
@@ -318,29 +417,52 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
       {activeTab === 'links' && (
         <div className="card">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="font-semibold">Relationships</h3>
-            <button onClick={() => setShowLinkPicker(true)} className="btn-primary text-sm">+ Link Entry</button>
+            <h3 className="font-semibold">Legături</h3>
+            <button onClick={() => setShowLinkPicker(true)} className="btn-primary text-sm">+ Adaugă legătură</button>
           </div>
 
           {showLinkPicker && (
-            <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg space-y-2">
-              <select onChange={e => setLinkTarget(Number(e.target.value))} className="input">
-                <option value="">Select entry to link...</option>
-                {allEntries.map(e => (
-                  <option key={e.id} value={e.id}>{e.title}</option>
-                ))}
-              </select>
-              <input value={linkLabel} onChange={e => setLinkLabel(e.target.value)}
-                className="input" placeholder="Relationship label (e.g., 'caused', 'inspired')" />
-              <div className="flex gap-2">
-                <button onClick={addRelation} className="btn-primary text-sm">Add Link</button>
-                <button onClick={() => setShowLinkPicker(false)} className="btn-ghost text-sm">Cancel</button>
+            <div className="mb-4 p-4 bg-gray-50 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700 rounded-xl space-y-3">
+              <h4 className="text-sm font-semibold">Creează o nouă conexiune deterministă</h4>
+              <div className="space-y-1">
+                <label className="text-xs text-gray-500 font-medium">Țintă conexiune:</label>
+                <select value={linkTarget ?? ''} onChange={e => setLinkTarget(Number(e.target.value))} className="input w-full text-sm">
+                  <option value="">Selectează intrarea sau studiul țintă...</option>
+                  {allEntries.map(e => (
+                    <option key={e.id} value={e.id}>{e.title}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-gray-500 font-medium">Tip relație:</label>
+                <select value={selectedKind} onChange={e => setSelectedKind(e.target.value)} className="input w-full text-sm font-medium">
+                  {CANONICAL_RELATIONS.map(r => (
+                    <option key={r.value} value={r.value}>{r.value} — {r.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-gray-500 font-medium">Mecanism / Detaliu științific (opțional):</label>
+                <input
+                  value={mechanismText}
+                  onChange={e => setMechanismText(e.target.value)}
+                  className="input w-full text-sm"
+                  placeholder="ex. Stimulare sinaptogenetică sau replicare RCT"
+                />
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button onClick={addRelation} disabled={!linkTarget} className="btn-primary text-sm">
+                  Salvează legătura
+                </button>
+                <button onClick={() => { setShowLinkPicker(false); setLinkTarget(null); setMechanismText('') }} className="btn-ghost text-sm">
+                  Anulează
+                </button>
               </div>
             </div>
           )}
 
           {relationships.length === 0 ? (
-            <p className="text-sm text-gray-500">No relationships yet. Link this entry to others in your knowledge graph.</p>
+            <p className="text-sm text-gray-500">Nicio legătură încă. Leagă această intrare de altele din graful tău de cunoștințe.</p>
           ) : (
             <div className="space-y-2">
               {relationships.map(rel => (
@@ -353,9 +475,9 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
                         if (target && onSelectEntry) onSelectEntry(target)
                       }}
                       className={`font-medium truncate ${onSelectEntry ? 'text-chrono-700 hover:underline' : ''}`}
-                      title={onSelectEntry ? 'Open linked entry' : undefined}
+                      title={onSelectEntry ? 'Deschide intrarea legată' : undefined}
                     >
-                      {allEntries.find(e => e.id === (rel.from_id === entry.id ? rel.to_id : rel.from_id))?.title || `Entry ${rel.from_id === entry.id ? rel.to_id : rel.from_id}`}
+                      {allEntries.find(e => e.id === (rel.from_id === entry.id ? rel.to_id : rel.from_id))?.title || `Intrarea ${rel.from_id === entry.id ? rel.to_id : rel.from_id}`}
                     </button>
                     {rel.label && <span className="text-gray-500 ml-1">({rel.label})</span>}
                   </span>
@@ -363,11 +485,11 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
                     try {
                       await api.relationships.delete(rel.id)
                       setRelationships(prev => prev.filter(r => r.id !== rel.id))
-                      toast.success('Link removed')
+                      toast.success('Legătură eliminată')
                     } catch (err: any) {
-                      toast.error('Could not remove link: ' + (err?.message || 'unknown error'))
+                      toast.error('Legătura nu a putut fi eliminată: ' + (err?.message || 'eroare necunoscută'))
                     }
-                  }} className="text-red-400 hover:text-red-600 text-xs">Remove</button>
+                  }} className="text-madder hover:text-madder/80 text-xs">Elimină</button>
                 </div>
               ))}
             </div>
@@ -378,7 +500,7 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
       {/* Todo Tab */}
       {activeTab === 'todo' && (
         <div className="card">
-          <h3 className="font-semibold mb-3">Task</h3>
+          <h3 className="font-semibold mb-3">Sarcină</h3>
           {todo ? (
             <div className="space-y-2">
               <label className="flex items-center gap-2">
@@ -388,29 +510,29 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
                       const updated = await api.todos.update(entry.id, { completed: !todo.completed })
                       setTodo(updated)
                     } catch (err: any) {
-                      toast.error('Could not update task: ' + (err?.message || 'unknown error'))
+                      toast.error('Sarcina nu a putut fi actualizată: ' + (err?.message || 'eroare necunoscută'))
                     }
                   }}
                   className="rounded" />
                 <span className={todo.completed ? 'line-through text-gray-400' : ''}>
-                  {todo.completed ? 'Completed' : 'In progress'}
+                  {todo.completed ? 'Finalizată' : 'În lucru'}
                 </span>
               </label>
               <div className="grid grid-cols-3 gap-2 pt-1">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Priority</label>
+                  <label className="block text-xs text-gray-500 mb-1">Prioritate</label>
                   <select
                     value={todoDraft.priority}
                     onChange={e => setTodoDraft(d => ({ ...d, priority: e.target.value }))}
                     className="input text-sm"
                   >
-                    <option value="critical">critical</option>
-                    <option value="important">important</option>
-                    <option value="normal">normal</option>
+                    <option value="critical">critică</option>
+                    <option value="important">importantă</option>
+                    <option value="normal">normală</option>
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Effort</label>
+                  <label className="block text-xs text-gray-500 mb-1">Efort</label>
                   <select
                     value={todoDraft.effort}
                     onChange={e => setTodoDraft(d => ({ ...d, effort: e.target.value }))}
@@ -423,7 +545,7 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Due</label>
+                  <label className="block text-xs text-gray-500 mb-1">Scadență</label>
                   <input
                     type="date"
                     value={todoDraft.due_date}
@@ -432,21 +554,21 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
                   />
                 </div>
               </div>
-              <button onClick={saveTodoDraft} className="btn-secondary text-sm">Save task details</button>
+              <button onClick={saveTodoDraft} className="btn-secondary text-sm">Salvează detaliile sarcinii</button>
               <button onClick={async () => {
                 try {
                   await api.todos.delete(entry.id)
                   setTodo(null)
-                  toast.success('Task removed')
+                  toast.success('Sarcină eliminată')
                 } catch (err: any) {
-                  toast.error('Could not remove task: ' + (err?.message || 'unknown error'))
+                  toast.error('Sarcina nu a putut fi eliminată: ' + (err?.message || 'eroare necunoscută'))
                 }
-              }} className="btn-ghost text-sm text-red-500">Remove task</button>
+              }} className="btn-ghost text-sm text-madder">Elimină sarcina</button>
             </div>
           ) : (
             <div>
-              <p className="text-sm text-gray-500 mb-2">No task for this entry.</p>
-              <button onClick={addTodo} className="btn-primary text-sm">+ Add as Task</button>
+              <p className="text-sm text-gray-500 mb-2">Nicio sarcină pentru această intrare.</p>
+              <button onClick={addTodo} className="btn-primary text-sm">+ Adaugă ca sarcină</button>
             </div>
           )}
         </div>
@@ -456,53 +578,53 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
       {activeTab === 'reminders' && (
         <div className="card">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="font-semibold">Reminders</h3>
-            <button onClick={() => setShowReminderForm(!showReminderForm)} className="btn-primary text-sm">+ Add Reminder</button>
+            <h3 className="font-semibold">Reamintiri</h3>
+            <button onClick={() => setShowReminderForm(!showReminderForm)} className="btn-primary text-sm">+ Adaugă reamintire</button>
           </div>
 
           {showReminderForm && (
             <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg space-y-2">
               <input value={reminderTitle} onChange={e => setReminderTitle(e.target.value)}
-                className="input" placeholder="Reminder title (optional)" />
+                className="input" placeholder="Titlu reamintire (opțional)" />
               <div className="grid grid-cols-2 gap-2">
                 <input type="datetime-local" value={reminderTrigger} onChange={e => setReminderTrigger(e.target.value)}
                   className="input" />
                 <select value={reminderType} onChange={e => setReminderType(e.target.value)} className="input">
-                  <option value="once">Once</option>
-                  <option value="daily">Daily</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="monthly">Monthly</option>
+                  <option value="once">O dată</option>
+                  <option value="daily">Zilnic</option>
+                  <option value="weekly">Săptămânal</option>
+                  <option value="monthly">Lunar</option>
                 </select>
               </div>
               <div className="flex gap-2">
-                <button onClick={addReminder} disabled={!reminderTrigger} className="btn-primary text-sm">Save</button>
-                <button onClick={() => setShowReminderForm(false)} className="btn-ghost text-sm">Cancel</button>
+                <button onClick={addReminder} disabled={!reminderTrigger} className="btn-primary text-sm">Salvează</button>
+                <button onClick={() => setShowReminderForm(false)} className="btn-ghost text-sm">Anulează</button>
               </div>
             </div>
           )}
 
           {reminders.length === 0 ? (
-            <p className="text-sm text-gray-500">No reminders for this entry yet.</p>
+            <p className="text-sm text-gray-500">Nicio reamintire pentru această intrare încă.</p>
           ) : (
             <div className="space-y-2">
               {reminders.map(rem => (
                 <div key={rem.id} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm">
                   <div>
-                    <p className="font-medium">{rem.title || 'Reminder'}</p>
+                    <p className="font-medium">{rem.title || 'Reamintire'}</p>
                     <p className="text-xs text-gray-500">
                       {new Date(rem.trigger_at).toLocaleString()} · {rem.reminder_type}
-                      {rem.notified ? ' · ✅ notified' : ' · ⏳ pending'}
+                      {rem.notified ? ' · ✅ notificată' : ' · ⏳ în așteptare'}
                     </p>
                   </div>
                   <button onClick={async () => {
                     try {
                       await api.reminders.delete(entry.id, rem.id)
                       setReminders(prev => prev.filter(r => r.id !== rem.id))
-                      toast.success('Reminder removed')
+                      toast.success('Reamintire eliminată')
                     } catch (err: any) {
-                      toast.error('Could not remove reminder: ' + (err?.message || 'unknown error'))
+                      toast.error('Reamintirea nu a putut fi eliminată: ' + (err?.message || 'eroare necunoscută'))
                     }
-                  }} className="text-red-400 hover:text-red-600 text-xs">Remove</button>
+                  }} className="text-madder hover:text-madder/80 text-xs">Elimină</button>
                 </div>
               ))}
             </div>
@@ -510,27 +632,69 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
         </div>
       )}
 
+      {/* QA Tab */}
+      {activeTab === 'qa' && (
+        <div className="space-y-4">
+          {thesisEvidence.length > 0 && (
+            <div className="card p-3 space-y-2 border-chrono-200 dark:border-chrono-900/60">
+              <h3 className="text-xs font-semibold text-chrono-700 dark:text-chrono-300 flex items-center gap-1.5">
+                <GraduationCap className="w-4 h-4" /> Folosit în harta tezei ({thesisEvidence.length})
+              </h3>
+              {thesisEvidence.map(link => (
+                <div key={link.evidence_id} className="rounded-md bg-gray-50 dark:bg-gray-800/60 p-2 text-xs">
+                  <p className="font-medium">{link.section_title} · {link.relation}</p>
+                  <p className="mt-0.5 text-gray-600 dark:text-gray-300">{link.claim}</p>
+                  {link.document && (
+                    <p className="mt-1 text-[10px] text-gray-500">
+                      Fragment #{link.document.chunk_index}
+                      {link.document.page_verified && link.document.page_number != null
+                        ? ` · pagina PDF ${link.document.page_number}`
+                        : ' · pagina neverificată'}
+                      {` — ${link.document.preview}`}
+                    </p>
+                  )}
+                  {link.note_preview && <p className="mt-1 text-[10px] text-gray-500">Notiță: {link.note_preview}</p>}
+                  <button
+                    type="button"
+                    onClick={() => onOpenProjectClaim?.(link.section_id, link.claim_id)}
+                    disabled={!onOpenProjectClaim}
+                    className="mt-1 text-[11px] text-chrono-700 dark:text-chrono-300 hover:underline disabled:opacity-50"
+                  >
+                    Deschide afirmația în hartă →
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <StudyQA
+            entryId={entry.id}
+            title={entry.title}
+            onOpenSource={source => { setPdfSource(source); setPdfModalOpen(true) }}
+          />
+        </div>
+      )}
+
       {/* Review Tab */}
       {activeTab === 'review' && (
         <div className="card">
-          <h3 className="font-semibold mb-3">Spaced Repetition</h3>
+          <h3 className="font-semibold mb-3">Repetare spațiată</h3>
           {srItem ? (
             <div className="space-y-2 text-sm">
-              <p>Ease factor: <span className="font-medium">{srItem.ease_factor.toFixed(2)}</span></p>
-              <p>Interval: <span className="font-medium">{srItem.interval} days</span></p>
-              <p>Repetitions: <span className="font-medium">{srItem.repetitions}</span></p>
-              {srItem.next_review && <p>Next review: <span className="font-medium">{srItem.next_review}</span></p>}
+              <p>Factor de ușurință: <span className="font-medium">{srItem.ease_factor.toFixed(2)}</span></p>
+              <p>Interval: <span className="font-medium">{srItem.interval} zile</span></p>
+              <p>Repetiții: <span className="font-medium">{srItem.repetitions}</span></p>
+              {srItem.next_review && <p>Următoarea recapitulare: <span className="font-medium">{srItem.next_review}</span></p>}
               <div className="mt-3">
-                <p className="text-xs text-gray-500 mb-2">Rate your recall:</p>
+                <p className="text-xs text-gray-500 mb-2">Evaluează-ți reamintirea:</p>
                 <div className="flex gap-1">
                   {[0, 1, 2, 3, 4, 5].map(q => (
                     <button key={q} onClick={async () => {
                       try {
                         const updated = await api.spacedRepetition.review(srItem.id, q)
                         setSrItem(updated)
-                        toast.success(`Rated ${q}/6 — next review ${updated.next_review ? new Date(updated.next_review).toLocaleDateString() : 'today'}`)
+                        toast.success(`Evaluat ${q}/6 — următoarea recapitulare ${updated.next_review ? new Date(updated.next_review).toLocaleDateString() : 'azi'}`)
                       } catch (err: any) {
-                        toast.error('Could not submit rating: ' + (err?.message || 'unknown error'))
+                        toast.error('Evaluarea nu a putut fi trimisă: ' + (err?.message || 'eroare necunoscută'))
                       }
                     }}
                       className="btn-ghost text-xs px-2 py-1"
@@ -542,16 +706,16 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
                 try {
                   await api.spacedRepetition.remove(entry.id)
                   setSrItem(null)
-                  toast.success('Removed from review')
+                  toast.success('Eliminată din recapitulare')
                 } catch (err: any) {
-                  toast.error('Could not remove from review: ' + (err?.message || 'unknown error'))
+                  toast.error('Nu a putut fi eliminată din recapitulare: ' + (err?.message || 'eroare necunoscută'))
                 }
-              }} className="btn-ghost text-sm text-red-500 mt-2">Remove from review</button>
+              }} className="btn-ghost text-sm text-madder mt-2">Elimină din recapitulare</button>
             </div>
           ) : (
             <div>
-              <p className="text-sm text-gray-500 mb-2">Not in review rotation.</p>
-              <button onClick={addToReview} className="btn-primary text-sm">+ Add to Review</button>
+              <p className="text-sm text-gray-500 mb-2">Nu este în rotația de recapitulare.</p>
+              <button onClick={addToReview} className="btn-primary text-sm">+ Adaugă la recapitulare</button>
             </div>
           )}
         </div>
@@ -563,6 +727,17 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry }: Props) {
           editEntry={entry}
           onClose={() => setShowEdit(false)}
           onSaved={(updated) => { onUpdate(updated); setShowEdit(false) }}
+        />
+      )}
+
+      {/* Native In-App PDF Reader & Notes */}
+      {pdfModalOpen && (
+        <StudyPdfModal
+          study={entry}
+          isOpen={pdfModalOpen}
+          sourceToOpen={pdfSource}
+          onClose={() => { setPdfModalOpen(false); setPdfSource(null) }}
+          onNotesUpdated={() => onUpdate(entry)}
         />
       )}
     </div>

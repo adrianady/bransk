@@ -5,3 +5,7 @@ pydantic-settings>=2.7.0
 httpx>=0.28.0
 sse-starlette>=2.2.0
 python-dotenv>=1.1.0
+
+# PDF text extraction for study RAG (PDF -> chunks -> questions)
+pymupdf>=1.24.0
+pypdf>=5.0.0

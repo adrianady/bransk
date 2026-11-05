@@ -54,7 +54,10 @@ def _execute_search(q: str, from_date: Optional[str], to_date: Optional[str], ta
                 if t:
                     # Exact token match on comma boundaries: '%ann%' would
                     # also match 'annual'; this only matches the whole tag.
-                    where_extra.append("(',' || e.tags || ',') LIKE '%,' || ? || ',%'")
+                    # The REPLACE makes "a, b" and "a,b" behave the same.
+                    where_extra.append(
+                        "(',' || REPLACE(e.tags, ', ', ',') || ',') LIKE '%,' || ? || ',%'"
+                    )
                     params.append(t)
 
         extra_sql = f" AND {' AND '.join(where_extra)}" if where_extra else ""
@@ -105,7 +108,7 @@ def _execute_suggest(q: str, limit: int):
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT id, title FROM entries WHERE title LIKE ? LIMIT ?",
+            "SELECT id, title FROM entries WHERE title LIKE ? AND archived = 0 LIMIT ?",
             [f"%{q}%", limit]
         ).fetchall()
         return [{"id": r["id"], "title": r["title"]} for r in rows]

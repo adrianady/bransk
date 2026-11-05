@@ -48,7 +48,7 @@ export function TodoList({ onSelectEntry }: Props) {
       await api.todos.update(todo.entry_id, { completed: !todo.completed })
       await loadTodos()
     } catch (err: any) {
-      toast.error('Could not update task: ' + (err?.message || 'unknown error'))
+      toast.error('Sarcina nu s-a putut actualiza: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
@@ -65,10 +65,10 @@ export function TodoList({ onSelectEntry }: Props) {
         due_date: draft.due_date || null,
       })
       setEditingId(null)
-      toast.success('Task details saved')
+      toast.success('Detaliile sarcinii au fost salvate')
       await loadTodos()
     } catch (err: any) {
-      toast.error('Could not save task: ' + (err?.message || 'unknown error'))
+      toast.error('Sarcina nu s-a putut salva: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
@@ -84,35 +84,42 @@ export function TodoList({ onSelectEntry }: Props) {
       })
       setShowCreate(false)
       setCreateDraft({ entry_id: '', priority: 'normal', effort: 'm', due_date: '' })
-      toast.success('Task created')
+      toast.success('Sarcina a fost creată')
       await loadTodos()
     } catch (err: any) {
-      toast.error('Could not create task: ' + (err?.message || 'unknown error'))
+      toast.error('Sarcina nu s-a putut crea: ' + (err?.message || 'eroare necunoscută'))
     } finally {
       setSaving(false)
     }
   }
 
   const priorityColors: Record<string, string> = {
-    critical: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-    important: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-    normal: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
+    critical: 'bg-madder-soft text-madder',
+    important: 'bg-brass-soft text-brass',
+    normal: 'bg-accent-soft text-accent-strong',
   }
 
-  if (loading) return <div className="text-center py-8 text-gray-500">Loading tasks...</div>
+  // Display-only labels: the stored values (critical/important/normal, s/m/l/xl)
+  // stay canonical so the API and the colours above keep working.
+  const priorityLabels: Record<string, string> = {
+    critical: 'critică', important: 'importantă', normal: 'normală',
+  }
+  const effortLabels: Record<string, string> = { s: 'mic', m: 'mediu', l: 'mare', xl: 'foarte mare' }
+
+  if (loading) return <div className="text-center py-8 text-gray-500">Se încarcă sarcinile…</div>
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-xl font-bold">Tasks</h2>
-          <p className="text-sm text-gray-500">{todos.filter(t => !t.completed).length} pending · {todos.length} total</p>
+          <h2 className="text-xl font-bold">Sarcini</h2>
+          <p className="text-sm text-gray-500">{todos.filter(t => !t.completed).length} în așteptare · {todos.length} în total</p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => setShowCreate(!showCreate)} className="btn-primary">
-            <Plus className="w-4 h-4" /> New Task
+            <Plus className="w-4 h-4" /> Sarcină nouă
           </button>
-          <button onClick={loadTodos} className="btn-secondary" aria-label="Refresh tasks">
+          <button onClick={loadTodos} className="btn-secondary" aria-label="Reîmprospătează sarcinile">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
@@ -120,14 +127,14 @@ export function TodoList({ onSelectEntry }: Props) {
 
       {showCreate && (
         <div className="card mb-4 space-y-2">
-          <h3 className="font-semibold text-sm">New task</h3>
+          <h3 className="font-semibold text-sm">Sarcină nouă</h3>
           <select
             value={createDraft.entry_id}
             onChange={e => setCreateDraft(d => ({ ...d, entry_id: e.target.value }))}
             className="input"
-            aria-label="Entry for new task"
+            aria-label="Intrarea pentru sarcina nouă"
           >
-            <option value="">Select entry...</option>
+            <option value="">Alege intrarea…</option>
             {allEntries.map(e => (
               <option key={e.id} value={e.id}>{e.title}</option>
             ))}
@@ -137,56 +144,56 @@ export function TodoList({ onSelectEntry }: Props) {
               value={createDraft.priority}
               onChange={e => setCreateDraft(d => ({ ...d, priority: e.target.value }))}
               className="input text-sm w-auto"
-              aria-label="Priority"
+              aria-label="Prioritate"
             >
-              <option value="critical">critical</option>
-              <option value="important">important</option>
-              <option value="normal">normal</option>
+              <option value="critical">critică</option>
+              <option value="important">importantă</option>
+              <option value="normal">normală</option>
             </select>
             <select
               value={createDraft.effort}
               onChange={e => setCreateDraft(d => ({ ...d, effort: e.target.value }))}
               className="input text-sm w-auto"
-              aria-label="Effort"
+              aria-label="Efort"
             >
-              <option value="s">S</option>
-              <option value="m">M</option>
-              <option value="l">L</option>
-              <option value="xl">XL</option>
+              <option value="s">mic</option>
+              <option value="m">mediu</option>
+              <option value="l">mare</option>
+              <option value="xl">foarte mare</option>
             </select>
             <input
               type="date"
               value={createDraft.due_date}
               onChange={e => setCreateDraft(d => ({ ...d, due_date: e.target.value }))}
               className="input text-sm w-auto"
-              aria-label="Due date"
+              aria-label="Data scadentă"
             />
           </div>
           <div className="flex gap-2">
             <button onClick={createTask} disabled={!createDraft.entry_id || saving} className="btn-primary text-sm">
-              {saving ? 'Creating...' : 'Create task'}
+              {saving ? 'Se creează…' : 'Creează sarcina'}
             </button>
-            <button onClick={() => setShowCreate(false)} className="btn-ghost text-sm">Cancel</button>
+            <button onClick={() => setShowCreate(false)} className="btn-ghost text-sm">Anulează</button>
           </div>
         </div>
       )}
 
       {dueReminders.length > 0 && (
-        <div className="card mb-4 border-red-200 dark:border-red-900">
-          <h3 className="font-semibold mb-2 text-red-600 dark:text-red-400">⏰ Due reminders ({dueReminders.length})</h3>
+        <div className="card mb-4 border-brass/25 bg-brass-soft/50">
+          <h3 className="font-semibold mb-2 text-brass">⏰ Memento-uri scadente ({dueReminders.length})</h3>
           <div className="space-y-2">
             {dueReminders.map(rem => (
               <div key={rem.id} className="flex items-center justify-between gap-2 text-sm">
-                <div className="min-w-0">
-                  <p className="font-medium truncate">{rem.title || 'Reminder'}</p>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium truncate">{rem.title || 'Memento'}</p>
                   <p className="text-xs text-gray-500 truncate">
-                    {new Date(rem.trigger_at).toLocaleString()} · {entryTitles[rem.entry_id] || `Entry #${rem.entry_id}`}
+                    {new Date(rem.trigger_at).toLocaleString()} · {entryTitles[rem.entry_id] || `Intrarea nr. ${rem.entry_id}`}
                   </p>
                 </div>
                 <button
                   onClick={async () => { await api.reminders.notify(rem.id); await loadTodos() }}
                   className="btn-ghost text-xs shrink-0"
-                >Dismiss</button>
+                >Am văzut</button>
               </div>
             ))}
           </div>
@@ -195,8 +202,8 @@ export function TodoList({ onSelectEntry }: Props) {
 
       {todos.length === 0 ? (
         <div className="card text-center py-12">
-          <p className="text-gray-500">No tasks yet.</p>
-          <p className="text-sm text-gray-400">Add a task from an entry's detail page.</p>
+          <p className="text-gray-500">Nicio sarcină încă.</p>
+          <p className="text-sm text-gray-400">Adaugă o sarcină din pagina de detaliu a unei intrări.</p>
         </div>
       ) : (
         <div className="space-y-2">
@@ -209,56 +216,56 @@ export function TodoList({ onSelectEntry }: Props) {
                 {onSelectEntry && todo.entry ? (
                   <button
                     onClick={() => onSelectEntry(todo.entry!)}
-                    className={`font-medium truncate text-left hover:text-chrono-700 ${todo.completed ? 'line-through text-gray-400' : ''}`}
-                    title="Open entry"
+                    className={`font-medium truncate block w-full max-w-full text-left py-0.5 hover:text-accent ${todo.completed ? 'line-through text-gray-400' : ''}`}
+                    title="Deschide intrarea"
                   >
                     {todo.entry.title}
                   </button>
                 ) : (
-                  <p className={`font-medium truncate ${todo.completed ? 'line-through' : ''}`}>
-                    {todo.entry?.title || entryTitles[todo.entry_id] || `Entry #${todo.entry_id}`}
+                  <p className={`font-medium truncate block w-full max-w-full ${todo.completed ? 'line-through' : ''}`}>
+                    {todo.entry?.title || entryTitles[todo.entry_id] || `Intrarea nr. ${todo.entry_id}`}
                   </p>
                 )}
                 {editingId === todo.id ? (
                   <div className="flex flex-wrap gap-2 mt-2">
                     <select value={draft.priority} onChange={e => setDraft(d => ({ ...d, priority: e.target.value }))} className="input text-sm w-auto">
-                      <option value="critical">critical</option>
-                      <option value="important">important</option>
-                      <option value="normal">normal</option>
+                      <option value="critical">critică</option>
+                      <option value="important">importantă</option>
+                      <option value="normal">normală</option>
                     </select>
                     <select value={draft.effort} onChange={e => setDraft(d => ({ ...d, effort: e.target.value }))} className="input text-sm w-auto">
-                      <option value="s">S</option>
-                      <option value="m">M</option>
-                      <option value="l">L</option>
-                      <option value="xl">XL</option>
+                      <option value="s">mic</option>
+                      <option value="m">mediu</option>
+                      <option value="l">mare</option>
+                      <option value="xl">foarte mare</option>
                     </select>
                     <input type="date" value={draft.due_date} onChange={e => setDraft(d => ({ ...d, due_date: e.target.value }))} className="input text-sm w-auto" />
-                    <button onClick={() => saveEdit(todo)} className="btn-secondary text-sm">Save</button>
-                    <button onClick={() => setEditingId(null)} className="btn-ghost text-sm">Cancel</button>
+                    <button onClick={() => saveEdit(todo)} className="btn-secondary text-sm">Salvează</button>
+                    <button onClick={() => setEditingId(null)} className="btn-ghost text-sm">Anulează</button>
                   </div>
                 ) : (
                   <div className="flex items-center gap-2 mt-1">
-                    <span className={`badge text-xs ${priorityColors[todo.priority] || priorityColors.normal}`}>{todo.priority}</span>
-                    {todo.due_date && <span className="text-xs text-gray-500">Due: {todo.due_date}</span>}
-                    <span className="text-xs text-gray-500">Effort: {todo.effort}</span>
+                    <span className={`badge text-xs ${priorityColors[todo.priority] || priorityColors.normal}`}>{priorityLabels[todo.priority] || todo.priority}</span>
+                    {todo.due_date && <span className="text-xs text-gray-500">Scadent: {todo.due_date}</span>}
+                    <span className="text-xs text-gray-500">Efort: {effortLabels[todo.effort] || todo.effort}</span>
                   </div>
                 )}
               </div>
               <div className="flex gap-1 shrink-0">
                 {editingId !== todo.id && (
-                  <button onClick={() => startEdit(todo)} className="icon-btn p-1" aria-label="Edit task" title="Edit task">
+                  <button onClick={() => startEdit(todo)} className="icon-btn p-1" aria-label="Editează sarcina" title="Editează sarcina">
                     <Pencil className="w-4 h-4" />
                   </button>
                 )}
                 <button onClick={async () => {
                   try {
                     await api.todos.delete(todo.entry_id)
-                    toast.success('Task removed')
+                    toast.success('Sarcina a fost ștearsă')
                     await loadTodos()
                   } catch (err: any) {
-                    toast.error('Could not remove task: ' + (err?.message || 'unknown error'))
+                    toast.error('Sarcina nu s-a putut șterge: ' + (err?.message || 'eroare necunoscută'))
                   }
-                }} className="icon-btn p-1 text-red-400" aria-label="Remove task" title="Remove task">
+                }} className="icon-btn p-1 text-madder" aria-label="Șterge sarcina" title="Șterge sarcina">
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>

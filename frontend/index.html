@@ -1,12 +1,32 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ro">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ChronoKG — Chronological Knowledge Graph</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧠</text></svg>" />
+    <!--
+      Paint the right theme before the first frame. The app used to add `dark`
+      only in a useEffect, so a dark-theme user saw the light theme flash.
+      Precedence is exactly App.tsx's: an explicit localStorage choice wins,
+      otherwise follow the OS. If both are absent, stay light.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem('chronokg-theme');
+          var dark = stored === 'dark' ||
+            (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.classList.toggle('dark', dark);
+        } catch (e) {
+          /* storage blocked (private mode): leave the light default */
+        }
+      })();
+    </script>
+    <title>Bransk — cercetare și cunoaștere cronologică</title>
+    <meta name="theme-color" content="#f1f4f8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0d1219" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%232f5fa8'/><path d='M16 40h32M16 32h22M16 24h28' stroke='%23ffffff' stroke-width='3' stroke-linecap='round'/><circle cx='44' cy='24' r='4' fill='%23e2ebf8'/></svg>" />
   </head>
-  <body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
+  <body class="bg-canvas text-ink">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

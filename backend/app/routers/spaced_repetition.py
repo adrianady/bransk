@@ -36,7 +36,13 @@ def _sm2_calc(quality: int, ease_factor: float, interval: int, repetitions: int)
 def list_items():
     conn = get_db()
     try:
-        rows = conn.execute("SELECT * FROM spaced_repetition ORDER BY next_review IS NULL, next_review ASC").fetchall()
+        # Archived entries leave the review rotation: the invariant is that an
+        # archived entry never appears in a read, and a card for it is a read.
+        rows = conn.execute(
+            """SELECT * FROM spaced_repetition
+                WHERE entry_id IN (SELECT id FROM entries WHERE archived = 0)
+                ORDER BY next_review IS NULL, next_review ASC"""
+        ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -48,7 +54,10 @@ def get_review_queue():
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT * FROM spaced_repetition WHERE next_review IS NULL OR julianday(next_review) <= julianday('now') ORDER BY next_review ASC"
+            """SELECT * FROM spaced_repetition
+                WHERE (next_review IS NULL OR julianday(next_review) <= julianday('now'))
+                  AND entry_id IN (SELECT id FROM entries WHERE archived = 0)
+                ORDER BY next_review ASC"""
         ).fetchall()
         return [dict(r) for r in rows]
     finally:

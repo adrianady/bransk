@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useRef, useState } from 'react'
 
-type ToastKind = 'success' | 'error' | 'info'
+type ToastKind = 'success' | 'error' | 'info' | 'warning'
 
 interface ToastItem {
   id: number
@@ -12,6 +12,7 @@ interface ToastApi {
   success: (message: string) => void
   error: (message: string) => void
   info: (message: string) => void
+  warning: (message: string) => void
 }
 
 const ToastContext = createContext<ToastApi | null>(null)
@@ -34,18 +35,21 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     success: message => push('success', message),
     error: message => push('error', message),
     info: message => push('info', message),
+    warning: message => push('warning', message),
   }
 
-  const borderColor: Record<ToastKind, string> = {
-    success: 'border-green-400 dark:border-green-600',
-    error: 'border-red-400 dark:border-red-600',
-    info: 'border-chrono-400 dark:border-chrono-600',
+  const tone: Record<ToastKind, string> = {
+    success: 'border-verdigris/30 bg-verdigris-soft text-verdigris',
+    error: 'border-madder/30 bg-madder-soft text-madder',
+    info: 'border-accent/30 bg-accent-soft text-accent-strong',
+    warning: 'border-brass/30 bg-brass-soft text-brass',
   }
 
   const icon: Record<ToastKind, string> = {
-    success: '✅',
-    error: '⚠️',
-    info: 'ℹ️',
+    success: '✓',
+    error: '!',
+    info: 'i',
+    warning: '!',
   }
 
   return (
@@ -59,13 +63,15 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map(t => (
           <div
             key={t.id}
-            className={`card border-l-4 ${borderColor[t.kind]} shadow-lg flex items-start gap-2`}
+            className={`rounded-xl border p-3 shadow-lift animate-rise-in flex items-start gap-2 ${tone[t.kind]}`}
           >
-            <span className="mt-0.5 shrink-0" aria-hidden="true">{icon[t.kind]}</span>
-            <p className="text-sm flex-1 min-w-0 break-words">{t.message}</p>
+            <span className="mt-0.5 w-4 h-4 rounded-full border border-current flex items-center justify-center text-[10px] font-bold shrink-0" aria-hidden="true">
+              {icon[t.kind]}
+            </span>
+            <p className="text-sm flex-1 min-w-0 break-words text-ink">{t.message}</p>
             <button
               onClick={() => dismiss(t.id)}
-              aria-label="Dismiss notification"
+              aria-label="Închide notificarea"
               className="btn-ghost p-0.5 text-xs shrink-0"
             >
               ✕
@@ -79,6 +85,6 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
 export function useToast(): ToastApi {
   const ctx = useContext(ToastContext)
-  if (!ctx) throw new Error('useToast must be used within ToastProvider')
+  if (!ctx) throw new Error('useToast trebuie folosit în interiorul ToastProvider')
   return ctx
 }

@@ -17,7 +17,7 @@ from app.studies_store import assert_public_download_url
 logger = logging.getLogger("chronokg.web_search")
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ChronoKG/0.1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 Bransk/0.1",
     "Accept-Language": "en-US,en;q=0.9",
 }
 

@@ -2,19 +2,112 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── The instrument ────────────────────────────────────────────────────────
+   Light: cool paper and graphite. Dark: midnight ink. One accent (lapis
+   ultramarine), with brass / verdigris / madder reserved for data roles.
+   Neutrals carry the surface; the accent stays rare enough to mean something. */
+:root {
+  --canvas: 241 244 248;
+  --surface: 255 255 255;
+  --surface-2: 233 238 244;
+  --ink: 20 28 40;
+  --muted: 86 97 114;
+  --line: 210 218 228;
+  --accent: 47 95 168;
+  --accent-strong: 33 71 128;
+  --accent-soft: 226 235 248;
+  --on-accent: 255 255 255;
+  --brass: 127 95 38;
+  --brass-soft: 244 235 216;
+  --verdigris: 44 111 99;
+  --verdigris-soft: 224 240 236;
+  --madder: 162 64 63;
+  --madder-soft: 247 227 226;
+  --grid: 198 208 221;
+  --shadow-card: 0 1px 0 rgb(15 23 42 / 0.03), 0 1px 3px rgb(15 23 42 / 0.05);
+  --shadow-lift: 0 14px 34px -18px rgb(15 23 42 / 0.32);
+  color-scheme: light;
+}
+
+.dark {
+  --canvas: 13 18 25;
+  --surface: 20 27 37;
+  --surface-2: 27 36 48;
+  --ink: 232 237 244;
+  --muted: 154 167 184;
+  --line: 39 49 63;
+  --accent: 143 179 255;
+  --accent-strong: 182 204 255;
+  --accent-soft: 26 42 68;
+  --on-accent: 13 18 25;
+  --brass: 214 179 106;
+  --brass-soft: 50 40 22;
+  --verdigris: 116 185 171;
+  --verdigris-soft: 20 43 40;
+  --madder: 221 138 136;
+  --madder-soft: 52 27 27;
+  --grid: 44 56 72;
+  --shadow-card: 0 0 0 1px rgb(255 255 255 / 0.02);
+  --shadow-lift: 0 18px 50px -20px rgb(0 0 0 / 0.7);
+  color-scheme: dark;
+}
+
 @layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
   body {
-    @apply antialiased;
+    @apply bg-canvas text-ink font-sans;
+    font-size: 15px;
+    line-height: 1.55;
+    letter-spacing: -0.004em;
   }
-  /* Visible keyboard focus everywhere (WCAG 2.4.7). */
+
+  /* The scholarly voice lives in the headings; controls stay sans. */
+  h1, h2 {
+    @apply font-serif text-ink;
+    letter-spacing: -0.018em;
+    line-height: 1.15;
+    text-wrap: balance;
+  }
+  h3, h4 {
+    @apply font-sans text-ink;
+    letter-spacing: -0.005em;
+    text-wrap: pretty;
+  }
+  p {
+    text-wrap: pretty;
+  }
+
+  ::selection {
+    background: rgb(var(--accent) / 0.22);
+    color: rgb(var(--ink));
+  }
+
+  /* Visible keyboard focus everywhere (WCAG 2.4.7), in the accent. */
   :focus-visible {
-    outline: 2px solid #4c6ef5;
+    outline: 2px solid rgb(var(--accent));
     outline-offset: 2px;
-    border-radius: 4px;
+    border-radius: 6px;
   }
-  .dark :focus-visible {
-    outline-color: #748ffc;
+
+  /* Restrained scrollbars: visible enough to grab, quiet enough to ignore. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--line)) transparent;
   }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--line));
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
@@ -25,116 +118,280 @@
       scroll-behavior: auto !important;
     }
   }
-  /* Default text color for dark mode; explicit `dark:text-*` classes win. */
-  .dark {
-    color: #e5e7eb;
-  }
-  /* Upgrade gray text shades that lack explicit dark: variants so they stay
-     readable on the dark theme (gray-400/500 -> gray-400, 600 -> 500, 700 -> 300). */
+
+  /* Dark-mode readability for the legacy gray text classes that predate the
+     semantic tokens. The new gray ramp carries most of it already. */
   .dark .text-gray-400,
   .dark .text-gray-500 {
-    color: #9ca3af;
+    color: #97a4b5;
   }
   .dark .text-gray-600 {
-    color: #b6bcc8;
+    color: #aeb9c8;
   }
   .dark .text-gray-700 {
-    color: #d1d5db;
+    color: #c8d0dc;
   }
 }
 
 @layer components {
-  .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors;
+  /* ── Surfaces ───────────────────────────────────────────────────────── */
+  .card {
+    @apply rounded-xl border border-line bg-surface p-4;
+    box-shadow: var(--shadow-card);
   }
+  .card-quiet {
+    @apply rounded-xl border border-line bg-surface p-4;
+  }
+  .panel {
+    @apply rounded-xl border border-line bg-surface;
+  }
+  .divider {
+    @apply border-line;
+  }
+
+  /* ── Actions ────────────────────────────────────────────────────────── */
+  .btn {
+    @apply inline-flex min-h-[2.5rem] items-center justify-center gap-2 rounded-lg px-4
+           py-2 text-sm font-semibold transition-[background-color,border-color,color,transform]
+           duration-150 ease-out;
+  }
+  .btn:active:not(:disabled) { transform: scale(0.985); }
+  .btn:disabled { @apply cursor-not-allowed opacity-45; }
+
   .btn-primary {
-    @apply btn bg-chrono-700 text-white hover:bg-chrono-800;
+    @apply btn bg-accent text-on-accent hover:bg-accent-strong;
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.14) inset;
   }
   .btn-secondary {
-    @apply btn bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600;
+    @apply btn border border-line bg-surface text-ink hover:bg-surface-2;
   }
   .btn-ghost {
-    @apply btn text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800;
+    @apply btn text-muted hover:bg-surface-2 hover:text-ink;
   }
   .btn-danger {
-    @apply btn bg-red-600 text-white hover:bg-red-700;
+    @apply btn bg-madder text-white hover:brightness-95;
   }
+  .dark .btn-danger { color: rgb(var(--canvas)); }
+
+  /* ── Fields ─────────────────────────────────────────────────────────── */
   .input {
-    @apply w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-chrono-500 focus:outline-none focus:ring-2 focus:ring-chrono-500/20 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500;
+    @apply w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink
+           placeholder:text-muted/70 transition-colors duration-150
+           focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/15;
   }
-  .card {
-    @apply rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-900;
+  .dark .input {
+    background-color: rgb(var(--surface-2));
   }
+  select.input {
+    @apply cursor-pointer;
+  }
+
+  /* ── Labels and badges ──────────────────────────────────────────────── */
   .badge {
-    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold leading-5;
   }
+  .badge-accent { @apply bg-accent-soft text-accent-strong; }
+  .badge-brass { @apply bg-brass-soft text-brass; }
+  .badge-verdigris { @apply bg-verdigris-soft text-verdigris; }
+  .badge-madder { @apply bg-madder-soft text-madder; }
+  .badge-muted { @apply bg-surface-2 text-muted; }
+
   .icon-btn {
-    @apply inline-flex items-center justify-center rounded-lg p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors;
+    @apply inline-flex items-center justify-center rounded-lg p-2 text-muted
+           transition-colors duration-150 hover:bg-surface-2 hover:text-ink;
+  }
+
+  .section-label {
+    @apply text-[11px] font-semibold text-muted;
+    letter-spacing: 0.01em;
+  }
+
+  .stat-value {
+    @apply font-semibold tabular-nums text-ink;
+    letter-spacing: -0.02em;
+  }
+
+  /* ── Diagram canvas: a quiet drafting grid, not a white void ─────────── */
+  .graph-canvas {
+    background-color: rgb(var(--surface));
+    background-image: radial-gradient(rgb(var(--grid) / 0.55) 1px, transparent 1px);
+    background-size: 22px 22px;
+    background-position: -1px -1px;
+  }
+
+  /* ── Prose: the reading surface ─────────────────────────────────────── */
+  .prose {
+    @apply font-serif text-ink;
+    font-size: 1.02rem;
+    line-height: 1.7;
+    max-width: 72ch;
+  }
+  .prose :where(h1, h2, h3, h4) {
+    @apply font-serif text-ink;
+    letter-spacing: -0.015em;
+  }
+  .prose :where(a) {
+    color: rgb(var(--accent));
+    text-underline-offset: 2px;
+  }
+  .prose :where(code) {
+    @apply rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.85em] text-ink;
+  }
+  .prose :where(blockquote) {
+    @apply border-l-2 border-line pl-4 text-muted;
+    font-style: normal;
+  }
+  .prose :where(hr) {
+    @apply border-line;
+  }
+  .prose :where(table) {
+    font-family: theme('fontFamily.sans');
+    font-size: 0.92em;
+  }
+  .prose :where(th) {
+    @apply border-line text-ink;
+  }
+  .prose :where(td) {
+    @apply border-line;
+  }
+  .dark .prose {
+    --tw-prose-body: rgb(var(--ink));
+    --tw-prose-headings: rgb(var(--ink));
+    --tw-prose-links: rgb(var(--accent));
+    --tw-prose-bold: rgb(var(--ink));
+    --tw-prose-counters: rgb(var(--muted));
+    --tw-prose-bullets: rgb(var(--muted));
+    --tw-prose-hr: rgb(var(--line));
+    --tw-prose-quotes: rgb(var(--ink));
+    --tw-prose-quote-borders: rgb(var(--line));
+    --tw-prose-captions: rgb(var(--muted));
+    --tw-prose-code: rgb(var(--ink));
+    --tw-prose-pre-code: rgb(var(--ink));
+    --tw-prose-pre-bg: rgb(var(--surface-2));
+    --tw-prose-th-borders: rgb(var(--line));
+    --tw-prose-td-borders: rgb(var(--line));
   }
 }
 
-/* Timeline overrides */
+/* ══ Timeline (vis-timeline) ══════════════════════════════════════════════ */
 .vis-timeline {
   border: none !important;
-  font-family: inherit !important;
+  font-family: theme('fontFamily.sans') !important;
 }
-.vis-item {
-  background-color: #4c6ef5;
-  border-color: #4263eb;
-  color: white;
-  border-radius: 6px !important;
+.vis-timeline .vis-label {
+  font-weight: 600;
+  color: rgb(var(--muted));
 }
-.vis-item.vis-selected {
-  background-color: #364fc7 !important;
-  border-color: #2b3da3 !important;
+.vis-time-axis .vis-text {
+  color: rgb(var(--muted)) !important;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.vis-panel.vis-center,
+.vis-panel.vis-left,
+.vis-panel.vis-right {
+  border-color: rgb(var(--line)) !important;
+}
+.vis-grid.vis-vertical,
+.vis-grid.vis-minor {
+  border-color: rgb(var(--line) / 0.55) !important;
+}
+.vis-grid.vis-major {
+  border-color: rgb(var(--line)) !important;
+}
+
+/* Items: neutral chip with an importance accent bar. Text stays at ~17:1. */
+.cg-timeline .vis-item.vis-box {
+  --tl-accent: rgb(var(--accent));
+  background-color: rgb(var(--surface));
+  color: rgb(var(--ink));
+  border: 1px solid rgb(var(--line));
+  border-left: 3px solid var(--tl-accent);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-weight: 500;
+  font-size: 11px;
+  line-height: 1.25;
+  max-width: 175px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.05);
+}
+.cg-timeline .vis-item.vis-box:hover {
+  border-color: rgb(var(--accent) / 0.45);
+  box-shadow: 0 4px 12px -6px rgb(15 23 42 / 0.35);
+  z-index: 100 !important;
+}
+.cg-timeline .vis-item.vis-box.vis-selected {
+  background-color: rgb(var(--accent-soft));
+  border-color: rgb(var(--accent));
+  border-left-color: var(--tl-accent);
+}
+.cg-timeline .vis-item.vis-box.tl-imp-1 { --tl-accent: rgb(var(--muted)); }
+.cg-timeline .vis-item.vis-box.tl-imp-2 { --tl-accent: rgb(var(--accent)); }
+.cg-timeline .vis-item.vis-box.tl-imp-3 { --tl-accent: rgb(var(--brass)); }
+.cg-timeline .vis-item.vis-box.tl-imp-4 { --tl-accent: rgb(var(--madder)); }
+.cg-timeline .vis-item.vis-box.tl-imp-5 { --tl-accent: rgb(var(--verdigris)); }
+.cg-timeline .vis-item.vis-box.tl-compact {
+  font-size: 10px;
+  padding: 1px 5px;
+  max-width: 150px;
+}
+.vis-item.vis-line,
+.vis-item.vis-dot {
+  display: none !important;
 }
 .vis-panel.vis-center {
   overflow-y: auto;
 }
-.vis-time-axis .vis-text {
-  color: #6b7280 !important;
-}
-.vis-panel.vis-center, .vis-panel.vis-left, .vis-panel.vis-right {
-  border-color: #e5e7eb !important;
-}
-.dark .vis-panel.vis-center,
-.dark .vis-panel.vis-left,
-.dark .vis-panel.vis-right {
-  border-color: #374151 !important;
-}
-.dark .vis-time-axis .vis-text {
-  color: #9ca3af !important;
-}
-.dark .vis-timeline,
-.dark .vis-panel.vis-center,
-.dark .vis-panel.vis-left,
-.dark .vis-panel.vis-right {
-  background-color: #111827;
-}
-.dark .vis-grid.vis-vertical {
-  border-color: #1f2937;
-}
-.dark .vis-grid.vis-major {
-  border-color: #374151;
-}
-.dark .vis-labelset .vis-label,
-.dark .vis-labelset .vis-inner {
-  color: #9ca3af;
-}
 .dark .vis-tooltip {
-  background-color: #1f2937;
-  color: #e5e7eb;
-  border-color: #374151;
+  background-color: rgb(var(--surface-2));
+  color: rgb(var(--ink));
+  border-color: rgb(var(--line));
 }
-.dark .vis-item {
-  border-color: rgba(255, 255, 255, 0.35);
+.vis-tooltip {
+  border-radius: 8px;
+  border-color: rgb(var(--line));
+  font-family: theme('fontFamily.sans');
+  font-size: 12px;
+}
+@media (max-width: 639px) {
+  .cg-timeline .vis-item.vis-box {
+    font-size: 10px;
+    padding: 2px 5px;
+    max-width: 150px;
+  }
 }
 
-/* TipTap editor */
-.tiptap {
-  @apply prose prose-sm max-w-none dark:prose-invert focus:outline-none min-h-[200px];
+/* ══ Markdown / long content safeguards ═══════════════════════════════════ */
+.prose a,
+.prose code,
+.prose p,
+.prose li {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
-.tiptap p.is-editor-empty:first-child::before {
-  @apply text-gray-400 pointer-events-none float-left h-0;
-  content: attr(data-placeholder);
+.prose pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.prose pre code {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.prose img,
+.prose video {
+  max-width: 100%;
+  height: auto;
+}
+.markdown-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+.prose > table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
 }

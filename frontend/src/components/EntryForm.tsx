@@ -21,6 +21,7 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
   const [isStudy, setIsStudy] = useState(!!editEntry?.study_type)
   const [studyType, setStudyType] = useState(editEntry?.study_type || '')
   const [authors, setAuthors] = useState(editEntry?.authors || '')
+  const [doi, setDoi] = useState(editEntry?.doi || '')
   const [quality, setQuality] = useState(editEntry?.quality ?? 3)
   const [saving, setSaving] = useState(false)
   const [allTags, setAllTags] = useState<Tag[]>([])
@@ -50,6 +51,12 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
 
   const handleSubmit = async () => {
     if (!title.trim()) return
+    // The server validates the DOI too; catching it here saves a round-trip.
+    const cleanedDoi = doi.trim().replace(/^(https?:\/\/)?(dx\.)?doi\.org\//i, '')
+    if (cleanedDoi && !/^10\.\d{4,9}\/\S+$/.test(cleanedDoi)) {
+      toast.error('DOI invalid — arată ca 10.1038/nrn.2016.44')
+      return
+    }
     setSaving(true)
     try {
       if (editEntry) {
@@ -63,8 +70,9 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
           study_type: isStudy ? studyType.trim() : '',
           authors: isStudy ? authors.trim() : '',
           quality: isStudy ? quality : null,
+          doi: isStudy ? cleanedDoi : '',
         })
-        toast.success('Entry updated')
+        toast.success('Intrarea a fost actualizată')
         onSaved(updated)
       } else {
         const created = await api.entries.create({
@@ -77,12 +85,13 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
           study_type: isStudy ? studyType.trim() : '',
           authors: isStudy ? authors.trim() : '',
           quality: isStudy ? quality : null,
+          doi: isStudy ? cleanedDoi : '',
         })
-        toast.success('Entry created')
+        toast.success('Intrarea a fost creată')
         onSaved(created)
       }
     } catch (err: any) {
-      toast.error('Error saving: ' + (err?.message || 'unknown error'))
+      toast.error('Salvarea a eșuat: ' + (err?.message || 'eroare necunoscută'))
     } finally {
       setSaving(false)
     }
@@ -95,28 +104,28 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
     >
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-          <h2 className="text-lg font-bold">{editEntry ? 'Edit Entry' : 'New Entry'}</h2>
-          <button onClick={onClose} className="icon-btn" aria-label="Close dialog" title="Close (Esc)">
+          <h2 className="text-lg font-bold">{editEntry ? 'Editează intrarea' : 'Intrare nouă'}</h2>
+          <button onClick={onClose} className="icon-btn" aria-label="Închide fereastra" title="Închide (Esc)">
             <X className="w-5 h-5" />
           </button>
         </div>
 
         <div className="p-4 space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1">Title *</label>
+            <label className="block text-sm font-medium mb-1">Titlu *</label>
             <input value={title} onChange={e => setTitle(e.target.value)}
-              className="input" placeholder="Entry title" autoFocus />
+              className="input" placeholder="Titlul intrării" autoFocus />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium mb-1">Date</label>
+              <label className="block text-sm font-medium mb-1">Data</label>
               <input type="date" value={entryDate} onChange={e => setEntryDate(e.target.value)}
                 className="input" />
-              <p className="text-xs text-gray-500 mt-0.5">When this event/info happened</p>
+              <p className="text-xs text-gray-500 mt-0.5">Când s-a întâmplat evenimentul sau informația</p>
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Importance</label>
+              <label className="block text-sm font-medium mb-1">Importanță</label>
               <div className="flex gap-2">
                 {[1, 2, 3, 4, 5].map(n => (
                   <button key={n} onClick={() => setImportance(n)}
@@ -132,13 +141,13 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Tags</label>
+            <label className="block text-sm font-medium mb-1">Etichete</label>
             <div className="flex gap-2 items-center">
               <input value={tags} onChange={e => setTags(e.target.value)}
-                className="input flex-1" placeholder="science, history, physics" />
+                className="input flex-1" placeholder="știință, istorie, fizică" />
               <div className="relative">
                 <button onClick={() => setShowTagPicker(!showTagPicker)}
-                  className="btn-secondary text-sm">+ Pick</button>
+                  className="btn-secondary text-sm">+ Alege</button>
                 {showTagPicker && (
                   <div className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-2 z-10 w-48 max-h-48 overflow-y-auto">
                     {allTags.map(tag => (
@@ -146,7 +155,7 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
                         className="block w-full text-left px-2 py-1 text-sm rounded hover:bg-gray-100 dark:hover:bg-gray-700"
                       >{tag.name}</button>
                     ))}
-                    {allTags.length === 0 && <p className="text-xs text-gray-500 p-1">No tags yet</p>}
+                    {allTags.length === 0 && <p className="text-xs text-gray-500 p-1">Nicio etichetă încă</p>}
                   </div>
                 )}
               </div>
@@ -154,21 +163,21 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Source</label>
+            <label className="block text-sm font-medium mb-1">Sursă</label>
             <input value={source} onChange={e => setSource(e.target.value)}
-              className="input" placeholder="Book, article, URL, or person" />
+              className="input" placeholder="Carte, articol, URL sau persoană" />
           </div>
 
           {/* Study metadata */}
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={isStudy} onChange={e => setIsStudy(e.target.checked)}
               className="rounded" />
-            <span className="font-medium">This is a study / research finding</span>
+            <span className="font-medium">Asta e un studiu / o constatare de cercetare</span>
           </label>
           {isStudy && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-lg bg-accent-soft border border-accent/20">
               <div className="sm:col-span-2">
-                <label className="block text-sm font-medium mb-1">Study type</label>
+                <label className="block text-sm font-medium mb-1">Tip de studiu</label>
                 <input list="study-types" value={studyType} onChange={e => setStudyType(e.target.value)}
                   className="input" placeholder="peer-reviewed paper, book, systematic review..." />
                 <datalist id="study-types">
@@ -181,37 +190,46 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
                 </datalist>
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Authors</label>
+                <label className="block text-sm font-medium mb-1">Autori</label>
                 <input value={authors} onChange={e => setAuthors(e.target.value)}
-                  className="input" placeholder="Author names" />
+                  className="input" placeholder="Numele autorilor" />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Quality appraisal</label>
+                <label className="block text-sm font-medium mb-1">Evaluarea calității</label>
                 <select value={quality} onChange={e => setQuality(Number(e.target.value))} className="input">
                   {[1, 2, 3, 4, 5].map(n => (
                     <option key={n} value={n}>{'★'.repeat(n)}{'☆'.repeat(5 - n)} ({n}/5)</option>
                   ))}
                 </select>
               </div>
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium mb-1">DOI</label>
+                <input value={doi} onChange={e => setDoi(e.target.value)}
+                  className="input" placeholder="10.1038/nrn.2016.44"
+                  aria-describedby="doi-hint" />
+                <p id="doi-hint" className="text-xs text-gray-500 mt-0.5">
+                  Identificatorul real al lucrării. Poți lipi și linkul https://doi.org/…
+                </p>
+              </div>
             </div>
           )}
 
           <div>
-            <label className="block text-sm font-medium mb-1">Content (Markdown)</label>
+            <label className="block text-sm font-medium mb-1">Conținut (Markdown)</label>
             <textarea value={content} onChange={e => setContent(e.target.value)}
               className="input min-h-[200px] font-mono text-sm"
-              placeholder="Write your notes here... Supports markdown"
+              placeholder="Scrie notițele aici… Acceptă Markdown"
               rows={8}
             />
           </div>
         </div>
 
         <div className="flex items-center justify-end gap-2 p-4 border-t border-gray-200 dark:border-gray-700">
-          <button onClick={onClose} className="btn-secondary">Cancel</button>
+          <button onClick={onClose} className="btn-secondary">Anulează</button>
           <button onClick={handleSubmit} disabled={saving || !title.trim()}
             className="btn-primary disabled:opacity-50"
           >
-            {saving ? 'Saving...' : editEntry ? 'Update' : 'Create Entry'}
+            {saving ? 'Se salvează…' : editEntry ? 'Actualizează' : 'Creează intrarea'}
           </button>
         </div>
       </div>

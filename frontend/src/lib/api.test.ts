@@ -1,0 +1,144 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  AUTH_EVENT,
+  ApiError,
+  api,
+  clearAuthToken,
+  getAuthToken,
+  setAuthToken,
+} from './api'
+
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...headers },
+  })
+}
+
+function stubFetch(impl: (url: string, init?: RequestInit) => Promise<Response>) {
+  const fn = vi.fn(impl)
+  vi.stubGlobal('fetch', fn)
+  return fn
+}
+
+beforeEach(() => {
+  clearAuthToken()
+  localStorage.clear()
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe('error handling', () => {
+  it('turns a FastAPI validation list into one readable sentence', async () => {
+    stubFetch(async () =>
+      jsonResponse(
+        {
+          detail: [
+            { loc: ['body', 'title'], msg: 'String should have at most 500 characters' },
+          ],
+        },
+        422,
+      ),
+    )
+
+    const err = await api.entries.update(1, { title: 'x' }).catch(e => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(422)
+    expect(err.message).toBe('title: String should have at most 500 characters')
+  })
+
+  it('keeps a string detail as the message', async () => {
+    stubFetch(async () => jsonResponse({ detail: 'Entry already exists' }, 409))
+
+    const err = await api.entries.create({ title: 'dup' }).catch(e => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(409)
+    expect(err.message).toBe('Entry already exists')
+  })
+
+  it('handles 204 with no body', async () => {
+    stubFetch(async () => new Response(null, { status: 204 }))
+    await expect(api.entries.delete(7)).resolves.toBeUndefined()
+  })
+
+  it('announces a 401 so the auth gate can ask for the token again', async () => {
+    setAuthToken('stale')
+    const listener = vi.fn()
+    window.addEventListener(AUTH_EVENT, listener)
+    stubFetch(async () => jsonResponse({ detail: 'Autentificare necesară' }, 401))
+
+    await expect(api.entries.list()).rejects.toMatchObject({ status: 401 })
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    window.removeEventListener(AUTH_EVENT, listener)
+  })
+})
+
+describe('auth token', () => {
+  it('sends the stored token as a bearer header', async () => {
+    setAuthToken('abc123')
+    const fetchMock = stubFetch(async () => jsonResponse([]))
+
+    await api.entries.list()
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer abc123')
+  })
+
+  it('sends no authorization header when no token is stored', async () => {
+    const fetchMock = stubFetch(async () => jsonResponse([]))
+
+    await api.entries.list()
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(new Headers(init.headers).get('Authorization')).toBeNull()
+  })
+
+  it('remembering and clearing the token round-trips', () => {
+    expect(getAuthToken()).toBe('')
+    setAuthToken('t')
+    expect(getAuthToken()).toBe('t')
+    clearAuthToken()
+    expect(getAuthToken()).toBe('')
+  })
+
+  it('puts the token in the PDF URL because the browser cannot send headers', () => {
+    expect(api.studies.pdfUrl(5)).toBe('/api/studies/5/pdf')
+    setAuthToken('a b')
+    expect(api.studies.pdfUrl(5)).toBe('/api/studies/5/pdf?token=a%20b')
+  })
+})
+
+describe('studies pagination', () => {
+  it('reads the real total from X-Total-Count', async () => {
+    stubFetch(async () => jsonResponse([{ id: 1 }], 200, { 'X-Total-Count': '106' }))
+
+    const page = await api.studies.list({ limit: 100, offset: 0 })
+    expect(page.items).toHaveLength(1)
+    expect(page.total).toBe(106)
+  })
+
+  it('falls back to the page length when the header is missing', async () => {
+    stubFetch(async () => jsonResponse([{ id: 1 }, { id: 2 }]))
+
+    const page = await api.studies.list()
+    expect(page.total).toBe(2)
+  })
+
+  it('walks every page so no study stays invisible behind the page cap', async () => {
+    const requested: string[] = []
+    stubFetch(async (url) => {
+      requested.push(url)
+      const offset = Number(new URL(url, 'http://x').searchParams.get('offset') || 0)
+      const items = offset === 0 ? [{ id: 1 }, { id: 2 }] : offset === 2 ? [{ id: 3 }] : []
+      return jsonResponse(items, 200, { 'X-Total-Count': '3' })
+    })
+
+    const all = await api.studies.all(2)
+
+    expect(all.items.map(i => i.id)).toEqual([1, 2, 3])
+    expect(requested).toHaveLength(2)
+  })
+})
