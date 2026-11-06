@@ -4,6 +4,7 @@ Tags CRUD router.
 from fastapi import APIRouter, HTTPException
 from app.db import get_db
 from app.models import TagCreate, TagResponse
+from app.tagging import normalize_tags
 
 router = APIRouter()
 
@@ -37,9 +38,29 @@ def create_tag(data: TagCreate):
 def delete_tag(tag_id: int):
     conn = get_db()
     try:
-        cur = conn.execute("DELETE FROM tags WHERE id = ?", [tag_id])
-        conn.commit()
-        if cur.rowcount == 0:
+        row = conn.execute("SELECT name FROM tags WHERE id = ?", [tag_id]).fetchone()
+        if not row:
             raise HTTPException(404, "Tag not found")
+        name = row["name"]
+
+        # Removing the tag row alone would leave the tag stringed into
+        # entries.tags forever; strip it from every entry that carries it.
+        affected = conn.execute(
+            "SELECT id, tags FROM entries WHERE (',' || REPLACE(tags, ', ', ',') || ',') LIKE '%,' || ? || ',%'",
+            [name],
+        ).fetchall()
+        for entry in affected:
+            kept = [
+                t.strip()
+                for t in (entry["tags"] or "").split(",")
+                if t.strip() and t.strip().casefold() != name.casefold()
+            ]
+            conn.execute(
+                "UPDATE entries SET tags = ?, updated_at = datetime('now') WHERE id = ?",
+                [normalize_tags(kept), entry["id"]],
+            )
+
+        conn.execute("DELETE FROM tags WHERE id = ?", [tag_id])
+        conn.commit()
     finally:
         conn.close()

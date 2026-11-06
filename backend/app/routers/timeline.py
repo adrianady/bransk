@@ -20,8 +20,24 @@ _ISO_LIKE = "(e.entry_date IS NULL OR e.entry_date GLOB '[0-9][0-9][0-9][0-9]-[0
 
 def _fold(text: str) -> str:
     """Lowercase and strip Romanian diacritics for a forgiving search."""
-    table = str.maketrans("ăâîșțĂÂÎȘȚ", "aaistAAIST")
+    table = str.maketrans("ăâîșțşţĂÂÎȘȚŞŢ", "aaiststAAISTST")
     return text.translate(table).lower()
+
+
+def _fold_sql(expr: str) -> str:
+    """SQL mirror of `_fold`, applied to a column expression.
+
+    SQLite's LOWER() only folds ASCII, so the diacritics (both cases) are
+    replaced explicitly. Keeping the haystack and the needle in the same
+    folded space lets the whole search run inside SQL, which also keeps
+    COUNT consistent with LIMIT/OFFSET pagination.
+    """
+    for src, dst in (("ă", "a"), ("â", "a"), ("î", "i"), ("ș", "s"), ("ț", "t"),
+                     ("ş", "s"), ("ţ", "t"),
+                     ("Ă", "a"), ("Â", "a"), ("Î", "i"), ("Ș", "s"), ("Ț", "t"),
+                     ("Ş", "s"), ("Ţ", "t")):
+        expr = f"REPLACE({expr}, '{src}', '{dst}')"
+    return f"LOWER({expr})"
 
 
 def _where(params: list, from_date, to_date, tags, q) -> str:
@@ -43,22 +59,16 @@ def _where(params: list, from_date, to_date, tags, q) -> str:
                 )
                 params.append(t)
     if q and q.strip():
-        needle = "%" + q.strip().lower() + "%"
-        # LIKE is case-insensitive for ASCII only, so fold the needle and
-        # match the raw text too; the folded comparison happens after the
-        # SQL pre-filter in Python (`_matches`).
-        where.append("(LOWER(COALESCE(e.title, '')) LIKE ? OR LOWER(COALESCE(e.content, '')) LIKE ?"
-                     " OR LOWER(COALESCE(e.title, '')) LIKE ? OR LOWER(COALESCE(e.content, '')) LIKE ?)")
-        params.extend([needle, needle, "%" + _fold(q.strip()) + "%", "%" + _fold(q.strip()) + "%"])
+        needle = "%" + _fold(q.strip()) + "%"
+        # Fold both sides in SQL: a needle without diacritics must still find
+        # "funcționare", and the Python post-filter cannot rescue rows the SQL
+        # pre-filter already dropped.
+        where.append(
+            f"({_fold_sql('COALESCE(e.title, \'\')')} LIKE ?"
+            f" OR {_fold_sql('COALESCE(e.content, \'\')')} LIKE ?)"
+        )
+        params.extend([needle, needle])
     return " AND ".join(where)
-
-
-def _matches(row: dict, q: Optional[str]) -> bool:
-    if not q or not q.strip():
-        return True
-    needle = _fold(q.strip())
-    haystack = _fold((row.get("title") or "") + " " + (row.get("content") or ""))
-    return needle in haystack
 
 
 @router.get("/timeline", response_model=TimelineResponse)
@@ -93,8 +103,6 @@ def get_timeline(
         entries = []
         for r in rows:
             d = dict(r)
-            if not _matches(d, q):
-                continue
             content = d.pop("content", "") or ""
             d["content_preview"] = content[:300]
             d["has_relationships"] = (d.get("relationship_count") or 0) > 0

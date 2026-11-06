@@ -22,7 +22,7 @@ def list_todos(completed: bool | None = None, priority: str | None = None):
             params.append(priority)
 
         rows = conn.execute(
-            f"SELECT t.* FROM todos t JOIN entries e ON t.entry_id = e.id WHERE {' AND '.join(where)} AND e.archived = 0 ORDER BY t.due_date IS NULL, t.due_date ASC",
+            f"SELECT t.*, e.title AS entry_title, substr(e.content, 1, 300) AS content_preview FROM todos t JOIN entries e ON t.entry_id = e.id WHERE {' AND '.join(where)} AND e.archived = 0 ORDER BY t.due_date IS NULL, t.due_date ASC",
             params
         ).fetchall()
         return [dict(r) for r in rows]

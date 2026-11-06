@@ -3,9 +3,12 @@ import ReactDOM from 'react-dom/client'
 import '@fontsource-variable/source-sans-3'
 import '@fontsource-variable/source-serif-4'
 import App from './App'
-import { AuthGate } from './components/AuthGate'
 import { ToastProvider } from './components/Toast'
 import './index.css'
+
+const AuthGate = React.lazy(() =>
+  import('./components/AuthGate').then(({ AuthGate: gate }) => ({ default: gate })),
+)
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null }
@@ -36,11 +39,17 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { err
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <AuthGate>
-        <ToastProvider>
-          <App />
-        </ToastProvider>
-      </AuthGate>
+      <React.Suspense fallback={
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950 p-6">
+          <div className="text-sm text-gray-500">Se verifică accesul…</div>
+        </div>
+      }>
+        <AuthGate>
+          <ToastProvider>
+            <App />
+          </ToastProvider>
+        </AuthGate>
+      </React.Suspense>
     </ErrorBoundary>
   </React.StrictMode>,
 )

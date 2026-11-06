@@ -217,6 +217,43 @@ def _warn_dimension_mismatch(chunks: int, active_dim: int, dims: dict[int, int])
     )
 
 
+# In-memory vector cache: re-parsing ~2.4k JSON vectors on every query
+# dominated the CPU. A cheap (db path, count, max id) sentinel invalidates
+# the cache when chunks are added, removed or re-embedded — no TTL staleness.
+# The DB path is part of the sentinel: tests (and a future multi-DB setup)
+# swap databases without the process restarting.
+_vector_cache: dict = {"sentinel": None, "vectors": {}}
+
+
+def invalidate_vector_cache() -> None:
+    """Drop cached vectors; call after an in-place UPDATE (re-embed)."""
+    _vector_cache["sentinel"] = None
+    _vector_cache["vectors"] = {}
+
+
+def _load_vectors() -> dict[int, object]:
+    from app import db as _db
+    conn = get_db()
+    try:
+        s = conn.execute("SELECT COUNT(*) AS c, COALESCE(MAX(id), 0) AS m FROM documents").fetchone()
+        sentinel = (str(_db.DB_PATH), s["c"], s["m"])
+        if _vector_cache["sentinel"] == sentinel:
+            return _vector_cache["vectors"]
+        rows = conn.execute("SELECT id, embedding FROM documents").fetchall()
+    finally:
+        conn.close()
+    vectors: dict[int, object] = {}
+    for r in rows:
+        try:
+            emb = json.loads(r["embedding"])
+        except (TypeError, json.JSONDecodeError):
+            emb = None
+        vectors[r["id"]] = emb if isinstance(emb, list) and emb else None
+    _vector_cache["sentinel"] = sentinel
+    _vector_cache["vectors"] = vectors
+    return vectors
+
+
 async def search_documents(query: str, top_k: int = 5) -> list[dict]:
     """Semantic search over indexed PDF chunks. Returns [] when embeddings are off."""
     query = (query or "").strip()
@@ -226,43 +263,50 @@ async def search_documents(query: str, top_k: int = 5) -> list[dict]:
         return []
 
     def _run() -> list[dict]:
-        conn = get_db()
-        try:
-            rows = conn.execute(
-                """SELECT d.id, d.entry_id, d.chunk_index, d.page_number,
-                          d.content, d.embedding, e.title AS entry_title
-                   FROM documents d
-                   JOIN entries e ON e.id = d.entry_id
-                   WHERE e.archived = 0
-                   ORDER BY d.id"""
-            ).fetchall()
-        finally:
-            conn.close()
-        if not rows:
+        vectors = _load_vectors()
+        if not vectors:
             return []
-        vectors = embed([query])
-        if vectors is None:
+        embedded = embed([query])
+        if embedded is None:
             return []
-        qv = vectors[0]
+        qv = embedded[0]
         if not qv:
             return []
         scored = []
         dims: dict[int, int] = {}
-        for r in rows:
-            try:
-                emb = json.loads(r["embedding"])
-            except (TypeError, json.JSONDecodeError):
-                emb = None
-            dim = len(emb) if isinstance(emb, list) and emb else 0
+        for doc_id, emb in vectors.items():
+            dim = len(emb) if emb else 0
             dims[dim] = dims.get(dim, 0) + 1
             if dim == len(qv):
-                scored.append((cosine(qv, emb), r))
+                scored.append((cosine(qv, emb), doc_id))
         if not scored:
             # Silence here is what hid the 768-vs-1024 breakage for weeks.
-            _warn_dimension_mismatch(len(rows), len(qv), dims)
+            _warn_dimension_mismatch(len(vectors), len(qv), dims)
         scored.sort(key=lambda item: item[0], reverse=True)
-        return [
-            {
+        top = scored[:top_k]
+        if not top:
+            return []
+        # Only the winners pay for a content fetch, not the whole corpus.
+        placeholders = ",".join("?" * len(top))
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                f"""SELECT d.id, d.entry_id, d.chunk_index, d.page_number,
+                           d.content, e.title AS entry_title
+                    FROM documents d
+                    JOIN entries e ON e.id = d.entry_id
+                    WHERE d.id IN ({placeholders}) AND e.archived = 0""",
+                [doc_id for _, doc_id in top],
+            ).fetchall()
+        finally:
+            conn.close()
+        by_id = {r["id"]: r for r in rows}
+        out = []
+        for score, doc_id in top:
+            r = by_id.get(doc_id)
+            if not r:  # archived (or deleted) between scoring and fetch
+                continue
+            out.append({
                 "id": r["id"],
                 "document_id": r["id"],
                 "entry_id": r["entry_id"],
@@ -271,9 +315,8 @@ async def search_documents(query: str, top_k: int = 5) -> list[dict]:
                 "entry_title": r["entry_title"],
                 "content": r["content"][:1500],
                 "score": round(score, 4),
-            }
-            for score, r in scored[:top_k]
-        ]
+            })
+        return out
 
     try:
         return await anyio.to_thread.run_sync(_run)

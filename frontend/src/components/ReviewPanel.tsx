@@ -256,18 +256,16 @@ function SpacedRepetitionMode() {
   const [entryContents, setEntryContents] = useState<Record<number, string>>({})
 
   useEffect(() => {
-    if (queue.length > 0) {
-      api.entries.list({ limit: 500 }).then(allEntries => {
-        const titleMap: Record<number, string> = {}
-        const contentMap: Record<number, string> = {}
-        allEntries.forEach(e => {
-          titleMap[e.id] = e.title
-          if (e.content) contentMap[e.id] = e.content
-        })
-        setEntryTitles(titleMap)
-        setEntryContents(contentMap)
-      })
-    }
+    // The queue endpoint joins entry_title/content_preview, so the old
+    // 500-entry download (titles only, full text wasted) is gone.
+    const titleMap: Record<number, string> = {}
+    const contentMap: Record<number, string> = {}
+    queue.forEach(item => {
+      titleMap[item.entry_id] = item.entry_title || `Intrarea nr. ${item.entry_id}`
+      if (item.content_preview) contentMap[item.entry_id] = item.content_preview
+    })
+    setEntryTitles(titleMap)
+    setEntryContents(contentMap)
   }, [queue])
 
   if (loading) return <div className="text-center py-8 text-gray-500">Se încarcă coada de verificări…</div>

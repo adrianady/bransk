@@ -558,12 +558,19 @@ def test_index_pdf_request_and_missing_pdf_error():
 
 def test_reanalyze_issues_is_a_read_only_scan():
     with TestClient(app) as client:
-        first = client.post(
+        client.post(
             "/api/entries", json={"title": "Duplicate paper", "study_type": "study"}
         ).json()
-        second = client.post(
-            "/api/entries", json={"title": "Duplicate paper", "study_type": "study"}
-        ).json()
+        # The API now rejects duplicate titles (server-side dedup), so the
+        # pre-existing duplicate this scan targets is written directly.
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO entries (title, study_type) VALUES ('Duplicate paper', 'study')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
         before = len(client.get("/api/entries").json())
 
         request = _parse("[REANALYZE_DATA: issues]")[0]
@@ -583,7 +590,16 @@ def test_reanalyze_issues_is_a_read_only_scan():
 def test_reanalyze_full_reuses_the_maintenance_pipeline():
     with TestClient(app) as client:
         client.post("/api/entries", json={"title": "Same title", "study_type": "study"})
-        client.post("/api/entries", json={"title": "Same title", "study_type": "study"})
+        # Written directly: the API rejects duplicate titles since server-side
+        # dedup landed, but the maintenance pipeline must still merge old ones.
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO entries (title, study_type) VALUES ('Same title', 'study')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
         result = asyncio.run(chat_mod._execute_reanalyze("full"))
         assert result["type"] == "reanalysis_done"

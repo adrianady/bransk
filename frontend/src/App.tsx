@@ -1,19 +1,29 @@
 import { useCallback, useState, useEffect, lazy, Suspense } from 'react'
 import {
   CalendarDays, Network, BookOpenText, Dna, FileText, RotateCcw, ListChecks, Lightbulb,
-  Bot, Sun, Moon, Search, Plus, Settings2,
-  GraduationCap, Menu, X, ChevronRight,
+  Bot, Sun, Moon, Plus, Settings2,
+  GraduationCap, Menu, X,
 } from 'lucide-react'
 import { ProjectView } from './components/ProjectView'
+import { CommandPalette } from './components/CommandPalette'
+import { isLibraryView } from './lib/navigation'
 import { api, ApiError } from './lib/api'
 import { useToast } from './components/Toast'
 import type { Entry, TimelineEntry, Tag, StudySource, StudyQASource } from './lib/types'
+import {
+  MOBILE_QUICK_VIEW_IDS,
+  parseViewHash,
+  VIEW_LABELS,
+  VIEW_NAV_ITEMS,
+  type View,
+} from './lib/navigation'
 
 // Every view but the project page is split into its own chunk and fetched when
 // it is first opened. Before this, one 533 kB entry file carried React and all
 // twelve views together, so opening the app also downloaded the graph, the
 // timeline and the chat it might never use.
 const TimelineView = lazy(() => import('./components/Timeline').then(m => ({ default: m.TimelineView })))
+const LibraryView = lazy(() => import('./components/LibraryView').then(m => ({ default: m.LibraryView })))
 const GraphView = lazy(() => import('./components/GraphView').then(m => ({ default: m.GraphView })))
 const ChatPanel = lazy(() => import('./components/ChatPanel').then(m => ({ default: m.ChatPanel })))
 const EntryForm = lazy(() => import('./components/EntryForm').then(m => ({ default: m.EntryForm })))
@@ -47,29 +57,21 @@ function BrandMark({ className = 'w-8 h-8' }: { className?: string }) {
   )
 }
 
-type View = 'project' | 'timeline' | 'graph' | 'studies' | 'theories' | 'entries' | 'review' | 'todos' | 'thoughts'
-
-const VIEW_LABELS: Record<View, string> = {
-  project: 'Proiect',
-  timeline: 'Cronologie',
-  graph: 'Graf',
-  studies: 'Studii',
-  theories: 'Teorii',
-  entries: 'Intrări',
-  review: 'Verificare',
-  todos: 'Sarcini',
-  thoughts: 'Gânduri',
+const VIEW_ICONS: Record<View, React.ComponentType<{ className?: string }>> = {
+  project: GraduationCap,
+  timeline: CalendarDays,
+  graph: Network,
+  studies: BookOpenText,
+  theories: Dna,
+  entries: FileText,
+  review: RotateCcw,
+  todos: ListChecks,
+  thoughts: Lightbulb,
 }
 
 export default function App() {
   const toast = useToast()
-  const [view, setView] = useState<View>(() => {
-    const h = window.location.hash.replace('#', '') as View
-    if (['project', 'timeline', 'graph', 'studies', 'theories', 'entries', 'review', 'todos', 'thoughts'].includes(h)) {
-      return h
-    }
-    return 'project'
-  })
+  const [view, setView] = useState<View>(() => parseViewHash(window.location.hash) ?? 'project')
   const [previousView, setPreviousView] = useState<View | null>(null)
 
   const changeView = useCallback((next: View) => {
@@ -79,10 +81,8 @@ export default function App() {
 
   useEffect(() => {
     const handleHash = () => {
-      const h = window.location.hash.replace('#', '') as View
-      if (['project', 'timeline', 'graph', 'studies', 'theories', 'entries', 'review', 'todos', 'thoughts'].includes(h)) {
-        setView(h)
-      }
+      const next = parseViewHash(window.location.hash)
+      if (next) setView(next)
     }
     window.addEventListener('hashchange', handleHash)
     return () => window.removeEventListener('hashchange', handleHash)
@@ -203,16 +203,23 @@ export default function App() {
     }
   }, [previousView])
 
-  const navItems: { id: View; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-    { id: 'timeline', label: 'Cronologie', icon: CalendarDays },
-    { id: 'graph', label: 'Graf', icon: Network },
-    { id: 'studies', label: 'Studii', icon: BookOpenText },
-    { id: 'theories', label: 'Teorii', icon: Dna },
-    { id: 'entries', label: 'Intrări', icon: FileText },
-    { id: 'review', label: 'Verificare', icon: RotateCcw },
-    { id: 'todos', label: 'Sarcini', icon: ListChecks },
-    { id: 'thoughts', label: 'Gânduri', icon: Lightbulb },
-  ]
+  const selectNavView = (next: View) => {
+    if (next === 'entries') setSelectedEntry(null)
+    changeView(next)
+  }
+
+  // Ctrl/Cmd+K global search palette — reachable from every view.
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen(open => !open)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   return (
     <div className={`min-h-screen bg-canvas text-ink ${darkMode ? 'dark' : ''}`}>
@@ -220,10 +227,11 @@ export default function App() {
           a phone. The main column owns its own scrolling. */}
       <div className="flex h-screen overflow-hidden">
         {/* Desktop Sidebar (hidden on mobile) */}
-        <nav className="hidden md:flex flex-col shrink-0 w-16 lg:w-52 bg-surface border-r border-line">
+        <nav aria-label="Navigare principală" className="hidden md:flex flex-col shrink-0 w-16 lg:w-52 bg-surface border-r border-line">
           <div className="p-3 lg:p-4 border-b border-line">
             <button
               onClick={() => changeView('project')}
+              aria-label="Deschide pagina proiectului"
               className="w-full text-left group"
               title={projectTitle || 'Proiectul meu'}
             >
@@ -247,43 +255,30 @@ export default function App() {
             </button>
           </div>
 
-          <div className="p-2 pb-0">
-            <button
-              onClick={() => changeView('project')}
-              aria-current={view === 'project' ? 'page' : undefined}
-              title="Proiectul meu — lucrarea la care lucrez"
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-                view === 'project'
-                  ? 'bg-accent-soft text-accent-strong'
-                  : 'text-ink/80 hover:bg-surface-2 hover:text-ink'
-              }`}
-            >
-              <GraduationCap className="w-5 h-5 shrink-0" />
-              <span className="hidden lg:block">Proiectul meu</span>
-            </button>
-            <div className="my-2 border-t border-line" />
-          </div>
-
-          <div className="flex-1 p-2 pt-0 space-y-0.5 overflow-y-auto">
-            {navItems.map(item => (
-              <button
-                key={item.id}
-                title={item.label}
-                aria-current={view === item.id ? 'page' : undefined}
-                onClick={() => {
-                  if (item.id === 'entries') setSelectedEntry(null)
-                  changeView(item.id)
-                }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
-                  view === item.id
-                    ? 'bg-accent-soft text-accent-strong font-semibold'
-                    : 'text-muted hover:bg-surface-2 hover:text-ink'
-                }`}
-              >
-                <item.icon className="w-5 h-5 shrink-0" />
-                <span className="hidden lg:block">{item.label}</span>
-              </button>
-            ))}
+          <div className="flex-1 p-2 space-y-0.5 overflow-y-auto">
+            {VIEW_NAV_ITEMS.map(item => {
+              if (item.id === 'entries') return null // „Intrări” e tabul al doilea al Bibliotecii
+              const label = item.id === 'studies' ? 'Bibliotecă' : item.label
+              const active = item.id === 'studies' ? isLibraryView(view) : view === item.id
+              const Icon = VIEW_ICONS[item.id]
+              return (
+                <button
+                  key={item.id}
+                  title={label}
+                  aria-label={label}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={() => selectNavView(item.id)}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                    active
+                      ? 'bg-accent-soft text-accent-strong font-semibold'
+                      : 'text-muted hover:bg-surface-2 hover:text-ink'
+                  }`}
+                >
+                  <Icon className="w-5 h-5 shrink-0" />
+                  <span className="hidden lg:block">{label}</span>
+                </button>
+              )
+            })}
           </div>
 
           <div className="p-2 border-t border-line space-y-0.5">
@@ -324,7 +319,7 @@ export default function App() {
               onClick={() => setMobileMenuOpen(false)}
               aria-hidden="true"
             />
-            <div className="fixed inset-y-0 left-0 w-72 max-w-[85vw] bg-surface shadow-pop flex flex-col z-50 border-r border-line">
+            <nav id="mobile-navigation" aria-label="Navigare principală" className="fixed inset-y-0 left-0 w-72 max-w-[85vw] bg-surface shadow-pop flex flex-col z-50 border-r border-line">
               {/* Drawer Header */}
               <div className="p-4 border-b border-line flex items-center justify-between">
                 <div className="flex items-center gap-2.5 min-w-0">
@@ -347,65 +342,33 @@ export default function App() {
 
               {/* Drawer Navigation List */}
               <div className="flex-1 p-3 space-y-0.5 overflow-y-auto">
-                <button
-                  onClick={() => { changeView('project'); setMobileMenuOpen(false); }}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-                    view === 'project'
-                      ? 'bg-accent-soft text-accent-strong'
-                      : 'text-ink/80 hover:bg-surface-2 hover:text-ink'
-                  }`}
-                >
-                  <GraduationCap className="w-5 h-5 shrink-0" />
-                  <span>Proiectul meu (teză)</span>
-                </button>
-
-                <div className="my-2 border-t border-line" />
-
-                {navItems.map(item => (
-                  <button
-                    key={item.id}
-                    onClick={() => {
-                      if (item.id === 'entries') setSelectedEntry(null)
-                      changeView(item.id)
-                      setMobileMenuOpen(false)
-                    }}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                      view === item.id
-                        ? 'bg-accent-soft text-accent-strong font-semibold'
-                        : 'text-muted hover:bg-surface-2 hover:text-ink'
-                    }`}
-                  >
-                    <item.icon className="w-5 h-5 shrink-0" />
-                    <span>{item.label}</span>
-                  </button>
-                ))}
+                {VIEW_NAV_ITEMS.map(item => {
+                  if (item.id === 'entries') return null // „Intrări” e tabul al doilea al Bibliotecii
+                  const label = item.id === 'studies' ? 'Bibliotecă' : item.label
+                  const active = item.id === 'studies' ? isLibraryView(view) : view === item.id
+                  const Icon = VIEW_ICONS[item.id]
+                  return (
+                    <button
+                      key={item.id}
+                      aria-label={label}
+                      aria-current={active ? 'page' : undefined}
+                      onClick={() => {
+                        selectNavView(item.id)
+                        setMobileMenuOpen(false)
+                      }}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                        active
+                          ? 'bg-accent-soft text-accent-strong font-semibold'
+                          : 'text-muted hover:bg-surface-2 hover:text-ink'
+                      }`}
+                    >
+                      <Icon className="w-5 h-5 shrink-0" />
+                      <span>{label}</span>
+                    </button>
+                  )
+                })}
               </div>
-
-              {/* Drawer Footer */}
-              <div className="p-3 border-t border-line space-y-0.5 bg-surface-2/40">
-                <button
-                  onClick={() => { setShowChat(true); setMobileMenuOpen(false); }}
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-muted hover:bg-surface-2 hover:text-ink"
-                >
-                  <Bot className="w-5 h-5 text-accent shrink-0" />
-                  <span>Chat AI</span>
-                </button>
-                <button
-                  onClick={() => { setShowAiStatus(true); setMobileMenuOpen(false); }}
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-muted hover:bg-surface-2 hover:text-ink"
-                >
-                  <Settings2 className="w-5 h-5 shrink-0" />
-                  <span>Stare și setări AI</span>
-                </button>
-                <button
-                  onClick={toggleDark}
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-muted hover:bg-surface-2 hover:text-ink"
-                >
-                  {darkMode ? <Sun className="w-5 h-5 text-brass shrink-0" /> : <Moon className="w-5 h-5 text-accent shrink-0" />}
-                  <span>{darkMode ? 'Treci pe mod luminos' : 'Treci pe mod întunecat'}</span>
-                </button>
-              </div>
-            </div>
+            </nav>
           </div>
         )}
 
@@ -413,21 +376,11 @@ export default function App() {
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
           {/* Mobile Top Header */}
           <header className="md:hidden sticky top-0 z-20 flex items-center justify-between px-3 h-14 bg-surface/90 backdrop-blur border-b border-line shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <button
-                onClick={() => setMobileMenuOpen(true)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent-soft border border-accent/20 text-accent-strong font-semibold text-xs active:scale-95 transition-transform"
-                aria-label="Deschide meniul principal"
-              >
-                <Menu className="w-4 h-4 shrink-0" />
-                <span>Meniu</span>
-              </button>
-              <div className="flex items-center gap-1.5 min-w-0">
-                <BrandMark className="w-4 h-4 shrink-0" />
-                <span className="font-serif text-[13px] font-semibold text-ink shrink-0">Bransk</span>
-                <span className="text-muted/60">·</span>
-                <span className="text-xs font-medium text-muted truncate">{VIEW_LABELS[view]}</span>
-              </div>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <BrandMark className="w-4 h-4 shrink-0" />
+              <span className="font-serif text-[13px] font-semibold text-ink shrink-0">Bransk</span>
+              <span className="text-muted/60">·</span>
+              <span className="text-xs font-medium text-muted truncate">{VIEW_LABELS[view]}</span>
             </div>
             <div className="flex items-center gap-0.5 shrink-0">
               <button
@@ -439,6 +392,14 @@ export default function App() {
                 aria-label="Chat AI"
               >
                 <Bot className="w-5 h-5" />
+              </button>
+              <button
+                onClick={() => setShowAiStatus(true)}
+                className="p-2 rounded-lg text-muted hover:bg-surface-2 hover:text-ink transition-colors"
+                title="Stare și setări AI"
+                aria-label="Stare și setări AI"
+              >
+                <Settings2 className="w-5 h-5" />
               </button>
               <button
                 onClick={toggleDark}
@@ -474,14 +435,16 @@ export default function App() {
                   onSelectEntry={handleSelectTimelineEntry}
                 />
               )}
-              {view === 'studies' && (
-                <StudiesView onSelectEntry={handleSelectStudy} />
-              )}
               {view === 'theories' && (
                 <TheoriesView onSelectEntry={handleSelectStudy} />
               )}
-              {view === 'entries' && (
-                <div className="space-y-4">
+              {isLibraryView(view) && (
+                <LibraryView
+                  activeTab={view}
+                  onTabChange={changeView}
+                  studiesPane={<StudiesView onSelectEntry={handleSelectStudy} />}
+                  entriesPane={
+                    <div className="space-y-4">
                   {!selectedEntry && (
                     <div className="flex items-center justify-between">
                       <h2 className="text-xl font-bold">Intrări</h2>
@@ -506,7 +469,9 @@ export default function App() {
                   ) : (
                     <EntryList onSelect={setSelectedEntry} />
                   )}
-                </div>
+                    </div>
+                  }
+                />
               )}
               {view === 'review' && <ReviewPanel />}
               {view === 'todos' && <TodoList onSelectEntry={handleSelectStudy} />}
@@ -516,45 +481,31 @@ export default function App() {
           </main>
 
           {/* Mobile Bottom Navigation Bar */}
-          <nav className="md:hidden fixed bottom-0 left-0 right-0 z-20 h-14 bg-surface/95 backdrop-blur border-t border-line flex items-center justify-around px-1">
-            <button
-              onClick={() => changeView('project')}
-              className={`flex flex-col items-center justify-center flex-1 py-1 text-[10px] font-medium transition-colors ${
-                view === 'project' ? 'text-accent-strong font-bold' : 'text-muted'
-              }`}
-            >
-              <GraduationCap className="w-5 h-5 mb-0.5" />
-              <span>Proiect</span>
-            </button>
-            <button
-              onClick={() => changeView('studies')}
-              className={`flex flex-col items-center justify-center flex-1 py-1 text-[10px] font-medium transition-colors ${
-                view === 'studies' ? 'text-accent-strong font-bold' : 'text-muted'
-              }`}
-            >
-              <BookOpenText className="w-5 h-5 mb-0.5" />
-              <span>Studii</span>
-            </button>
-            <button
-              onClick={() => changeView('graph')}
-              className={`flex flex-col items-center justify-center flex-1 py-1 text-[10px] font-medium transition-colors ${
-                view === 'graph' ? 'text-accent-strong font-bold' : 'text-muted'
-              }`}
-            >
-              <Network className="w-5 h-5 mb-0.5" />
-              <span>Graf</span>
-            </button>
-            <button
-              onClick={() => changeView('timeline')}
-              className={`flex flex-col items-center justify-center flex-1 py-1 text-[10px] font-medium transition-colors ${
-                view === 'timeline' ? 'text-accent-strong font-bold' : 'text-muted'
-              }`}
-            >
-              <CalendarDays className="w-5 h-5 mb-0.5" />
-              <span>Timp</span>
-            </button>
+          <nav aria-label="Navigare rapidă" className="md:hidden fixed bottom-0 left-0 right-0 z-20 h-14 bg-surface/95 backdrop-blur border-t border-line flex items-center justify-around px-1">
+            {MOBILE_QUICK_VIEW_IDS.map(id => {
+              const item = VIEW_NAV_ITEMS.find(navItem => navItem.id === id)!
+              const Icon = VIEW_ICONS[id]
+              const label = id === 'studies' ? 'Bibliotecă' : item.shortLabel
+              const active = id === 'studies' ? isLibraryView(view) : view === id
+              return (
+                <button
+                  key={id}
+                  onClick={() => selectNavView(id)}
+                  aria-current={active ? 'page' : undefined}
+                  className={`flex flex-col items-center justify-center flex-1 py-1 text-[10px] font-medium transition-colors ${
+                    active ? 'text-accent-strong font-bold' : 'text-muted'
+                  }`}
+                >
+                  <Icon className="w-5 h-5 mb-0.5" />
+                  <span>{label}</span>
+                </button>
+              )
+            })}
             <button
               onClick={() => setMobileMenuOpen(true)}
+              aria-expanded={mobileMenuOpen}
+              aria-controls={mobileMenuOpen ? 'mobile-navigation' : undefined}
+              aria-label="Deschide meniul principal"
               className="flex flex-col items-center justify-center flex-1 py-1 text-[10px] font-medium text-muted active:text-accent"
             >
               <Menu className="w-5 h-5 mb-0.5" />
@@ -596,6 +547,12 @@ export default function App() {
 
         {showAiStatus && <AiStatusModal onClose={() => setShowAiStatus(false)} />}
       </Suspense>
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onSelectEntry={handleSelectStudyById}
+      />
     </div>
   )
 }

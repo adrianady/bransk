@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -160,6 +161,32 @@ def test_ssrf_guard_blocks_a_private_html_source(monkeypatch):
 
 
     asyncio.run(_run())
+
+
+def test_pdf_fulltext_reports_indexing_failure_without_discarding_the_pdf(monkeypatch, tmp_path):
+    async def _run():
+        async def fake_find(entry, client=None):
+            return [Candidate(url="https://example.org/paper.pdf", source="test")]
+
+        monkeypatch.setattr(fulltext, "find_fulltext", fake_find)
+        monkeypatch.setattr(fulltext, "_entry_row", lambda entry_id: {
+            "id": entry_id, "title": "Paper", "doi": "", "source": "", "content": "",
+        })
+        monkeypatch.setattr(fulltext, "download_study_pdf", AsyncMock(return_value="9-paper.pdf"))
+        monkeypatch.setattr(fulltext, "pdf_path_for", lambda _entry_id: tmp_path / "9-paper.pdf")
+        monkeypatch.setattr(fulltext, "is_valid_pdf_file", lambda _path: True)
+        monkeypatch.setattr(
+            "app.pdf_rag.index_pdf",
+            AsyncMock(side_effect=RuntimeError("index unavailable")),
+        )
+
+        result = await fulltext.fetch_fulltext(9)
+        assert result["status"] == "pdf"
+        assert result["index_error"] is True
+
+    asyncio.run(_run())
+
+
 # ── storing what was found ─────────────────────────────────────────────────
 
 def test_study_text_lands_on_disk_and_keeps_the_longer_version(text_dir):

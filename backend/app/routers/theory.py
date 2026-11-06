@@ -124,21 +124,26 @@ def update_theory(theory_id: int, data: TheoryUpdate):
             updates["name"] = data.name
         if data.description is not None:
             updates["description"] = data.description
-        if data.parent_id is not None:
-            if data.parent_id == theory_id:
-                raise HTTPException(400, "A theory cannot be its own parent")
-            _fetch_theory(conn, data.parent_id)
-            # Cycle prevention: walk ancestors of the new parent.
-            node, visited = data.parent_id, set()
-            while node is not None:
-                if node == theory_id:
-                    raise HTTPException(400, "Moving this theory here would create a cycle")
-                if node in visited:
-                    break
-                visited.add(node)
-                parent = conn.execute("SELECT parent_id FROM theories WHERE id = ?", [node]).fetchone()
-                node = parent["parent_id"] if parent else None
-            updates["parent_id"] = data.parent_id
+        if "parent_id" in data.model_fields_set:
+            # An explicit null detaches the theory from its parent; an omitted
+            # field leaves the current parent untouched.
+            if data.parent_id is None:
+                updates["parent_id"] = None
+            else:
+                if data.parent_id == theory_id:
+                    raise HTTPException(400, "A theory cannot be its own parent")
+                _fetch_theory(conn, data.parent_id)
+                # Cycle prevention: walk ancestors of the new parent.
+                node, visited = data.parent_id, set()
+                while node is not None:
+                    if node == theory_id:
+                        raise HTTPException(400, "Moving this theory here would create a cycle")
+                    if node in visited:
+                        break
+                    visited.add(node)
+                    parent = conn.execute("SELECT parent_id FROM theories WHERE id = ?", [node]).fetchone()
+                    node = parent["parent_id"] if parent else None
+                updates["parent_id"] = data.parent_id
         if data.status is not None:
             updates["status"] = data.status
         if updates:

@@ -3,7 +3,7 @@ import {
   GraduationCap, Pencil, Check, X, Loader2, Sparkles, BookOpen, BarChart3,
   MessageSquareWarning, Plus, Trash2, ChevronDown, ChevronRight, Save,
   Lightbulb, AlertTriangle, Info, ExternalLink, RefreshCw, ListTree, CheckCircle2, Compass,
-  Download,
+  Download, BookMarked, FileDown,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -11,6 +11,7 @@ import { api, ApiError } from '../lib/api'
 import { useToast } from './Toast'
 import { ReadinessPanel } from './ReadinessPanel'
 import { IdeasPanel } from './IdeasPanel'
+import { BibliographyPanel } from './BibliographyPanel'
 import { TitlePanel } from './TitlePanel'
 import { TopicPanel } from './TopicPanel'
 import type {
@@ -38,7 +39,7 @@ interface Props {
   focusClaim?: { sectionId: string; claimId: number; token: number } | null
 }
 
-type Tab = 'structure' | 'map' | 'studies' | 'readiness' | 'topic' | 'analysis' | 'feedback' | 'ideas'
+type Tab = 'structure' | 'map' | 'studies' | 'readiness' | 'topic' | 'analysis' | 'feedback' | 'ideas' | 'bibliography'
 
 const WORK_TYPES: { value: string; label: string }[] = [
   { value: 'licenta', label: 'Licență' },
@@ -114,6 +115,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
   const [dirtySections, setDirtySections] = useState<Record<string, string>>({})
   const [savingSection, setSavingSection] = useState<string | null>(null)
   const [generatingStructure, setGeneratingStructure] = useState(false)
+  const [exportingDocx, setExportingDocx] = useState(false)
   const [evidenceMap, setEvidenceMap] = useState<ProjectEvidenceMap | null>(null)
   const [mapStudies, setMapStudies] = useState<ProjectStudyRecommendation[]>([])
   const [loadingEvidenceMap, setLoadingEvidenceMap] = useState(false)
@@ -361,6 +363,18 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
     )
   }
 
+  const exportThesisDocx = async () => {
+    setExportingDocx(true)
+    try {
+      await api.project.downloadDocx()
+      toast.success('Teza a fost descărcată în format Word (.docx)!')
+    } catch (err) {
+      toast.error('Exportul DOCX a eșuat: ' + (err instanceof Error ? err.message : 'eroare'))
+    } finally {
+      setExportingDocx(false)
+    }
+  }
+
   const exportThesisMarkdown = () => {
     if (!project) return
     const lines: string[] = []
@@ -519,6 +533,15 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
                 <Download className="w-3.5 h-3.5" />
                 Descarcă teza (.md)
               </button>
+              <button
+                onClick={exportThesisDocx}
+                disabled={exportingDocx}
+                className="btn-secondary text-xs py-1 px-2.5 flex items-center gap-1.5"
+                title="Descarcă teza în format Word (.docx), cu bibliografie generată"
+              >
+                {exportingDocx ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
+                Word (.docx)
+              </button>
             </div>
           </div>
         </div>
@@ -549,6 +572,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
           ['analysis', '📊 Analiză temă', BarChart3],
           ['feedback', '💬 Feedback', MessageSquareWarning],
           ['ideas', '💡 Idei', Lightbulb],
+          ['bibliography', '📖 Bibliografie', BookMarked],
         ] as const).map(([id, label]) => (
           <button
             key={id}
@@ -730,6 +754,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
 
       {/* ── Ideas tab ── */}
       {tab === 'ideas' && <IdeasPanel />}
+      {tab === 'bibliography' && <BibliographyPanel />}
 
       {/* ── Studies tab ── */}
       {tab === 'studies' && (

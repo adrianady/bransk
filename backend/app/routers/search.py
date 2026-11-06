@@ -10,6 +10,13 @@ from app.models import SearchResult, EntryResponse
 
 router = APIRouter()
 
+# Same definition of "study" the /studies endpoint uses (kept in sync).
+_STUDY_WHERE = """archived = 0
+                 AND (study_type != ''
+                      OR tags LIKE '%study%'
+                      OR tags LIKE '%pdf%'
+                      OR content LIKE '%**PDF:**%')"""
+
 # FTS5 boolean reserved keywords
 _FTS_BOOLEAN_KEYWORDS = {"AND", "OR", "NOT", "NEAR"}
 
@@ -119,3 +126,103 @@ def _execute_suggest(q: str, limit: int):
 @router.get("/search/suggest")
 def suggest(q: str = Query(..., min_length=1), limit: int = Query(5, le=20)):
     return _execute_suggest(q, limit)
+
+
+@router.get("/search/global")
+async def global_search(
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(5, le=15),
+):
+    """One query across everything the writer works with.
+
+    Groups results so the command palette can answer "unde era acel pasaj?"
+    in one keystroke: entries (FTS), studies, personal notes, reader
+    highlights and indexed PDF chunks (semantic when embeddings are up, LIKE
+    otherwise). Chunks carry page_number so the reader can open the exact page.
+    """
+    query = q.strip()
+    if not query:
+        return {"query": query, "entries": [], "studies": [], "notes": [],
+                "highlights": [], "chunks": [], "total": 0}
+    like = f"%{query}%"
+    safe = _sanitize_fts5(query)
+    conn = get_db()
+    try:
+        entries = [
+            dict(r) for r in conn.execute(
+                """SELECT e.id, e.title, e.entry_date, e.tags, e.importance,
+                          substr(e.content, 1, 200) AS content_preview
+                     FROM entries_fts JOIN entries e ON entries_fts.rowid = e.id
+                    WHERE e.archived = 0 AND entries_fts MATCH ?
+                    ORDER BY rank LIMIT ?""",
+                [safe, limit],
+            ).fetchall()
+        ]
+        studies = [
+            dict(r) for r in conn.execute(
+                f"""SELECT id, title, authors, entry_date, doi, pdf_path,
+                           quality, study_type
+                      FROM entries
+                     WHERE {_STUDY_WHERE}
+                       AND (title LIKE ? OR authors LIKE ? OR doi LIKE ?)
+                     ORDER BY entry_date IS NULL, entry_date DESC LIMIT ?""",
+                [like, like, like, limit],
+            ).fetchall()
+        ]
+        notes = [
+            dict(r) for r in conn.execute(
+                """SELECT n.id, n.entry_id, n.content, n.page_number, n.course_context,
+                          e.title AS entry_title
+                     FROM study_notes n JOIN entries e ON n.entry_id = e.id
+                    WHERE e.archived = 0 AND n.content LIKE ?
+                    ORDER BY n.updated_at DESC LIMIT ?""",
+                [like, limit],
+            ).fetchall()
+        ]
+        highlights = [
+            dict(r) for r in conn.execute(
+                """SELECT h.id, h.entry_id, h.quote, h.note, h.page_number,
+                          e.title AS entry_title
+                     FROM pdf_highlights h JOIN entries e ON h.entry_id = e.id
+                    WHERE e.archived = 0 AND (h.quote LIKE ? OR h.note LIKE ?)
+                    ORDER BY h.id DESC LIMIT ?""",
+                [like, like, limit],
+            ).fetchall()
+        ]
+        chunks = [
+            dict(r) for r in conn.execute(
+                """SELECT d.id, d.entry_id, d.chunk_index, d.page_number,
+                          substr(d.content, 1, 240) AS preview,
+                          e.title AS entry_title
+                     FROM documents d JOIN entries e ON d.entry_id = e.id
+                    WHERE e.archived = 0 AND d.content LIKE ?
+                    ORDER BY d.id LIMIT ?""",
+                [like, limit],
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    # Semantic PDF search only adds value beyond the LIKE above; run it when
+    # the embedding backend is up (offline it simply contributes nothing).
+    from app.pdf_rag import search_documents
+    try:
+        semantic = await search_documents(query, top_k=limit)
+    except Exception:
+        semantic = []
+    seen_chunks = {c["id"] for c in chunks}
+    for r in semantic:
+        if r["document_id"] not in seen_chunks:
+            chunks.append({
+                "id": r["document_id"],
+                "entry_id": r["entry_id"],
+                "chunk_index": r["chunk_index"],
+                "page_number": r.get("page_number"),
+                "preview": (r.get("content") or "")[:240],
+                "entry_title": r.get("entry_title") or "",
+                "score": r.get("score"),
+            })
+
+    total = len(entries) + len(studies) + len(notes) + len(highlights) + len(chunks)
+    return {"query": query, "entries": entries, "studies": studies, "notes": notes,
+            "highlights": highlights, "chunks": chunks, "total": total}

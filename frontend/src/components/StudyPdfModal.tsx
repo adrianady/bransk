@@ -16,11 +16,13 @@ import {
   ZoomOut,
   Maximize2,
   FileText,
+  Highlighter,
 } from 'lucide-react'
 import * as pdfjsLib from 'pdfjs-dist'
+import 'pdfjs-dist/web/pdf_viewer.css'
 import { api } from '../lib/api'
 import { useToast } from './Toast'
-import type { Entry, StudyNote, StudyQASource } from '../lib/types'
+import type { Entry, PdfHighlight, StudyNote, StudyQASource } from '../lib/types'
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -48,9 +50,18 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
   const [numPages, setNumPages] = useState(0)
   const [scale, setScale] = useState(1.2)
   const [loadingPdf, setLoadingPdf] = useState(false)
+  const [pdfProgress, setPdfProgress] = useState<number | null>(null)
   const [pdfError, setPdfError] = useState<string | null>(null)
+  const [pdfLoadAttempt, setPdfLoadAttempt] = useState(0)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const textLayerRef = useRef<HTMLDivElement | null>(null)
   const renderTaskRef = useRef<any>(null)
+
+  // Highlights state — selections saved from the native reader. The chat and
+  // study QA read them as the user's own evidence.
+  const [highlights, setHighlights] = useState<PdfHighlight[]>([])
+  const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null)
+  const [savingHighlight, setSavingHighlight] = useState(false)
 
   // Form state
   const [courseContext, setCourseContext] = useState('')
@@ -78,14 +89,70 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
     }
   }
 
+  const loadHighlights = async () => {
+    if (!study) return
+    try {
+      setHighlights(await api.highlights.list(study.id))
+    } catch {
+      // Highlights are an enhancement; the reader must work without them.
+      setHighlights([])
+    }
+  }
+
+  // Save the current PDF text selection as a highlight on the open page.
+  const saveSelectionHighlight = async () => {
+    if (!study || !selection) return
+    setSavingHighlight(true)
+    try {
+      const created = await api.highlights.create(study.id, {
+        quote: selection.text.slice(0, 4000),
+        page_number: currentPage,
+      })
+      setHighlights(prev => [...prev, created].sort(
+        (a, b) => (a.page_number ?? 0) - (b.page_number ?? 0) || a.id - b.id
+      ))
+      toast.success('Evidențiere salvată — AI-ul o primește în chat și la întrebări.')
+      window.getSelection()?.removeAllRanges()
+      setSelection(null)
+    } catch (err: any) {
+      toast.error('Evidențierea nu s-a putut salva: ' + (err?.message || 'eroare'))
+    } finally {
+      setSavingHighlight(false)
+    }
+  }
+
+  const deleteHighlight = async (id: number) => {
+    try {
+      await api.highlights.remove(id)
+      setHighlights(prev => prev.filter(h => h.id !== id))
+    } catch (err: any) {
+      toast.error('Ștergerea a eșuat: ' + (err?.message || 'eroare'))
+    }
+  }
+
+  // Capture text selections over the rendered page (the PDF.js text layer).
+  const handleViewerMouseUp = () => {
+    const sel = window.getSelection()
+    const text = sel?.toString().trim() ?? ''
+    if (!sel || sel.isCollapsed || text.length < 3) {
+      setSelection(null)
+      return
+    }
+    const rect = sel.getRangeAt(0).getBoundingClientRect()
+    setSelection({ text, x: rect.left + rect.width / 2, y: rect.top })
+  }
+
   // Load PDF document using PDF.js
   useEffect(() => {
     if (!isOpen || !study) return
 
     let isCancelled = false
+    let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null
     setLoadingPdf(true)
+    setPdfProgress(null)
     setPdfError(null)
     setPdfDoc(null)
+    setNumPages(0)
     const targetPage = sourceToOpen?.page_verified && sourceToOpen.page_number
       ? sourceToOpen.page_number
       : 1
@@ -93,16 +160,30 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
     setPageNumber(String(targetPage))
 
     const pdfUrl = api.studies.pdfUrl(study.id)
-    const loadingTask = pdfjsLib.getDocument({
-      url: pdfUrl,
-      withCredentials: true,
-    })
+    try {
+      loadingTask = pdfjsLib.getDocument({
+        url: pdfUrl,
+        httpHeaders: api.studies.pdfHeaders(),
+        withCredentials: true,
+      })
+    } catch (err: any) {
+      setPdfError(err?.message || 'Nu s-a putut reda PDF-ul în aplicație.')
+      setLoadingPdf(false)
+      return
+    }
+
+    loadingTask.onProgress = ({ loaded, total }: { loaded: number; total: number }) => {
+      if (!isCancelled && total > 0) {
+        setPdfProgress(Math.min(100, Math.max(0, Math.round((loaded / total) * 100))))
+      }
+    }
 
     loadingTask.promise
       .then((doc: any) => {
         if (!isCancelled) {
           setPdfDoc(doc)
           setNumPages(doc.numPages)
+          setPdfProgress(null)
           setLoadingPdf(false)
         }
       })
@@ -117,10 +198,10 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
     return () => {
       isCancelled = true
       try {
-        loadingTask.destroy()
+        void loadingTask?.destroy().catch(() => {})
       } catch {}
     }
-  }, [isOpen, study?.id, sourceToOpen?.document_id])
+  }, [isOpen, study?.id, sourceToOpen?.document_id, pdfLoadAttempt])
 
   // Render current page onto canvas
   useEffect(() => {
@@ -169,7 +250,27 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
 
       const task = page.render(renderContext)
       renderTaskRef.current = task
-      task.promise.catch((err: any) => {
+      task.promise.then(async () => {
+        // Render the invisible text layer on top of the canvas so passages
+        // become selectable (→ highlights the AI reads as user evidence).
+        const container = textLayerRef.current
+        if (!container) return
+        try {
+          container.replaceChildren()
+          const textContent = await page.getTextContent()
+          container.style.setProperty('--total-scale-factor', String(responsiveScale))
+          const tl = new (pdfjsLib as any).TextLayer({
+            textContentSource: textContent,
+            container,
+            viewport,
+          })
+          await tl.render()
+        } catch (err: any) {
+          if (err?.name !== 'RenderingCancelledException') {
+            console.warn('Text layer error:', err)
+          }
+        }
+      }).catch((err: any) => {
         if (err?.name !== 'RenderingCancelledException') {
           console.warn('Page rendering error:', err)
         }
@@ -189,6 +290,7 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
   useEffect(() => {
     if (isOpen && study) {
       loadNotes()
+      loadHighlights()
       setNoteContent('')
       setEditingNoteId(null)
     }
@@ -420,13 +522,37 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
             </div>
 
             {/* Canvas Scroll Viewport */}
-            <div className="flex-1 overflow-auto p-2 sm:p-4 flex items-start justify-center relative select-none">
+            <div
+              className="flex-1 overflow-auto p-2 sm:p-4 flex items-start justify-center relative select-none"
+              onMouseUp={handleViewerMouseUp}
+            >
               {loadingPdf && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/70 dark:bg-gray-900/70 z-10 gap-2">
                   <Loader2 className="w-8 h-8 animate-spin text-chrono-600" />
-                  <p className="text-xs text-gray-600 dark:text-gray-300 font-medium">
-                    Se încarcă documentul nativ în aplicație…
-                  </p>
+                  {pdfProgress == null ? (
+                    <p className="text-xs text-gray-600 dark:text-gray-300 font-medium">
+                      Se încarcă documentul PDF în aplicație…
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-xs text-gray-600 dark:text-gray-300 font-medium">
+                        Se descarcă PDF-ul… {pdfProgress}%
+                      </p>
+                      <div
+                        role="progressbar"
+                        aria-label={`PDF descărcat ${pdfProgress}%`}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={pdfProgress}
+                        className="w-48 h-2 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"
+                      >
+                        <div
+                          className="h-full bg-chrono-600 transition-[width]"
+                          style={{ width: `${pdfProgress}%` }}
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -436,13 +562,34 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
                     Eroare la redarea documentului:
                   </p>
                   <p className="text-xs text-madder mb-4">{pdfError}</p>
+                  <button
+                    type="button"
+                    onClick={() => setPdfLoadAttempt(attempt => attempt + 1)}
+                    className="btn-secondary text-xs"
+                  >
+                    Reîncearcă
+                  </button>
                 </div>
               ) : (
-                <div className="rounded-xl overflow-hidden shadow-lg border border-gray-300 dark:border-gray-800 bg-white transition-all">
+                <div className="relative rounded-xl overflow-hidden shadow-lg border border-gray-300 dark:border-gray-800 bg-white transition-all">
                   <canvas ref={canvasRef} className="block max-w-full h-auto" />
+                  <div ref={textLayerRef} className="textLayer" />
                 </div>
               )}
             </div>
+            {/* Selection → highlight: the button floats near the selection */}
+            {selection && (
+              <button
+                onClick={saveSelectionHighlight}
+                disabled={savingHighlight}
+                className="fixed z-50 -translate-x-1/2 -translate-y-full flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-yellow-400 hover:bg-yellow-300 text-yellow-950 text-xs font-semibold shadow-lg"
+                style={{ left: selection.x, top: selection.y - 8 }}
+                title="Salvează selecția ca evidențiere"
+              >
+                {savingHighlight ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Highlighter className="w-3.5 h-3.5" />}
+                Evidențiază
+              </button>
+            )}
           </div>
 
           {/* Right Notes Pane */}
@@ -707,6 +854,62 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
                       </div>
                     )
                   })
+                )}
+              </div>
+
+              {/* Highlights saved from the reader — the AI reads these as
+                  user-marked evidence, ahead of raw PDF chunks. */}
+              <div className="space-y-2.5">
+                <h4 className="text-[11px] uppercase tracking-wider font-bold text-gray-400 flex items-center gap-1.5">
+                  <Highlighter className="w-3.5 h-3.5 text-yellow-500" />
+                  Evidențieri din PDF ({highlights.length})
+                </h4>
+                {highlights.length === 0 ? (
+                  <div className="text-center py-6 text-xs text-gray-400 border border-dashed border-gray-200 dark:border-gray-800 rounded-xl p-4">
+                    Selectează text în PDF și apasă „Evidențiază” — pasajul se salvează cu pagina și ajunge direct în contextul AI.
+                  </div>
+                ) : (
+                  highlights.map(hl => (
+                    <div
+                      key={hl.id}
+                      className="p-3 rounded-xl border-l-4 border-yellow-400 bg-yellow-50/60 dark:bg-yellow-950/20 border border-gray-200 dark:border-gray-800 shadow-sm space-y-1.5"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-xs text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed italic">
+                          „{hl.quote}”
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => deleteHighlight(hl.id)}
+                          className="p-1 text-gray-400 hover:text-madder rounded shrink-0"
+                          title="Șterge evidențierea"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                      {hl.note && (
+                        <p className="text-[11px] text-gray-600 dark:text-gray-400">— {hl.note}</p>
+                      )}
+                      <div className="flex items-center gap-2">
+                        {hl.page_number && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              handlePageChange(hl.page_number!)
+                              if (mobileTab === 'notes') setMobileTab('pdf')
+                            }}
+                            className="badge text-[10px] badge-accent hover:brightness-95 font-medium cursor-pointer transition-colors"
+                            title={`Mergi la pagina ${hl.page_number}`}
+                          >
+                            Pag. {hl.page_number}
+                          </button>
+                        )}
+                        <span className="text-[10px] text-gray-400">
+                          citată de AI în chat și la întrebări
+                        </span>
+                      </div>
+                    </div>
+                  ))
                 )}
               </div>
             </div>

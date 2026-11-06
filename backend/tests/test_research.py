@@ -36,7 +36,11 @@ def test_research_dedupe_on_rerun():
         study_count_after_second = len(client.get("/api/studies").json())
 
         assert study_count_after_second == study_count_after_first  # no duplicate studies
-        assert len(second["entries_created"]) == 1  # only the new report entry
+        # The report is updated in place on re-run, so nothing new is created.
+        assert len(second["entries_created"]) == 0
+        reports = [e for e in client.get("/api/entries", params={"limit": 500}).json()
+                   if e["title"].startswith("Meta-analysis:")]
+        assert len(reports) == 1
         assert len(second["studies"]) == len(first["studies"])
 
 

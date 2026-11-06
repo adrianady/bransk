@@ -18,6 +18,15 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger("chronokg.llm")
 
+
+class LLMProviderError(RuntimeError):
+    """Failure with a deliberately sanitized message safe to show in the UI."""
+
+    def __init__(self, public_message: str):
+        super().__init__(public_message)
+        self.public_message = public_message
+
+
 _env_path = Path(__file__).parent.parent / ".env"
 if _env_path.exists():
     load_dotenv(_env_path)
@@ -32,6 +41,14 @@ DEEPSEEK_API_URL = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/ch
 
 SETTING_MODEL = "deepseek_model"
 
+# Two distinct services behind opencode.ai: Console (pay-as-you-go) and Go
+# (subscription). Same Bearer protocol, separate endpoint, key and model.
+OPENCODE_DIRECT_PROVIDERS = ("opencode_console", "opencode_go")
+
+
+def _console_service(provider: str) -> str:
+    return "go" if provider == "opencode_go" else "zen"
+
 # Used when the provider cannot be asked (offline, no key). Deliberately
 # conservative: 8k is the smallest window any DeepSeek model has had, so a
 # prompt built on this guess is never rejected for being too long.
@@ -43,6 +60,13 @@ _catalogue_cache: dict = {"at": 0.0, "models": {}}
 _CATALOGUE_TTL = 600.0  # seconds; the list barely changes
 
 
+# The catalogue is already cached, but spinning a fresh event loop on every
+# call still costs milliseconds per chat message. Cache the resolved number
+# per model name, so switching providers/models cannot reuse a stale window.
+_CONTEXT_WINDOW_TTL = 600.0
+_context_window_cache: dict = {}
+
+
 def active_context_window() -> int:
     """Tokens the active model accepts, as the provider reports it.
 
@@ -52,6 +76,13 @@ def active_context_window() -> int:
     the whole request rejected.
     """
     import asyncio
+    import time
+
+    name = active_model()
+    cached = _context_window_cache.get(name)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _CONTEXT_WINDOW_TTL:
+        return cached[1]
 
     try:
         loop = asyncio.new_event_loop()
@@ -59,10 +90,11 @@ def active_context_window() -> int:
             models = loop.run_until_complete(_catalogue_cached())
         finally:
             loop.close()
-        name = active_model()
         info = models.get(name) or models.get(name.split(":")[0])
         if info and info.get("context_window"):
-            return int(info["context_window"])
+            value = int(info["context_window"])
+            _context_window_cache[name] = (now, value)
+            return value
     except Exception as exc:  # noqa: BLE001 - a failed probe must not break a chat
         logger.info("Context window unavailable (%s); assuming %d",
                     type(exc).__name__, FALLBACK_CONTEXT_WINDOW)
@@ -194,6 +226,8 @@ def _candidate_chain() -> list[str]:
 
 async def _call_provider(provider: str, messages: list, temperature: float,
                          json_mode: bool, max_tokens: int) -> tuple[str, dict]:
+    if provider == "mock":
+        return "[mock]", {}
     if provider == "ollama":
         return await _call_ollama(messages, temperature, max_tokens, json_mode)
     if provider == "deepseek":
@@ -206,8 +240,6 @@ async def _call_provider(provider: str, messages: list, temperature: float,
 
 
 def _model_for(provider: str) -> str:
-    if provider == "ollama":
-        return OLLAMA_MODEL
     return provider_model(provider)
 
 
@@ -226,6 +258,7 @@ async def complete(
         return ("mock", "mock-model", "[mock]")
 
     errors: list[str] = []
+    public_error: str | None = None
     for provider in _candidate_chain():
         if provider not in ("ollama", "mock") and not _provider_is_configured(provider):
             # Not configured: say so once, then move on. A missing key is a
@@ -246,15 +279,24 @@ async def complete(
                          prompt_tokens=pt, completion_tokens=ct)
             return (provider, model, text)
         except Exception as exc:  # noqa: BLE001 - each provider may fail differently
+            if isinstance(getattr(exc, "public_message", None), str):
+                public_error = exc.public_message
             log_ai_event(provider, _model_for(provider), "complete", False, error=str(exc),
                          latency_ms=int((time.monotonic() - t0) * 1000), prompt_chars=chars)
             errors.append(f"{provider}: {type(exc).__name__}")
+            if getattr(exc, "no_fallback", False):
+                raise LLMProviderError(public_error or str(exc)) from exc
             logger.info("Provider %s unavailable (%s), trying the next one", provider, exc)
     logger.error("All LLM providers failed: %s", "; ".join(errors))
+    if public_error:
+        raise LLMProviderError(public_error)
     raise RuntimeError("No LLM provider answered (" + "; ".join(errors) + ")")
 
 
 async def _stream_provider(provider: str, messages: list, temperature: float, max_tokens: int):
+    if provider == "mock":
+        yield "[mock]"
+        return
     if provider == "ollama":
         async for chunk in _stream_ollama(messages, temperature, max_tokens):
             yield chunk
@@ -284,6 +326,7 @@ async def stream_complete(
     chars = _prompt_chars(messages)
     reply_chars = 0
     provider, model = "", ""
+    public_error: str | None = None
     try:
         if LLM_PROVIDER == "mock":
             yield ("mock", "mock-model", "[mock]")
@@ -309,9 +352,13 @@ async def stream_complete(
                              prompt_chars=chars, reply_chars=reply_chars)
                 return
             except Exception as exc:  # noqa: BLE001
+                if isinstance(getattr(exc, "public_message", None), str):
+                    public_error = exc.public_message
                 log_ai_event(candidate, _model_for(candidate), "stream", False, error=str(exc),
                              latency_ms=int((time.monotonic() - t0) * 1000),
                              prompt_chars=chars, reply_chars=reply_chars)
+                if getattr(exc, "no_fallback", False):
+                    raise LLMProviderError(public_error or str(exc)) from exc
                 if yielded:
                     # Tokens already reached the screen; switching provider now
                     # would duplicate the answer.
@@ -319,6 +366,8 @@ async def stream_complete(
                     raise
                 logger.info("Stream from %s unavailable (%s), trying the next one", candidate, exc)
                 errors.append(f"{candidate}: {type(exc).__name__}")
+        if public_error:
+            raise LLMProviderError(public_error)
         raise RuntimeError("No LLM provider answered (" + "; ".join(errors) + ")")
     except Exception as exc:
         log_ai_event(provider or "unknown", model, "stream", False, error=str(exc),
@@ -347,7 +396,7 @@ async def check_deepseek() -> bool:
         return False
 
 
-async def model_catalogue() -> dict:
+async def model_catalogue(for_provider: str | None = None) -> dict:
     """The models the provider offers right now, with what each can do.
 
     Read from the provider, never hard-coded: the list changes (deepseek-chat
@@ -356,7 +405,7 @@ async def model_catalogue() -> dict:
     cannot be reached the current choice is returned alone, marked as such —
     the screen then still shows what is in use instead of an empty select.
     """
-    provider = active_provider()
+    provider = (for_provider or active_provider()).strip().lower()
     current = _model_for(provider)
     if provider == "opencode":
         from app.opencode_provider import OpenCodeError, model_catalogue as opencode_models
@@ -368,6 +417,53 @@ async def model_catalogue() -> dict:
                 "models": [], "active": current, "provider": provider,
                 "from_provider": False, "note": str(exc),
             }
+    if provider in OPENCODE_DIRECT_PROVIDERS:
+        from app.opencode_console_provider import (
+            OpenCodeConsoleError,
+            free_model_message,
+            is_free_tier_model,
+            model_catalogue as opencode_console_models,
+        )
+
+        service = _console_service(provider)
+        label = "OpenCode Go" if service == "go" else "OpenCode Console"
+        try:
+            result = await opencode_console_models(service=service)
+        except OpenCodeConsoleError as exc:
+            unsupported = service == "zen" and is_free_tier_model(current)
+            return {
+                "models": [], "active": current, "provider": provider,
+                "from_provider": False, "active_supported": not unsupported,
+                "free_model_ids": [], "blocked_free_model_ids": [],
+                "note": free_model_message(current) if unsupported else str(exc),
+            }
+        models = [
+            {**model, "is_active": model["id"] == current}
+            for model in result["models"]
+        ]
+        ids = {model["id"] for model in models}
+        free_ids = set(result.get("free_model_ids", []))
+        blocked_ids = set(result.get("blocked_free_model_ids", []))
+        active_supported = current not in blocked_ids
+        if not active_supported:
+            note = free_model_message(current)
+        elif models:
+            note = ""
+        elif blocked_ids:
+            note = "Catalogul Console conține doar modele gratuite, disponibile numai prin clientul oficial OpenCode."
+        else:
+            note = f"{label} nu a returnat modele text compatibile."
+        return {
+            "models": models,
+            "active": current,
+            "provider": provider,
+            "from_provider": bool(result.get("from_provider", True)),
+            "active_listed": current in ids,
+            "active_supported": active_supported,
+            "free_model_ids": sorted(free_ids),
+            "blocked_free_model_ids": sorted(blocked_ids),
+            "note": note,
+        }
     if not provider_key(provider):
         return {"models": [], "active": current, "provider": provider, "from_provider": False,
                 "note": f"Fără {_OPENAI_COMPATIBLE.get(provider, {}).get('key_env', 'DEEPSEEK_API_KEY')} nu pot citi lista de modele."}
@@ -412,10 +508,11 @@ async def model_catalogue() -> dict:
     }
 
 
-def set_active_model(model_id: str) -> str:
-    """Remember the chosen model; empty falls back to the .env default."""
+def set_active_model(model_id: str, provider: str | None = None) -> str:
+    """Remember a model for the chosen provider; empty clears its override."""
     from app.db import get_db
 
+    target = (provider or active_provider()).strip().lower()
     conn = get_db()
     try:
         conn.execute(
@@ -425,13 +522,12 @@ def set_active_model(model_id: str) -> str:
                                               updated_at = excluded.updated_at""",
             # `deepseek_model` stays the DeepSeek slot it always was, so a
             # choice made before multi-provider support keeps working.
-            ["deepseek_model" if active_provider() == "deepseek"
-             else f"llm_model_{active_provider()}", model_id.strip()],
+            ["deepseek_model" if target == "deepseek" else f"llm_model_{target}", model_id.strip()],
         )
         conn.commit()
     finally:
         conn.close()
-    return active_model()
+    return active_model() if target == "deepseek" else provider_model(target)
 
 
 
@@ -577,6 +673,10 @@ def provider_key(provider: str) -> str:
     if provider == "custom":
         data = custom_provider()
         return (data or {}).get("api_key", "")
+    if provider in OPENCODE_DIRECT_PROVIDERS:
+        from app.opencode_console_provider import api_key
+
+        return api_key(service=_console_service(provider))
     spec = _OPENAI_COMPATIBLE.get(provider)
     return os.getenv(spec["key_env"], "") if spec else ""
 
@@ -588,6 +688,11 @@ def _provider_is_configured(provider: str) -> bool:
         from app.opencode_provider import is_configured
 
         return is_configured()
+    if provider in OPENCODE_DIRECT_PROVIDERS:
+        from app.opencode_console_provider import is_configured
+
+        return (is_configured(service=_console_service(provider))
+                and bool(provider_model(provider)))
     return bool(provider_key(provider))
 
 
@@ -603,6 +708,8 @@ def provider_model(provider: str) -> str:
         return chosen
     if provider == "ollama":
         return OLLAMA_MODEL
+    if provider == "mock":
+        return "mock-model"
     if provider == "deepseek":
         return active_model()
     if provider == "custom":
@@ -681,11 +788,11 @@ def provider_order() -> list[str]:
 def provider_catalogue() -> list[dict]:
     """Every provider the app knows about, and whether it is usable now."""
     out = []
-    for pid in ("deepseek", *_OPENAI_COMPATIBLE.keys(), "custom", "ollama", "opencode", "mock"):
+    for pid in ("deepseek", *_OPENAI_COMPATIBLE.keys(), "custom", "opencode_console", "opencode_go", "ollama", "opencode", "mock"):
         if pid == "deepseek":
             label, key, model = "DeepSeek", provider_key("deepseek"), active_model()
         elif pid == "ollama":
-            label, key, model = "Ollama (local)", "", OLLAMA_MODEL
+            label, key, model = "Ollama (local)", "", provider_model(pid)
         elif pid == "custom":
             data = custom_provider() or {}
             label, key, model = data.get("label") or "Personalizat", data.get("api_key", ""), data.get("model", "")
@@ -695,13 +802,19 @@ def provider_catalogue() -> list[dict]:
 
             label, key, model = "OpenCode (nativ)", "", provider_model(pid)
             configured = is_configured()
+        elif pid in OPENCODE_DIRECT_PROVIDERS:
+            from app.opencode_console_provider import is_configured
+
+            label = "OpenCode Go" if pid == "opencode_go" else "OpenCode Console"
+            key, model = "", provider_model(pid)
+            configured = is_configured(service=_console_service(pid)) and bool(model)
         elif pid == "mock":
             label = "Mock (offline)"
             amount = ("", "mock-model")
         else:
             spec = _OPENAI_COMPATIBLE[pid]
             label, key, model = spec["label"], provider_key(pid), provider_model(pid)
-        if pid not in ("custom", "opencode"):
+        if pid not in ("custom", "opencode", *OPENCODE_DIRECT_PROVIDERS):
             if pid == "mock":
                 label, key, model = "Mock (offline)", "", "mock-model"
             configured = pid in ("ollama", "mock") or bool(key)
@@ -731,6 +844,12 @@ def _provider_url(provider: str, *, models: bool = False) -> str:
         if not base:
             return ""
         return _custom_models_url(base) if models else _custom_chat_url(base)
+    if provider in OPENCODE_DIRECT_PROVIDERS:
+        from app.opencode_console_provider import chat_url, models_url
+
+        service = _console_service(provider)
+        return (models_url(service=service) if models
+                else chat_url(service=service))
     if provider == "deepseek":
         return DEEPSEEK_API_URL.replace("/chat/completions", "/models") if models else DEEPSEEK_API_URL
     spec = _OPENAI_COMPATIBLE.get(provider, {})
@@ -739,8 +858,16 @@ def _provider_url(provider: str, *, models: bool = False) -> str:
 
 async def _call_openai_compatible(provider: str, messages: list, temperature: float,
                                   json_mode: bool, max_tokens: int) -> tuple[str, dict]:
+    model_id = provider_model(provider)
+    service = ""
+    if provider in OPENCODE_DIRECT_PROVIDERS:
+        from app.opencode_console_provider import OpenCodeConsoleError, free_model_message, is_free_tier_model
+
+        service = _console_service(provider)
+        if service == "zen" and is_free_tier_model(model_id):
+            raise OpenCodeConsoleError(free_model_message(model_id), no_fallback=True)
     body = {
-        "model": provider_model(provider),
+        "model": model_id,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -748,28 +875,60 @@ async def _call_openai_compatible(provider: str, messages: list, temperature: fl
     }
     if json_mode:
         body["response_format"] = {"type": "json_object"}
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(_provider_url(provider), headers=_provider_headers(provider), json=body)
-        resp.raise_for_status()
+    if service:
+        from app.opencode_console_provider import request_details
+
+        url, headers = request_details(service=service)
+    else:
+        url, headers = _provider_url(provider), _provider_headers(provider)
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
+        resp = await client.post(url, headers=headers, json=body)
+        if service:
+            from app.opencode_console_provider import validate_response
+
+            validate_response(resp, model_id=model_id, service=service)
+        else:
+            resp.raise_for_status()
         data = resp.json()
         return data["choices"][0]["message"]["content"], data.get("usage") or {}
 
 
 async def _stream_openai_compatible(provider: str, messages: list, temperature: float, max_tokens: int):
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    model_id = provider_model(provider)
+    service = ""
+    if provider in OPENCODE_DIRECT_PROVIDERS:
+        from app.opencode_console_provider import (
+            OpenCodeConsoleError,
+            free_model_message,
+            is_free_tier_model,
+            request_details,
+        )
+
+        service = _console_service(provider)
+        if service == "zen" and is_free_tier_model(model_id):
+            raise OpenCodeConsoleError(free_model_message(model_id), no_fallback=True)
+        url, headers = request_details(service=service)
+    else:
+        url, headers = _provider_url(provider), _provider_headers(provider)
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
         async with client.stream(
             "POST",
-            _provider_url(provider),
-            headers=_provider_headers(provider),
+            url,
+            headers=headers,
             json={
-                "model": provider_model(provider),
+                "model": model_id,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "stream": True,
             },
         ) as resp:
-            resp.raise_for_status()
+            if service:
+                from app.opencode_console_provider import validate_response
+
+                validate_response(resp, model_id=model_id, service=service)
+            else:
+                resp.raise_for_status()
             async for chunk in _iter_sse_content(resp):
                 yield chunk
 
@@ -820,7 +979,7 @@ async def _stream_deepseek(messages: list, temperature: float, max_tokens: int):
 
 async def _call_ollama(messages: list, temperature: float, max_tokens: int, json_mode: bool = False) -> tuple[str, dict]:
     body = {
-        "model": OLLAMA_MODEL,
+        "model": provider_model("ollama"),
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -846,7 +1005,7 @@ async def _stream_ollama(messages: list, temperature: float, max_tokens: int):
             "POST",
             f"{OLLAMA_BASE_URL}/v1/chat/completions",
             json={
-                "model": OLLAMA_MODEL,
+                "model": provider_model("ollama"),
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,

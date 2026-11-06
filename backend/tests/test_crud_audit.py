@@ -263,7 +263,9 @@ def test_graph_excludes_archived_nodes_and_their_edges(client, entry):
     client.post("/api/relationships", json={"from_id": entry["id"], "to_id": other["id"], "label": "x"})
     graph = client.get("/api/relationships/graph").json()
     assert len(graph["nodes"]) == 2 and len(graph["edges"]) == 1
-    assert graph["nodes"][1]["color"] == "#8b5cf6", "importance 5 = violet"
+    critical_node = next(node for node in graph["nodes"] if node["id"] == other["id"])
+    assert critical_node["value"] == 5
+    assert critical_node["color"] == "#2c6f63", "importance 5 uses the graph's verdigris palette"
 
     client.put(f"/api/entries/{other['id']}", json={"archived": True})
     graph = client.get("/api/relationships/graph").json()

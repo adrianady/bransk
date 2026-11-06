@@ -36,8 +36,31 @@ fi
 
 # 0a. Un singur server per port. Două instanțe pe același port și aceeași bază
 #     SQLite (WAL) scriu una peste alta; dacă aici răspunde deja Bransk,
-#     spunem unde este și ieșim (launcher-ul deschide browserul).
+#     launcher-ul deschide browserul. În modul rețea verificăm și bind-ul și
+#     tokenul: un server localhost sau unul neprotejat nu satisface cererea -n.
 if curl -fsS -m 3 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+  if [ "$HOST" = "0.0.0.0" ]; then
+    LISTENERS="$(ss -ltnH "sport = :$PORT" 2>/dev/null || true)"
+    if ! printf '%s\n' "$LISTENERS" | awk -v suffix=":$PORT" '
+      $1 == "LISTEN" {
+        address = $4
+        if (length(address) >= length(suffix) && substr(address, length(address) - length(suffix) + 1) == suffix) {
+          sub(suffix "$", "", address)
+          if (address !~ /^127\./ && address != "::1" && address != "[::1]") exposed = 1
+        }
+      }
+      END { exit !exposed }
+    '; then
+      echo "Bransk răspunde pe portul $PORT, dar ascultă doar pe localhost. Oprește instanța și repornește cu: ./start.sh -n $PORT" >&2
+      exit 1
+    fi
+
+    AUTH_STATUS="$(curl -fsS -m 3 "http://127.0.0.1:$PORT/api/auth/status" 2>/dev/null || true)"
+    if ! printf '%s' "$AUTH_STATUS" | grep -Eq '"required"[[:space:]]*:[[:space:]]*true'; then
+      echo "Bransk este expus în rețea fără autentificare verificabilă. Oprește instanța și repornește cu ./start.sh -n $PORT pentru a activa tokenul." >&2
+      exit 1
+    fi
+  fi
   echo "Bransk rulează deja pe portul $PORT — nu pornesc o a doua instanță."
   echo "  http://localhost:$PORT"
   exit 0

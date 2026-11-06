@@ -21,3 +21,11 @@ CHRONOKG_DETAILED_REVIEW.md
 .coverage
 # OpenCode project config contains the API key — never commit it
 opencode.json
+
+# Audit/review documents live outside the repository (../docs-audit/), so the
+# repo carries only the runnable program.
+CHRONOKG_*.md
+documentation/
+
+# TypeScript incremental build cache
+frontend/*.tsbuildinfo

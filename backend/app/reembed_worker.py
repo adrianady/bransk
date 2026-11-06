@@ -82,7 +82,14 @@ def _pending_ids(active_dim: int) -> list[int]:
 
 def _repair_one_pass(active_dim: int) -> int:
     """Re-embed every pending chunk once. Returns how many were written."""
-    pending = _pending_ids(active_dim)
+    try:
+        pending = _pending_ids(active_dim)
+    except sqlite3.Error as exc:
+        # A missing/racing schema (tests, a just-created DB) must not kill the
+        # worker thread; the next rescan simply tries again.
+        _state["last_error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("Re-embed scan failed: %s", exc)
+        return 0
     _state["total"] = len(pending)
     _state["done"] = 0
     # Clear the previous error only when a pass actually starts, so a failure
@@ -117,6 +124,13 @@ def _repair_one_pass(active_dim: int) -> int:
                              [json.dumps(vec), row["id"]])
                 written += 1
             conn.commit()
+            # In-place UPDATEs are invisible to pdf_rag's (count, max id)
+            # cache sentinel; drop it so searches see the new vectors.
+            try:
+                from app.pdf_rag import invalidate_vector_cache
+                invalidate_vector_cache()
+            except Exception:  # noqa: BLE001 - cache invalidation is best-effort
+                pass
             _state["done"] = start + len(rows)
             if len(pending) > BATCH_SIZE:
                 time.sleep(PAUSE_SECONDS)

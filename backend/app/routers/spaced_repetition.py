@@ -54,10 +54,12 @@ def get_review_queue():
     conn = get_db()
     try:
         rows = conn.execute(
-            """SELECT * FROM spaced_repetition
-                WHERE (next_review IS NULL OR julianday(next_review) <= julianday('now'))
-                  AND entry_id IN (SELECT id FROM entries WHERE archived = 0)
-                ORDER BY next_review ASC"""
+            """SELECT sr.*, e.title AS entry_title, substr(e.content, 1, 300) AS content_preview
+                FROM spaced_repetition sr
+                JOIN entries e ON sr.entry_id = e.id
+                WHERE (sr.next_review IS NULL OR julianday(sr.next_review) <= julianday('now'))
+                  AND e.archived = 0
+                ORDER BY sr.next_review ASC"""
         ).fetchall()
         return [dict(r) for r in rows]
     finally:

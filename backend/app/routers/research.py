@@ -37,6 +37,8 @@ from app.models import (
     ResearchRequest,
     ResearchResult,
     ResearchStudy,
+    ScreeningDecisionInput,
+    ScreeningSummary,
 )
 from app.web_search import search_web, validate_url
 from app.studies_store import download_study_pdf, extract_pdf_url, pdf_path_for
@@ -621,13 +623,18 @@ async def run_research(topic: str, depth: str = "deep", save: bool = True) -> Re
         raise HTTPException(502, "Research produced no studies. The LLM provider may be unavailable.")
     prisma.studies_included = len(studies)
 
-    # Best-effort URL validation (only when web reachable, capped for speed)
+    # Best-effort URL validation (only when web reachable, capped for speed).
+    # Concurrent with a small semaphore: a dozen sequential probes over a
+    # slow link used to add a noticeable chunk of the deep-dive latency.
     if web_available:
-        validated = 0
-        for s in studies:
-            if s.url and validated < 12:
+        to_validate = [s for s in studies if s.url][:12]
+        sem = asyncio.Semaphore(4)
+
+        async def _validate(s):
+            async with sem:
                 s.url_validated = await validate_url(s.url)
-                validated += 1
+
+        await asyncio.gather(*(_validate(s) for s in to_validate))
 
     # 4. Synthesis (pooling + theory map)
     synth = await _llm_json(
@@ -762,14 +769,26 @@ def _save_research(result: ResearchResult, topic: str) -> None:
             created_ids.append(cur.lastrowid)
             sync_tags(conn, tags)
 
-        # Research report entry
-        cur = conn.execute(
-            """INSERT INTO entries (title, content, entry_date, tags, source, importance, study_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [f"Meta-analysis: {topic}", _render_report_markdown(result, topic), today, "research", "", 4, ""],
-        )
-        report_id = cur.lastrowid
-        created_ids.append(report_id)
+        # Research report entry — re-run on the same topic updates the existing
+        # report instead of stacking identical "Meta-analysis: {topic}" rows.
+        report_title = f"Meta-analysis: {topic}"
+        existing_report = conn.execute(
+            "SELECT id FROM entries WHERE title = ? AND archived = 0", [report_title]
+        ).fetchone()
+        if existing_report:
+            report_id = existing_report["id"]
+            conn.execute(
+                "UPDATE entries SET content = ?, entry_date = ?, updated_at = datetime('now') WHERE id = ?",
+                [_render_report_markdown(result, topic), today, report_id],
+            )
+        else:
+            cur = conn.execute(
+                """INSERT INTO entries (title, content, entry_date, tags, source, importance, study_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [report_title, _render_report_markdown(result, topic), today, "research", "", 4, ""],
+            )
+            report_id = cur.lastrowid
+            created_ids.append(report_id)
         sync_tags(conn, "research")
         result.report_entry_id = report_id
 
@@ -1076,6 +1095,100 @@ def list_studies(response: Response, limit: int = 100, offset: int = 0):
         ).fetchall()
         response.headers["X-Total-Count"] = str(total)
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── PRISMA screening ─────────────────────────────────────────────────────────
+
+@router.get("/studies/screening/summary", response_model=ScreeningSummary)
+def screening_summary():
+    """PRISMA flow numbers from the recorded screening decisions."""
+    conn = get_db()
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM entries WHERE {_STUDY_WHERE}"
+        ).fetchone()[0]
+        counts = {"include": 0, "exclude": 0, "maybe": 0}
+        for row in conn.execute("SELECT decision, COUNT(*) AS c FROM screening_decisions GROUP BY decision"):
+            if row["decision"] in counts:
+                counts[row["decision"]] = row["c"]
+        decided = counts["include"] + counts["exclude"] + counts["maybe"]
+        return ScreeningSummary(
+            studies_total=total,
+            included=counts["include"],
+            excluded=counts["exclude"],
+            maybe=counts["maybe"],
+            undecided=max(0, total - decided),
+        )
+    finally:
+        conn.close()
+
+
+@router.get("/studies/screening/decisions")
+def screening_decisions():
+    """All recorded decisions, keyed by entry id — one fetch for the grid."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT entry_id, decision, reason, updated_at FROM screening_decisions"
+        ).fetchall()
+        return {str(r["entry_id"]): dict(r) for r in rows}
+    finally:
+        conn.close()
+
+
+@router.get("/studies/{entry_id}/screening")
+def get_screening(entry_id: int):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT decision, reason, updated_at FROM screening_decisions WHERE entry_id = ?",
+            [entry_id],
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "No screening decision recorded for this study")
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@router.post("/studies/{entry_id}/screening")
+def set_screening(entry_id: int, data: ScreeningDecisionInput):
+    """Record the include/exclude/maybe judgement with its reason."""
+    conn = get_db()
+    try:
+        if not conn.execute(
+            f"SELECT id FROM entries WHERE id = ? AND {_STUDY_WHERE}", [entry_id]
+        ).fetchone():
+            raise HTTPException(404, "Study not found")
+        conn.execute(
+            """INSERT INTO screening_decisions (entry_id, decision, reason, updated_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(entry_id) DO UPDATE SET
+                    decision = excluded.decision,
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at""",
+            [entry_id, data.decision, data.reason.strip()],
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT entry_id, decision, reason, updated_at FROM screening_decisions WHERE entry_id = ?",
+            [entry_id],
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@router.delete("/studies/{entry_id}/screening", status_code=204)
+def clear_screening(entry_id: int):
+    conn = get_db()
+    try:
+        cur = conn.execute("DELETE FROM screening_decisions WHERE entry_id = ?", [entry_id])
+        conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "No screening decision recorded for this study")
     finally:
         conn.close()
 

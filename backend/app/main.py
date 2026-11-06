@@ -16,16 +16,21 @@ from fastapi.staticfiles import StaticFiles
 
 from app.auth import (
     PUBLIC_API_PATHS,
+    SESSION_COOKIE,
     extract_token,
+    session_matches,
     token_matches,
     token_required,
+    trusted_request_origin,
 )
 from app.db import init_db
 from app.routers import (
     entries, search, timeline, relationships,
     chat, tags, spaced_repetition, todos, reminders, thoughts,
-    research, theory, maintenance, ai, study_qa, project, sources
+    research, theory, maintenance, ai, study_qa, project, sources,
+    citations, highlights
 )
+from app.routers import auth as auth_router
 from app.routers.reminders import advance_overdue_recurring
 
 # Structured Python Logging Configuration
@@ -102,32 +107,58 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-ChronoKG-Token", "X-Requested-With"],
 )
 
-# ── Optional shared-token gate ─────────────────────────────────────────────
-# Registered after CORS, so it wraps it: a request is authorised before any
-# route is reached. With no CHRONOKG_AUTH_TOKEN in the environment this is a
-# pass-through and the app behaves exactly as before (local-first, no login).
+# ── Optional network authentication ────────────────────────────────────────
+# Registered after CORS, so it wraps it: a request is authorized before any
+# protected route is reached. With no CHRONOKG_AUTH_TOKEN this is a pass-through
+# and the app behaves exactly as before (local-first, no login).
 @app.middleware("http")
 async def require_api_token(request, call_next):
-    if not token_required():
-        return await call_next(request)
-
     path = request.url.path
+
+    async def continue_request():
+        response = await call_next(request)
+        if path.startswith("/api/auth/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    if not token_required():
+        return await continue_request()
+
     # Preflight requests carry no headers; the browser sends the real one next.
     # Static files and the SPA shell stay public so the login screen can load.
-    if (
-        request.method == "OPTIONS"
-        or not path.startswith("/api/")
-        or path in PUBLIC_API_PATHS
-    ):
-        return await call_next(request)
+    if request.method == "OPTIONS" or not path.startswith("/api/"):
+        return await continue_request()
 
-    if not token_matches(extract_token(request.headers, dict(request.query_params))):
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Autentificare necesară: token lipsă sau greșit."},
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return await call_next(request)
+    if path in PUBLIC_API_PATHS:
+        if path in {"/api/auth/login", "/api/auth/logout"} and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            if not trusted_request_origin(request):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Originea cererii nu este acceptată."},
+                    headers={"Cache-Control": "no-store"},
+                )
+        return await continue_request()
+
+    if token_matches(extract_token(request.headers, dict(request.query_params))):
+        return await continue_request()
+
+    if await anyio.to_thread.run_sync(session_matches, request.cookies.get(SESSION_COOKIE)):
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and not trusted_request_origin(request):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Originea cererii nu este acceptată."},
+                headers={"Cache-Control": "no-store"},
+            )
+        return await continue_request()
+
+    headers = {"WWW-Authenticate": "Bearer"}
+    if path.startswith("/api/auth/"):
+        headers["Cache-Control"] = "no-store"
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Autentificare necesară: token sau sesiune lipsă ori expirată."},
+        headers=headers,
+    )
 
 
 # Register API Routers
@@ -147,22 +178,15 @@ app.include_router(maintenance.router, prefix="/api", tags=["maintenance"])
 app.include_router(ai.router, prefix="/api", tags=["ai"])
 app.include_router(study_qa.router, prefix="/api", tags=["study_qa"])
 app.include_router(project.router, prefix="/api", tags=["project"])
+app.include_router(citations.router, prefix="/api", tags=["citations"])
+app.include_router(highlights.router, prefix="/api", tags=["highlights"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
+app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
 
 
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": "0.1.0"}
-
-
-@app.get("/api/auth/status")
-async def auth_status():
-    """Whether this instance asks for a token — reachable without one.
-
-    The SPA calls this before its first request: `required: false` means the
-    usual local-first experience, `true` means it has to show the token prompt.
-    """
-    return {"required": token_required()}
 
 
 # --- Serve the built frontend (single link on the phone) --------------------

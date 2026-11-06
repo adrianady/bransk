@@ -523,6 +523,7 @@ async def bulk_import_studies(
                     "pdf_url": item.get("pdf_url", ""),
                     "source": item.get("source", "") or url,
                     "pdf_downloaded": False,
+                    "pdf_index_failed": False,
                 })
             except Exception as ins_exc:
                 logger.error("Failed inserting study '%s': %s", title, ins_exc)
@@ -536,11 +537,12 @@ async def bulk_import_studies(
 
     # 3. Automated background PDF / Full-text acquisition if requested
     pdfs_downloaded = 0
+    pdfs_index_failed = 0
     if auto_download_pdfs and imported_records:
         from app.fulltext import fetch_fulltext
 
         async def _download_one(rec: dict):
-            nonlocal pdfs_downloaded
+            nonlocal pdfs_downloaded, pdfs_index_failed
             eid = rec["id"]
             pdf_url = rec.get("pdf_url")
             fname = None
@@ -559,9 +561,18 @@ async def bulk_import_studies(
                     conn_u.commit()
                 finally:
                     conn_u.close()
-                await index_pdf(eid, pdf_path_for(eid))
                 rec["pdf_downloaded"] = True
                 pdfs_downloaded += 1
+                # Persisted PDFs remain available to the reader even if RAG
+                # indexing fails; report download success truthfully and log
+                # the independent indexing failure rather than swallowing it
+                # in gather(return_exceptions=True).
+                try:
+                    await index_pdf(eid, pdf_path_for(eid))
+                except Exception as index_exc:
+                    rec["pdf_index_failed"] = True
+                    pdfs_index_failed += 1
+                    logger.warning("PDF indexing after import failed for #%d: %s", eid, index_exc)
                 return
 
             # Fallback to multi-repository full-text hunter (OpenAlex, Unpaywall, PMC, arXiv)
@@ -570,6 +581,9 @@ async def bulk_import_studies(
                 if ft_res.get("status") == "pdf":
                     rec["pdf_downloaded"] = True
                     pdfs_downloaded += 1
+                    if ft_res.get("index_error"):
+                        rec["pdf_index_failed"] = True
+                        pdfs_index_failed += 1
             except Exception as ft_exc:
                 logger.info("Fulltext acquisition fallback failed for #%d: %s", eid, ft_exc)
 
@@ -587,6 +601,8 @@ async def bulk_import_studies(
         "total_imported": len(imported_records),
         "total_skipped": len(skipped_records),
         "pdfs_downloaded": pdfs_downloaded,
+        "pdfs_failed": sum(not rec["pdf_downloaded"] for rec in imported_records) if auto_download_pdfs else 0,
+        "pdfs_index_failed": pdfs_index_failed,
     }
 
 

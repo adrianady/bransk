@@ -32,7 +32,10 @@ LLAMA_EMBED_URL = os.getenv("LLAMA_EMBED_URL", "http://127.0.0.1:8199")
 LLAMA_EMBED_MODEL = os.getenv("LLAMA_EMBED_MODEL", "bge-m3")
 
 EMBED_TIMEOUT = 15.0
-EMBED_TEXT_LIMIT = 600
+# Must cover the PDF chunk size (pdf_rag.CHUNK_SIZE = 900) or the tail of
+# every chunk is silently missing from its vector. ~1000 chars is still far
+# below both bge-m3 (8k tokens) and nomic-embed-text (2k tokens) limits.
+EMBED_TEXT_LIMIT = 1000
 EMBED_CACHE_CAP = 4000
 
 # How long a FAILED llama.cpp probe is remembered before it is retried. Short

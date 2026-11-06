@@ -9,3 +9,6 @@ python-dotenv>=1.1.0
 # PDF text extraction for study RAG (PDF -> chunks -> questions)
 pymupdf>=1.24.0
 pypdf>=5.0.0
+
+# Thesis export to .docx (Word) for the university
+python-docx>=1.1.0

@@ -4,7 +4,9 @@ import {
   ApiError,
   api,
   clearAuthToken,
+  fetchAuthStatus,
   getAuthToken,
+  loginSharedAccount,
   setAuthToken,
 } from './api'
 
@@ -77,6 +79,39 @@ describe('error handling', () => {
 })
 
 describe('auth token', () => {
+  it('sends cookie credentials with API requests while retaining bearer compatibility', async () => {
+    setAuthToken('abc123')
+    const fetchMock = stubFetch(async () => jsonResponse([]))
+
+    await api.entries.list()
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.credentials).toBe('include')
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer abc123')
+  })
+
+  it('checks auth status with cookies and the stored bearer token', async () => {
+    setAuthToken('existing-token')
+    const fetchMock = stubFetch(async () => jsonResponse({ required: true }))
+
+    await fetchAuthStatus()
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.credentials).toBe('include')
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer existing-token')
+  })
+
+  it('does not treat a rejected password as a rejected bearer token', async () => {
+    const listener = vi.fn()
+    window.addEventListener(AUTH_EVENT, listener)
+    stubFetch(async () => jsonResponse({ detail: 'Nume sau parolă incorectă' }, 401))
+
+    await expect(loginSharedAccount('owner', 'wrong-password')).rejects.toMatchObject({ status: 401 })
+    expect(listener).not.toHaveBeenCalled()
+
+    window.removeEventListener(AUTH_EVENT, listener)
+  })
+
   it('sends the stored token as a bearer header', async () => {
     setAuthToken('abc123')
     const fetchMock = stubFetch(async () => jsonResponse([]))
@@ -128,10 +163,11 @@ describe('auth token', () => {
     expect(getAuthToken()).toBe('')
   })
 
-  it('puts the token in the PDF URL because the browser cannot send headers', () => {
+  it('keeps the access token out of the PDF URL and exposes it as an auth header', () => {
     expect(api.studies.pdfUrl(5)).toBe('/api/studies/5/pdf')
-    setAuthToken('a b')
-    expect(api.studies.pdfUrl(5)).toBe('/api/studies/5/pdf?token=a%20b')
+    setAuthToken('private-token')
+    expect(api.studies.pdfUrl(5)).toBe('/api/studies/5/pdf')
+    expect(api.studies.pdfHeaders()).toEqual({ Authorization: 'Bearer private-token' })
   })
 })
 
@@ -164,5 +200,41 @@ describe('studies pagination', () => {
 
     expect(all.items.map(i => i.id)).toEqual([1, 2, 3])
     expect(requested).toHaveLength(2)
+  })
+})
+
+describe('OpenCode Console API contract', () => {
+  it('posts the Console key only in the authenticated configuration body', async () => {
+    const secret = 'console-test-key'
+    const fetchMock = stubFetch(async () => jsonResponse({
+      configured: true,
+      base_url: 'https://opencode.ai/inference',
+      has_key: true,
+    }))
+
+    await api.ai.saveOpenCodeConsole({
+      base_url: 'https://opencode.ai/inference',
+      api_key: secret,
+    })
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/ai/opencode-console')
+    expect(url).not.toContain(secret)
+    expect(JSON.parse(String(init.body))).toEqual({
+      base_url: 'https://opencode.ai/inference',
+      api_key: secret,
+    })
+    expect(localStorage.getItem('opencode-console-key')).toBeNull()
+  })
+
+  it('can save a Console model without switching providers', async () => {
+    const fetchMock = stubFetch(async () => jsonResponse({ active: 'console/text-small', cleared: false }))
+
+    await api.ai.setModel('console/text-small', 'opencode_console')
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      model_id: 'console/text-small',
+      provider: 'opencode_console',
+    })
   })
 })

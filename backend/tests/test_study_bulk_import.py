@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
@@ -6,6 +7,7 @@ import app.db as db_module
 from app.db import get_db, init_db
 from app.main import app
 from app.study_import import (
+    bulk_import_studies,
     bulk_delete_studies,
     extract_identifiers,
     find_duplicate_study,
@@ -28,6 +30,111 @@ def db_conn(client):
         yield conn
     finally:
         conn.close()
+
+
+def test_bulk_import_persists_downloaded_pdf_and_indexes_it(client, tmp_path, monkeypatch):
+    import app.studies_store as stores
+    import app.study_import as study_import
+
+    studies_dir = tmp_path / "studies"
+    studies_dir.mkdir()
+    monkeypatch.setattr(stores, "STUDIES_DIR", studies_dir)
+
+    async def fake_download(entry_id, _url, _title):
+        filename = f"{entry_id}-imported.pdf"
+        (studies_dir / filename).write_bytes(b"%PDF-1.4\n")
+        return filename
+
+    monkeypatch.setattr(study_import, "download_study_pdf", fake_download)
+    index_pdf = AsyncMock(return_value=4)
+    monkeypatch.setattr(study_import, "index_pdf", index_pdf)
+
+    result = asyncio.run(bulk_import_studies(
+        [{"title": "Imported PDF study", "pdf_url": "https://example.org/paper.pdf"}],
+        auto_download_pdfs=True,
+    ))
+
+    imported = result["imported"][0]
+    assert result["pdfs_downloaded"] == 1
+    assert imported["pdf_downloaded"] is True
+    expected_path = studies_dir / f"{imported['id']}-imported.pdf"
+    assert expected_path.read_bytes().startswith(b"%PDF-")
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT pdf_path FROM entries WHERE id = ?", [imported["id"]]).fetchone()
+        assert row["pdf_path"] == expected_path.name
+    finally:
+        conn.close()
+    index_pdf.assert_awaited_once_with(imported["id"], expected_path)
+
+
+def test_bulk_import_reports_pdf_acquisition_failures(client, monkeypatch):
+    import app.study_import as study_import
+    import app.fulltext as fulltext
+
+    monkeypatch.setattr(study_import, "download_study_pdf", AsyncMock(return_value=None))
+    monkeypatch.setattr(fulltext, "fetch_fulltext", AsyncMock(return_value={"status": "none"}))
+
+    result = asyncio.run(bulk_import_studies(
+        [{"title": "Study without an open PDF", "pdf_url": "https://example.org/paper.pdf"}],
+        auto_download_pdfs=True,
+    ))
+
+    assert result["total_imported"] == 1
+    assert result["pdfs_downloaded"] == 0
+    assert result["pdfs_failed"] == 1
+    assert result["imported"][0]["pdf_downloaded"] is False
+
+
+def test_bulk_import_keeps_saved_pdf_and_reports_indexing_failure(client, tmp_path, monkeypatch):
+    import app.studies_store as stores
+    import app.study_import as study_import
+
+    studies_dir = tmp_path / "studies"
+    studies_dir.mkdir()
+    monkeypatch.setattr(stores, "STUDIES_DIR", studies_dir)
+
+    async def fake_download(entry_id, _url, _title):
+        filename = f"{entry_id}-index-failure.pdf"
+        (studies_dir / filename).write_bytes(b"%PDF-1.4\n")
+        return filename
+
+    monkeypatch.setattr(study_import, "download_study_pdf", fake_download)
+    monkeypatch.setattr(study_import, "index_pdf", AsyncMock(side_effect=RuntimeError("index failed")))
+
+    result = asyncio.run(bulk_import_studies(
+        [{"title": "Downloaded but not indexed", "pdf_url": "https://example.org/paper.pdf"}],
+        auto_download_pdfs=True,
+    ))
+
+    imported = result["imported"][0]
+    assert result["pdfs_downloaded"] == 1
+    assert result["pdfs_failed"] == 0
+    assert result["pdfs_index_failed"] == 1
+    assert imported["pdf_downloaded"] is True
+    assert imported["pdf_index_failed"] is True
+    assert (studies_dir / f"{imported['id']}-index-failure.pdf").is_file()
+
+
+def test_bulk_import_propagates_fallback_pdf_indexing_failure(client, monkeypatch):
+    import app.study_import as study_import
+    import app.fulltext as fulltext
+
+    monkeypatch.setattr(study_import, "download_study_pdf", AsyncMock(return_value=None))
+    monkeypatch.setattr(fulltext, "fetch_fulltext", AsyncMock(return_value={
+        "status": "pdf",
+        "index_error": True,
+    }))
+
+    result = asyncio.run(bulk_import_studies(
+        [{"title": "Fallback PDF with index failure", "pdf_url": "https://example.org/paper.pdf"}],
+        auto_download_pdfs=True,
+    ))
+
+    assert result["pdfs_downloaded"] == 1
+    assert result["pdfs_failed"] == 0
+    assert result["pdfs_index_failed"] == 1
+    assert result["imported"][0]["pdf_index_failed"] is True
 
 
 def test_extract_identifiers():

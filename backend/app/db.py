@@ -156,6 +156,33 @@ def init_db():
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- One optional shared browser account for remote-device access.
+            -- Passwords are stored only as salted scrypt hashes; session IDs are
+            -- stored only as SHA-256 digests so a DB read cannot replay them.
+            CREATE TABLE IF NOT EXISTS auth_account (
+                id            INTEGER PRIMARY KEY CHECK(id = 1),
+                username      TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at    INTEGER NOT NULL,
+                updated_at    INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                session_hash TEXT PRIMARY KEY,
+                username     TEXT NOT NULL,
+                created_at   INTEGER NOT NULL,
+                expires_at   INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at);
+            CREATE TABLE IF NOT EXISTS auth_login_attempts (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip_key       TEXT NOT NULL,
+                attempted_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_peer_time
+                ON auth_login_attempts(ip_key, attempted_at);
+            CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_time
+                ON auth_login_attempts(attempted_at);
+
             -- PDF full-text chunks for semantic retrieval (RAG over papers)
             CREATE TABLE IF NOT EXISTS documents (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -382,6 +409,39 @@ def init_db():
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+
+        # ── Migration: PDF highlights (2026-11) ──
+        # Visual anchors made in the native reader: a saved text selection
+        # with its page. The chat and study QA read them as user evidence,
+        # and the thesis map can link them like document fragments.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pdf_highlights (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+                page_number INTEGER,
+                quote       TEXT NOT NULL DEFAULT '',
+                note        TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_highlights_entry ON pdf_highlights(entry_id)"
+        )
+
+        # ── Migration: PRISMA screening decisions (2026-11) ──
+        # The research pipeline produced protocol + PrismaFlow, but nobody
+        # could record the actual include/exclude judgement per study. One
+        # decision per study keeps the flow auditable.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS screening_decisions (
+                entry_id   INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+                decision   TEXT NOT NULL CHECK(decision IN ('include', 'exclude', 'maybe')),
+                reason     TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
     finally:
         conn.close()
 

@@ -183,13 +183,18 @@ def test_basic_auth_requires_pinned_server_url(configured, monkeypatch):
 
 
 def test_prompt_uses_async_native_session_sse_and_denies_tools(configured, monkeypatch):
-    opencode.set_selected_model("openai::gpt-test")
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         assert request.headers.get("authorization") == "Basic " + base64.b64encode(b"opencode:secret-test-password").decode()
         path = request.url.path
+        if path == "/api/model" and request.method == "GET":
+            return httpx.Response(200, json=[
+                {"providerID": "openai", "modelID": "gpt-test", "name": "GPT test", "limit": {"context": 32000}},
+            ])
+        if path == "/api/model/default" and request.method == "GET":
+            return httpx.Response(200, json={"providerID": "openai", "modelID": "gpt-test"})
         if path == "/api/session" and request.method == "POST":
             assert request.url.params["location[directory]"] == "/tmp/chronokg-project"
             assert json.loads(request.content) == {"title": "Bransk response"}
@@ -220,12 +225,27 @@ def test_prompt_uses_async_native_session_sse_and_denies_tools(configured, monke
 
     _patch_http(monkeypatch, handler)
 
+    from fastapi.testclient import TestClient
+
+    from app.db import init_db
+    from app.main import app
+
+    init_db()
+    selected = TestClient(app).post("/api/ai/model", json={
+        "model_id": "openai::gpt-test",
+        "provider": "opencode",
+    })
+    assert selected.status_code == 200
+    assert selected.json() == {"active": "openai::gpt-test", "cleared": False}
+    assert opencode.selected_model() == "openai::gpt-test"
+    assert llm.provider_model("opencode") == "openai::gpt-test"
+
     async def collect():
         return [chunk async for chunk in opencode.stream_complete([{"role": "user", "content": "Întrebare"}])]
 
     chunks = asyncio.run(collect())
     assert chunks == ["Răspuns ", "test."]
-    assert [request.method for request in seen] == ["POST", "PATCH", "GET", "POST", "DELETE"]
+    assert [request.method for request in seen] == ["GET", "GET", "POST", "PATCH", "GET", "POST", "DELETE"]
     assert seen[-1].method == "DELETE"
 
 

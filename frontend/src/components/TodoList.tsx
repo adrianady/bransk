@@ -26,11 +26,15 @@ export function TodoList({ onSelectEntry }: Props) {
     try {
       const [items, entries, due] = await Promise.all([
         api.todos.list(),
+        // Needed only for the create dropdown; the todo rows carry their own
+        // joined entry_title now, and the list ships previews instead of
+        // full content since the 2026-11 projection fix.
         api.entries.list({ limit: 500 }),
         api.reminders.due(),
       ])
       const titleMap: Record<number, string> = {}
-      entries.forEach(e => { titleMap[e.id] = e.title })
+      items.forEach(t => { if (t.entry_title) titleMap[t.entry_id] = t.entry_title })
+      entries.forEach(e => { if (!titleMap[e.id]) titleMap[e.id] = e.title })
       setEntryTitles(titleMap)
       setAllEntries(entries)
       setDueReminders(due.filter(r => !r.notified))

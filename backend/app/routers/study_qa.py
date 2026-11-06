@@ -40,6 +40,9 @@ Tags: {tags}
 Content:
 {content}
 
+=== HIGHLIGHTS MARCATE DE UTILIZATOR ÎN PDF (prioritate maximă — arată ce a considerat el important) ===
+{highlights}
+
 === INDEXED PDF CHUNKS (most relevant first) ===
 {chunks}
 
@@ -67,27 +70,26 @@ def _study_chunks(entry_id: int, query: str, top_k: int = 6) -> list[dict]:
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT id, chunk_index, page_number, content FROM documents WHERE entry_id = ? ORDER BY chunk_index",
+            "SELECT id, chunk_index, page_number, content, embedding FROM documents WHERE entry_id = ? ORDER BY chunk_index",
             [entry_id],
         ).fetchall()
     finally:
         conn.close()
     if not rows:
         return []
-    texts = [query] + [r["content"] for r in rows]
-    vectors = embed(texts)
-    if vectors is None:
+
+    def _terms(s: str) -> set[str]:
+        folded = (
+            (s or "").lower()
+            .replace("ă", "a").replace("â", "a").replace("î", "i")
+            .replace("ș", "s").replace("ş", "s").replace("ț", "t").replace("ţ", "t")
+        )
+        return {w for w in re.findall(r"[a-z0-9]{3,}", folded)}
+
+    def _keyword_rank() -> list[dict]:
         # No embedding backend: rank by keyword overlap so the chunks that
         # actually mention the question's words come first, instead of
         # blindly taking the opening pages of the paper.
-        def _terms(s: str) -> set[str]:
-            folded = (
-                (s or "").lower()
-                .replace("ă", "a").replace("â", "a").replace("î", "i")
-                .replace("ș", "s").replace("ş", "s").replace("ț", "t").replace("ţ", "t")
-            )
-            return {w for w in re.findall(r"[a-z0-9]{3,}", folded)}
-
         q_terms = _terms(query)
         scored_fallback = []
         for r in rows:
@@ -100,6 +102,48 @@ def _study_chunks(entry_id: int, query: str, top_k: int = 6) -> list[dict]:
              "score": round(hits / max(1, len(q_terms)), 2)}
             for hits, r in scored_fallback[:top_k]
         ]
+
+    def _package(score: float, r) -> dict:
+        return {"document_id": r["id"], "chunk_index": r["chunk_index"],
+                "page_number": r["page_number"], "content": r["content"],
+                "score": round(float(score), 4)}
+
+    # Fast path: reuse the vectors stored at indexing time, so each question
+    # embeds only the query instead of re-embedding every chunk (10-50x less
+    # CPU on an 89-chunk paper).
+    qvectors = embed([query])
+    if qvectors:
+        qv = qvectors[0]
+        stored: list = []
+        complete = True
+        for r in rows:
+            try:
+                vec = json.loads(r["embedding"] or "[]")
+            except Exception:
+                vec = None
+            if not vec or len(vec) != len(qv):
+                # Missing vectors, or leftovers from another embedding backend:
+                # cosine against them would be noise.
+                complete = False
+                break
+            stored.append((r, vec))
+        if complete:
+            scored = []
+            for r, vec in stored:
+                try:
+                    score = cosine(qv, vec)
+                except Exception:
+                    score = 0.0
+                scored.append((score, r))
+            scored.sort(key=lambda item: item[0], reverse=True)
+            return [_package(s, r) for s, r in scored[:top_k]]
+
+    # Legacy path: stored vectors unusable — re-embed the chunks (the old
+    # behaviour), or fall back to keywords when there is no backend at all.
+    texts = [query] + [r["content"] for r in rows]
+    vectors = embed(texts)
+    if vectors is None:
+        return _keyword_rank()
     qv = vectors[0]
     scored = []
     for i, r in enumerate(rows):
@@ -107,15 +151,9 @@ def _study_chunks(entry_id: int, query: str, top_k: int = 6) -> list[dict]:
             score = cosine(qv, vectors[i + 1])
         except Exception:
             score = 0.0
-        scored.append((score, {
-            "document_id": r["id"],
-            "chunk_index": r["chunk_index"],
-            "page_number": r["page_number"],
-            "content": r["content"],
-            "score": round(float(score), 4),
-        }))
+        scored.append((score, r))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [c for _, c in scored[:top_k]]
+    return [_package(s, r) for s, r in scored[:top_k]]
 
 
 def _audit_study(entry: dict, indexed_chunks: int) -> dict:
@@ -182,6 +220,16 @@ async def study_qa(entry_id: int, body: dict):
         if not row:
             raise HTTPException(404, "Study not found")
         entry = dict(row)
+        # The user's own highlights outrank retrieved chunks: they mark what
+        # the reader already judged important in this paper.
+        try:
+            hl_rows = conn.execute(
+                """SELECT page_number, quote, note FROM pdf_highlights
+                    WHERE entry_id = ? ORDER BY COALESCE(page_number, 0), id""",
+                [entry_id],
+            ).fetchall()
+        except Exception:
+            hl_rows = []
     finally:
         conn.close()
 
@@ -200,6 +248,15 @@ async def study_qa(entry_id: int, body: dict):
     if not chunks_md:
         chunks_md = "(nu există chunks indexați pentru acest studiu — descarcă și indexează PDF-ul mai întâi)"
 
+    if hl_rows:
+        highlights_md = ""
+        for h in hl_rows:
+            pg = f"pagina {h['page_number']}" if h["page_number"] else "pagină necunoscută"
+            note = f" — notiță: {h['note']}" if h["note"] else ""
+            highlights_md += f"- [{pg}]: \"{h['quote']}\"{note}\n"
+    else:
+        highlights_md = "(utilizatorul nu a evidențiat încă pasaje din acest PDF)"
+
     entry_content = (entry.get("content") or "")[:2500]
 
     messages = [
@@ -211,6 +268,7 @@ async def study_qa(entry_id: int, body: dict):
                 authors=entry.get("authors") or "n/d",
                 tags=entry.get("tags") or "",
                 content=entry_content,
+                highlights=highlights_md,
                 chunks=chunks_md,
                 question=question,
             ),
@@ -220,7 +278,6 @@ async def study_qa(entry_id: int, body: dict):
 
     if LLM_PROVIDER == "mock":
         answer = f"(mod offline) Am primit întrebarea: {question}. Pentru un răspuns real, configurează Ollama sau DeepSeek."
-        sources = []
     else:
         try:
             _, _, text = await llm_complete(messages, temperature=0.2, max_tokens=1500)
@@ -228,18 +285,21 @@ async def study_qa(entry_id: int, body: dict):
         except Exception as exc:
             logger.error("Study QA LLM failed: %s", exc)
             raise HTTPException(503, "LLM unavailable for answering the question")
-        sources = [
-            {
-                "document_id": c["document_id"],
-                "entry_id": entry_id,
-                "chunk_index": c["chunk_index"],
-                "page_number": c.get("page_number"),
-                "page_verified": c.get("page_number") is not None,
-                "preview": c["content"][:300].replace("\n", " "),
-                "score": c.get("score", 0.0),
-            }
-            for c in chunks
-        ]
+
+    # Sources stay visible even offline: "0 surse" would read as "the PDF is
+    # not indexed" when the chunks were actually found.
+    sources = [
+        {
+            "document_id": c["document_id"],
+            "entry_id": entry_id,
+            "chunk_index": c["chunk_index"],
+            "page_number": c.get("page_number"),
+            "page_verified": c.get("page_number") is not None,
+            "preview": c["content"][:300].replace("\n", " "),
+            "score": c.get("score", 0.0),
+        }
+        for c in chunks
+    ]
 
     return {
         "entry_id": entry_id,
@@ -280,6 +340,107 @@ def study_sources(entry_id: int, limit: int = 200):
         return {"entry_id": entry_id, "title": entry["title"], "sources": sources}
     finally:
         conn.close()
+
+
+_APPRAISAL_PROMPT = """Estimezi metodologia unui studiu științific, pe baza textului de mai jos (metadate + fragmente din PDF).
+
+Răspunde EXCLUSIV cu un obiect JSON, fără alte explicații:
+{{"design": "<RCT|cohort|case-control|cross-sectional|systematic review|meta-analysis|qualitative|other>",
+   "effect_direction": "<positive|negative|mixed|null>",
+   "quality": <1-5>,
+   "justification": "<1-3 propoziții, în română, cu motivele estimării>"}}
+
+Convenții: „quality" apreciază rigurozitatea metodologică (5 = RCT amplu cu preregistrare și pierderi mici; 1 = opinie/fără metodă).
+„effect_direction" descrie rezultatul principal raportat de autori, nu ceea ce sperau ei.
+
+=== STUDIU ===
+Title: {title}
+Authors: {authors}
+Content:
+{content}
+
+=== FRAGMENTE DIN PDF ===
+{chunks}
+"""
+
+
+@router.post("/studies/{entry_id}/ai-appraisal")
+async def ai_appraisal(entry_id: int):
+    """Assisted creation: estimate design / effect direction / quality.
+
+    The form asks the user for methodological fields nobody remembers how to
+    fill; the model proposes values from the study's own text (never from
+    general knowledge) and the user keeps the final say in the editor.
+    """
+    if LLM_PROVIDER == "mock":
+        raise HTTPException(503, "Evaluarea AI necesită un provider configurat (DeepSeek / Ollama / OpenCode).")
+
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM entries WHERE id = ? AND archived = 0", [entry_id]).fetchone()
+        if not row:
+            raise HTTPException(404, "Study not found")
+        entry = dict(row)
+        chunk_rows = conn.execute(
+            "SELECT content FROM documents WHERE entry_id = ? ORDER BY chunk_index LIMIT 3",
+            [entry_id],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    chunks_md = "\n".join(
+        f"- {(r['content'] or '')[:800]}" for r in chunk_rows
+    ) or "(PDF neindexat — estimarea se bazează doar pe metadate și conținut)"
+
+    messages = [{
+        "role": "system",
+        "content": _APPRAISAL_PROMPT.format(
+            title=entry.get("title") or "n/d",
+            authors=entry.get("authors") or "n/d",
+            content=(entry.get("content") or "")[:2500],
+            chunks=chunks_md,
+        ),
+    }]
+    try:
+        _, _, text = await llm_complete(messages, temperature=0.1, max_tokens=400)
+    except Exception as exc:
+        logger.error("AI appraisal failed for entry %s: %s", entry_id, exc)
+        raise HTTPException(503, "LLM unavailable for the appraisal")
+
+    # The model may wrap the JSON in prose or code fences; take the object.
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise HTTPException(502, "The model did not return a usable appraisal")
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        raise HTTPException(502, "The model returned malformed appraisal JSON")
+
+    design = str(parsed.get("design") or "").strip()[:100]
+    effect = str(parsed.get("effect_direction") or "").strip().lower()
+    if effect not in ("positive", "negative", "mixed", "null"):
+        effect = ""
+    try:
+        quality = max(1, min(5, int(parsed.get("quality"))))
+    except (TypeError, ValueError):
+        quality = None
+    justification = str(parsed.get("justification") or "").strip()[:1000]
+
+    if design or effect or quality:
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE entries SET design = COALESCE(NULLIF(?, ''), design),"
+                " effect_direction = COALESCE(NULLIF(?, ''), effect_direction),"
+                " quality = COALESCE(?, quality), updated_at = datetime('now') WHERE id = ?",
+                [design, effect, quality, entry_id],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    return {"entry_id": entry_id, "design": design, "effect_direction": effect,
+            "quality": quality, "justification": justification}
 
 
 @router.get("/studies/{entry_id}/check")

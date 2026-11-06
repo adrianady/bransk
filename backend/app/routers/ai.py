@@ -1,9 +1,10 @@
 """AI observability endpoints: call event log + provider/embedding status."""
+import json
 import logging
 
 import anyio
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.db import get_db
@@ -83,6 +84,7 @@ async def ai_status():
 
 class ModelChoice(BaseModel):
     model_id: str = Field(..., max_length=200)
+    provider: str | None = Field(None, max_length=40)
 
 
 class ProviderChoice(BaseModel):
@@ -127,6 +129,64 @@ async def ai_opencode_save(body: OpenCodeConfig):
         return save_config(body.base_url, body.directory)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+async def _save_direct_config(request: Request, service: str, label: str):
+    """Persist one Console/Go URL and key; only key presence is returned."""
+    from app.opencode_console_provider import save_config
+
+    raw = bytearray()
+    try:
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 2048:
+                raise HTTPException(413, f"Cererea de configurare {label} este prea mare.")
+            raw.extend(chunk)
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, f"Corpul cererii pentru {label} nu este JSON valid.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, f"Corpul cererii pentru {label} trebuie să fie un obiect JSON.")
+    if set(body) - {"base_url", "api_key", "clear_key"}:
+        raise HTTPException(400, f"Corpul cererii pentru {label} conține câmpuri necunoscute.")
+    base_url = body.get("base_url")
+    api_key = body.get("api_key")
+    clear_key = body.get("clear_key", False)
+    if not isinstance(base_url, str):
+        raise HTTPException(400, f"Adresa API {label} trebuie să fie text.")
+    if api_key is not None and not isinstance(api_key, str):
+        raise HTTPException(400, f"Cheia API {label} trebuie să fie text.")
+    if not isinstance(clear_key, bool):
+        raise HTTPException(400, "Opțiunea de ștergere a cheii trebuie să fie booleană.")
+    try:
+        return save_config(base_url, api_key, clear_key=clear_key, service=service)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/ai/opencode-console")
+async def ai_opencode_console_get():
+    """Return Console settings without ever returning the Bearer key."""
+    from app.opencode_console_provider import public_config
+
+    return public_config()
+
+
+@router.post("/ai/opencode-console")
+async def ai_opencode_console_save(request: Request):
+    return await _save_direct_config(request, "zen", "OpenCode Console")
+
+
+@router.get("/ai/opencode-go")
+async def ai_opencode_go_get():
+    """Return OpenCode Go settings; the subscription key itself is never returned."""
+    from app.opencode_console_provider import public_config
+
+    return public_config(service="go")
+
+
+@router.post("/ai/opencode-go")
+async def ai_opencode_go_save(request: Request):
+    return await _save_direct_config(request, "go", "OpenCode Go")
 
 
 @router.get("/ai/custom")
@@ -192,7 +252,7 @@ async def ai_custom_save(body: CustomProvider):
         raise HTTPException(400, str(exc)) from exc
     active = set_active_provider("custom") if body.activate else active_provider()
     if body.model:
-        set_active_model(body.model)
+        set_active_model(body.model, provider="custom")
     return {
         "saved": True,
         "base_url": data["base_url"],
@@ -226,6 +286,22 @@ async def ai_provider_choose(body: ProviderChoice):
     wanted = body.provider.strip().lower()
     if wanted and wanted not in known:
         raise HTTPException(400, f"Provider necunoscut: {wanted}. Cunoscute: {', '.join(sorted(known))}")
+    if wanted in ("opencode_console", "opencode_go"):
+        label = "OpenCode Go" if wanted == "opencode_go" else "OpenCode Console"
+        if not next(
+            (provider["configured"] for provider in provider_catalogue() if provider["id"] == wanted), False
+        ):
+            raise HTTPException(409, f"Configurează cheia API {label} și alege un model înainte de activare.")
+        if wanted == "opencode_console":
+            from app.llm import model_catalogue, provider_model
+            from app.opencode_console_provider import free_model_message, is_free_tier_model
+
+            selected_model = provider_model(wanted)
+            if is_free_tier_model(selected_model):
+                raise HTTPException(409, free_model_message(selected_model))
+            catalogue = await model_catalogue(wanted)
+            if selected_model in catalogue.get("blocked_free_model_ids", []):
+                raise HTTPException(409, free_model_message(selected_model))
     chosen = set_active_provider(wanted)
     return {"active": chosen, "cleared": not wanted}
 
@@ -238,27 +314,11 @@ async def ai_models(provider: str | None = None):
     one, which is what the custom-endpoint panel needs after "fetch models".
     """
     if provider:
-        from app.llm import provider_model, set_active_provider
+        from app.llm import provider_model
 
-        if provider.strip().lower() == "opencode":
-            from app.opencode_provider import OpenCodeError, model_catalogue as opencode_models
-
-            try:
-                return await opencode_models()
-            except OpenCodeError as exc:
-                return {
-                    "models": [], "active": provider_model("opencode"),
-                    "provider": "opencode", "from_provider": False,
-                    "note": str(exc),
-                }
-
-        previous = active_provider()
-        set_active_provider(provider)
-        try:
-            catalogue = await model_catalogue()
-        finally:
-            set_active_provider(previous)
-        catalogue["active"] = provider_model(provider)
+        wanted = provider.strip().lower()
+        catalogue = await model_catalogue(wanted)
+        catalogue["active"] = provider_model(wanted)
         return {**catalogue, "env_default": DEEPSEEK_MODEL}
     catalogue = await model_catalogue()
     return {**catalogue, "env_default": DEEPSEEK_MODEL}
@@ -274,8 +334,21 @@ async def ai_model_choose(body: ModelChoice):
     the choice and returns to the .env default.
     """
     wanted = body.model_id.strip()
+    provider = body.provider.strip().lower() if body.provider else active_provider()
+    known_providers = {provider_info["id"] for provider_info in provider_catalogue()}
+    if provider not in known_providers:
+        raise HTTPException(400, f"Provider necunoscut: {provider}")
     if wanted:
-        catalogue = await model_catalogue()
+        if provider == "opencode_console":
+            from app.opencode_console_provider import free_model_message, is_free_tier_model
+
+            if is_free_tier_model(wanted):
+                raise HTTPException(400, free_model_message(wanted))
+        catalogue = await model_catalogue(provider) if body.provider else await model_catalogue()
+        if provider == "opencode_console" and wanted in catalogue.get("blocked_free_model_ids", []):
+            from app.opencode_console_provider import free_model_message
+
+            raise HTTPException(400, free_model_message(wanted))
         if catalogue.get("from_provider"):
             known = {m["id"] for m in catalogue["models"]}
             if wanted not in known:
@@ -283,10 +356,5 @@ async def ai_model_choose(body: ModelChoice):
                     status_code=400,
                     detail=f"Model necunoscut: {wanted}. Disponibile: {', '.join(sorted(known))}",
                 )
-    provider = active_provider()
-    chosen = set_active_model(wanted)
-    if provider != "deepseek":
-        from app.llm import provider_model
-
-        chosen = provider_model(provider)
+    chosen = set_active_model(wanted, provider=provider) if body.provider else set_active_model(wanted)
     return {"active": chosen, "cleared": not wanted}

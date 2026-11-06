@@ -14,12 +14,14 @@ return the real ranked study list and deterministic, rule-based advice, marked
 as such, instead of silently making things up.
 """
 import hashlib
+import io
 import json
 import logging
 import re
+import datetime
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
 from app.db import get_db
 from app.llm import LLM_PROVIDER, complete as llm_complete
@@ -463,6 +465,124 @@ def get_project():
         conn.close()
 
 
+def _docx_add_markdown(document, content: str) -> None:
+    """Write simple chapter Markdown into the DOCX: headings, lists, bold/italic.
+
+    The editor stores plain Markdown; a thesis export that printed `**bold**`
+    verbatim would go straight back to the university.
+    """
+    import re as _re
+
+    for raw_line in content.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        if line.startswith("### "):
+            document.add_heading(line[4:].strip(), level=3)
+            continue
+        if line.startswith("## "):
+            document.add_heading(line[3:].strip(), level=2)
+            continue
+        if line.startswith("# "):
+            document.add_heading(line[2:].strip(), level=2)
+            continue
+        bullet = _re.match(r"^[-*]\s+(.*)$", line.strip())
+        numbered = _re.match(r"^\d+[.)]\s+(.*)$", line.strip())
+        if bullet:
+            paragraph = document.add_paragraph(style="List Bullet")
+            text = bullet.group(1)
+        elif numbered:
+            paragraph = document.add_paragraph(style="List Number")
+            text = numbered.group(1)
+        else:
+            paragraph = document.add_paragraph()
+            text = line.strip()
+        # Inline **bold** / *italic* runs.
+        for token in _re.split(r"(\*\*[^*]+\*\*|\*[^*]+\*)", text):
+            if not token:
+                continue
+            if token.startswith("**") and token.endswith("**") and len(token) > 4:
+                paragraph.add_run(token[2:-2]).bold = True
+            elif token.startswith("*") and token.endswith("*") and len(token) > 2:
+                paragraph.add_run(token[1:-1]).italic = True
+            else:
+                paragraph.add_run(token)
+
+
+@router.get("/project/export/docx")
+def export_thesis_docx():
+    """The thesis as .docx — title, chapters, and the derived bibliography.
+
+    The university usually demands Word, not Markdown. The export mirrors the
+    chapters as they are on screen (nothing generated, nothing invented) and
+    appends the bibliography computed from the study library: works the text
+    actually cites first, then the consulted library.
+    """
+    from docx import Document
+    from docx.shared import Pt
+
+    from app.routers.citations import _bibliography_references
+
+    conn = get_db()
+    try:
+        project = _ensure_project(conn)
+        references = _bibliography_references(conn)
+    finally:
+        conn.close()
+
+    document = Document()
+    normal = document.styles["Normal"]
+    normal.font.name = "Times New Roman"
+    normal.font.size = Pt(12)
+
+    title = (project.get("title") or "").strip() or "Lucrare de licență"
+    document.add_heading(title, level=0)
+    meta_bits = [str(project.get("work_type") or "").strip(),
+                 str(project.get("field") or "").strip()]
+    meta_line = " · ".join(b for b in meta_bits if b)
+    if meta_line:
+        paragraph = document.add_paragraph(meta_line)
+        paragraph.alignment = 1  # centered
+    if str(project.get("research_q") or "").strip():
+        paragraph = document.add_paragraph()
+        paragraph.add_run("Întrebarea de cercetare: ").bold = True
+        paragraph.add_run(str(project["research_q"]))
+
+    sections = project.get("structure") or []
+    for section in sections:
+        document.add_heading(str(section.get("title") or "Capitol"), level=1)
+        content = str(section.get("content") or "").strip()
+        if not content:
+            draft = document.add_paragraph("[Capitol în lucru]")
+            draft.runs[0].italic = True
+            continue
+        _docx_add_markdown(document, content)
+
+    cited = [r for r in references if r["cited"]]
+    consulted = [r for r in references if not r["cited"]]
+    document.add_heading("Bibliografie", level=1)
+    if cited:
+        for ref in cited:
+            document.add_paragraph(ref["apa"], style="List Paragraph")
+    if consulted:
+        document.add_heading("Lucrări consultate", level=2)
+        for ref in consulted:
+            document.add_paragraph(ref["apa"], style="List Paragraph")
+    if not references:
+        document.add_paragraph("(Biblioteca nu are încă studii salvate.)")
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+    safe_title = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "teza"
+    filename = f"{safe_title}-{datetime.now().date().isoformat()}.docx"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.put("/project")
 def update_project(body: ProjectUpdate):
     conn = get_db()
@@ -525,6 +645,34 @@ def _project_evidence_map(conn, project: dict) -> dict:
         "SELECT * FROM project_claims ORDER BY id"
     ).fetchall()
 
+    # Two batched reads instead of one query per claim plus one per note:
+    # the whole evidence table, then the sources of every involved note.
+    all_evidence: dict[int, list] = {}
+    for r in conn.execute(
+        """SELECT ce.id, ce.claim_id, ce.entry_id, ce.document_id, ce.note_id, ce.relation, ce.created_at,
+                  e.title AS study_title, e.authors AS study_authors,
+                  d.chunk_index, d.page_number AS document_page, d.content AS document_content,
+                  n.content AS note_content, n.page_number AS note_page
+             FROM project_claim_evidence ce
+             JOIN entries e ON e.id = ce.entry_id AND e.archived = 0
+             LEFT JOIN documents d ON d.id = ce.document_id
+             LEFT JOIN study_notes n ON n.id = ce.note_id
+            ORDER BY ce.id"""
+    ).fetchall():
+        all_evidence.setdefault(r["claim_id"], []).append(r)
+
+    note_ids = {r["note_id"] for rows in all_evidence.values() for r in rows if r["note_id"] is not None}
+    sources_by_note: dict[int, list] = {}
+    if note_ids:
+        placeholders = ",".join("?" * len(note_ids))
+        for r in conn.execute(
+            f"""SELECT ns.note_id, d.id AS document_id, d.entry_id, d.chunk_index, d.page_number, d.content
+                  FROM study_note_sources ns JOIN documents d ON d.id = ns.document_id
+                 WHERE ns.note_id IN ({placeholders}) ORDER BY d.chunk_index""",
+            list(note_ids),
+        ).fetchall():
+            sources_by_note.setdefault(r["note_id"], []).append(r)
+
     claims: list[dict] = []
     for row in claim_rows:
         claim = dict(row)
@@ -532,19 +680,7 @@ def _project_evidence_map(conn, project: dict) -> dict:
         claim["section_title"] = (
             section_by_id.get(claim["section_id"], {}).get("title") or "Capitol fără structură"
         )
-        evidence_rows = conn.execute(
-            """SELECT ce.id, ce.entry_id, ce.document_id, ce.note_id, ce.relation, ce.created_at,
-                      e.title AS study_title, e.authors AS study_authors,
-                      d.chunk_index, d.page_number AS document_page, d.content AS document_content,
-                      n.content AS note_content, n.page_number AS note_page
-                 FROM project_claim_evidence ce
-                 JOIN entries e ON e.id = ce.entry_id AND e.archived = 0
-                 LEFT JOIN documents d ON d.id = ce.document_id
-                 LEFT JOIN study_notes n ON n.id = ce.note_id
-                WHERE ce.claim_id = ?
-                ORDER BY ce.id""",
-            [claim["id"]],
-        ).fetchall()
+        evidence_rows = all_evidence.get(claim["id"], [])
         evidence = []
         for evidence_row in evidence_rows:
             item = dict(evidence_row)
@@ -560,12 +696,7 @@ def _project_evidence_map(conn, project: dict) -> dict:
                 }
             note = None
             if item.get("note_id") is not None and item.get("note_content") is not None:
-                source_rows = conn.execute(
-                    """SELECT d.id AS document_id, d.entry_id, d.chunk_index, d.page_number, d.content
-                         FROM study_note_sources ns JOIN documents d ON d.id = ns.document_id
-                        WHERE ns.note_id = ? ORDER BY d.chunk_index""",
-                    [item["note_id"]],
-                ).fetchall()
+                source_rows = sources_by_note.get(item["note_id"], [])
                 note = {
                     "note_id": item["note_id"],
                     "page_number": item["note_page"],

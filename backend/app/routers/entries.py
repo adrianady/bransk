@@ -2,20 +2,44 @@
 Entries CRUD router.
 """
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from app.db import get_db
 from app.models import EntryCreate, EntryUpdate, EntryResponse
 from app.tagging import normalize_tags, sync_tags
 
 router = APIRouter()
 
+# The list view shows two clipped lines per entry, so shipping the full
+# content of every row wastes megabytes on Tailscale/mobile. The list
+# therefore projects a 300-char preview instead; the detail endpoint still
+# returns the complete content.
+_LIST_COLUMNS = """id, title, entry_date, tags, importance, archived,
+                   study_type, authors, quality, url_validated, design,
+                   effect_direction, pdf_path, doi, doi_source, doi_checked_at,
+                   bib_title, bib_authors, bib_year, source,
+                   created_at, updated_at,
+                   substr(content, 1, 300) AS content_preview"""
+
+
+# Sort options for the list view; the default keeps the historical order.
+_ENTRY_SORTS = {
+    "date_desc": "entry_date IS NULL, entry_date DESC, created_at DESC",
+    "date_asc": "entry_date IS NULL, entry_date ASC, created_at ASC",
+    "title": "LOWER(title) ASC",
+    "importance": "importance DESC, entry_date IS NULL, entry_date DESC, created_at DESC",
+}
+
 
 @router.get("/entries", response_model=list[EntryResponse])
 def list_entries(
+    response: Response,
     archived: bool = False,
     tag: Optional[str] = Query(None),
     limit: int = Query(100, le=500),
     offset: int = Query(0, ge=0),
+    include: Optional[str] = Query(None, description="include=content returns full text (export/backup)"),
+    sort: Optional[str] = Query(None, pattern="^(date_desc|date_asc|title|importance)$",
+                                description="Order; default date_desc"),
 ):
     conn = get_db()
     try:
@@ -28,8 +52,16 @@ def list_entries(
             # the second tag is findable either way.
             where.append("(',' || REPLACE(tags, ', ', ',') || ',') LIKE '%,' || ? || ',%'")
             params.append(tag)
+        total = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM entries WHERE {' AND '.join(where)}", params
+        ).fetchone()["cnt"]
+        response.headers["X-Total-Count"] = str(total)
+        # The export/backup path is the one caller that genuinely needs the
+        # full text; it opts in explicitly instead of the list paying for it.
+        columns = "*, NULL AS content_preview" if include == "content" else _LIST_COLUMNS
+        order_by = _ENTRY_SORTS[sort or "date_desc"]
         rows = conn.execute(
-            f"SELECT * FROM entries WHERE {' AND '.join(where)} ORDER BY entry_date IS NULL, entry_date DESC, created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT {columns} FROM entries WHERE {' AND '.join(where)} ORDER BY {order_by} LIMIT ? OFFSET ?",
             [*params, limit, offset]
         ).fetchall()
         return [dict(r) for r in rows]
@@ -53,6 +85,22 @@ def get_entry(entry_id: int):
 def create_entry(data: EntryCreate):
     conn = get_db()
     try:
+        # Server-side dedup: the UI long assumed UNIQUE(title) existed in the
+        # schema, but it never did, so chat actions and imports could silently
+        # grow duplicate entries. Empty titles stay exempt.
+        norm = " ".join(data.title.split()).casefold()
+        if norm:
+            rows = conn.execute(
+                "SELECT id, title FROM entries WHERE archived = 0 AND TRIM(title) != ''"
+            ).fetchall()
+            for row in rows:
+                if " ".join((row["title"] or "").split()).casefold() == norm:
+                    raise HTTPException(409, detail={
+                        "error": "duplicate_title",
+                        "existing_id": row["id"],
+                        "message": f"Există deja o intrare cu titlul „{row['title']}” (id {row['id']}).",
+                    })
+
         # Normalize at the boundary: the UI, the chat actions and the research
         # pipeline all write here, and none of them should be able to add a
         # date-as-tag or a duplicate spelling to the vocabulary.

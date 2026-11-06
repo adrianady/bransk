@@ -267,7 +267,9 @@ async def chat(data: ChatRequest):
                             entry_date=f"{s.get('year') or 2026}-01-01",
                             study_type="observational",
                             doi=s.get("doi") or "",
-                            url=s.get("pdf_url") or "",
+                            # EntryCreate has no `url` field; the PDF link must
+                            # land in `source` or extract_pdf_url() finds nothing.
+                            source=s.get("pdf_url") or s.get("url") or "",
                             tags=["study", "academic", "auto-acquired"],
                         ))
                         eid = created.id
@@ -337,7 +339,9 @@ async def chat(data: ChatRequest):
         return {"reply": reply, "provider": provider, "model": model, "actions": actions}
     except Exception as exc:
         logger.error(f"Chat failed: {exc}")
-        raise HTTPException(status_code=503, detail="Chat unavailable. Check the server logs for details.")
+        public_message = getattr(exc, "public_message", None)
+        detail = public_message if isinstance(public_message, str) else "Chat unavailable. Check the server logs for details."
+        raise HTTPException(status_code=503, detail=detail)
 
 
 @router.post("/chat/stream")
@@ -547,7 +551,9 @@ async def chat_stream(data: ChatRequest, request: Request):
                 yield f"data: {json.dumps({'type': 'actions', 'content': actions})}\n\n"
         except Exception as exc:
             logger.error(f"Chat stream error: {exc}")
-            yield f"data: {json.dumps({'type': 'error', 'content': f'LLM Error: {type(exc).__name__}'})}\n\n"
+            public_message = getattr(exc, "public_message", None)
+            content = public_message if isinstance(public_message, str) else f"LLM Error: {type(exc).__name__}"
+            yield f"data: {json.dumps({'type': 'error', 'content': content})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -659,6 +665,8 @@ async def _call_with_fallback(message: str, history: list) -> tuple:
         return await llm_complete(messages, temperature=0.7, max_tokens=4096)
     except Exception as exc:
         logger.error(f"LLM unavailable: {exc}")
+        if isinstance(getattr(exc, "public_message", None), str):
+            raise
         raise RuntimeError("Both DeepSeek and Ollama unavailable") from exc
 
 
@@ -904,6 +912,29 @@ def _build_context(message: str) -> list[dict]:
     try:
         candidates, seen = [], set()
 
+        # Personal notes are the user's own writing, so the table is small:
+        # one load up front beats one query per candidate row (the old N+1).
+        notes_by_entry: dict = {}
+        try:
+            all_notes = conn.execute(
+                "SELECT id, entry_id, course_context, content, page_number, created_at FROM study_notes ORDER BY created_at DESC"
+            ).fetchall()
+            for n in all_notes:
+                notes_by_entry.setdefault(n["entry_id"], []).append(n)
+        except Exception:
+            notes_by_entry = {}
+
+        # Reader highlights: the passages the user marked in the PDFs. They
+        # are the strongest relevance signal the chat gets about a study.
+        highlights_by_entry: dict = {}
+        try:
+            for h in conn.execute(
+                "SELECT id, entry_id, page_number, quote, note FROM pdf_highlights ORDER BY COALESCE(page_number, 0), id"
+            ).fetchall():
+                highlights_by_entry.setdefault(h["entry_id"], []).append(h)
+        except Exception:
+            highlights_by_entry = {}
+
         def add(row, room: int) -> int:
             """Add one row, cutting its text only to what room is left."""
             if row["id"] in seen or room <= 0:
@@ -911,23 +942,28 @@ def _build_context(message: str) -> list[dict]:
             seen.add(row["id"])
             text = row["content"] or ""
 
-            # Check if this study entry has personal user study notes attached to it
-            try:
-                note_rows = conn.execute(
-                    "SELECT id, course_context, content, page_number, created_at FROM study_notes WHERE entry_id = ? ORDER BY created_at DESC",
-                    [row["id"]],
-                ).fetchall()
-                if note_rows:
-                    note_lines = []
-                    for n in note_rows:
-                        ctx = f"Curs/Context: '{n['course_context']}'" if n["course_context"] else "General"
-                        pg = f", Pagina {n['page_number']}" if n["page_number"] else ""
-                        dt = f", data: {str(n['created_at'])[:10]}" if n["created_at"] else ""
-                        note_lines.append(f"  • [Notiță personală luată de tine | {ctx}{pg}{dt}]: \"{n['content']}\"")
-                    notes_block = "\n\n[NOTIȚE SCRISE DE TINE (UTILIZATORUL) LA ACEST STUDIU]:\n" + "\n".join(note_lines)
-                    text = text + notes_block
-            except Exception:
-                pass
+            # Attach this study's personal user notes, if any.
+            note_rows = notes_by_entry.get(row["id"]) or []
+            if note_rows:
+                note_lines = []
+                for n in note_rows:
+                    ctx = f"Curs/Context: '{n['course_context']}'" if n["course_context"] else "General"
+                    pg = f", Pagina {n['page_number']}" if n["page_number"] else ""
+                    dt = f", data: {str(n['created_at'])[:10]}" if n["created_at"] else ""
+                    note_lines.append(f"  • [Notiță personală luată de tine | {ctx}{pg}{dt}]: \"{n['content']}\"")
+                notes_block = "\n\n[NOTIȚE SCRISE DE TINE (UTILIZATORUL) LA ACEST STUDIU]:\n" + "\n".join(note_lines)
+                text = text + notes_block
+
+            # Attach the passages the user highlighted in the PDF reader.
+            hl_rows = highlights_by_entry.get(row["id"]) or []
+            if hl_rows:
+                hl_lines = []
+                for h in hl_rows:
+                    pg = f"pagina {h['page_number']}" if h["page_number"] else "pagină necunoscută"
+                    note = f" — notiță: {h['note']}" if h["note"] else ""
+                    hl_lines.append(f"  • [Evidențiat de tine în PDF | {pg}]: \"{h['quote']}\"{note}")
+                hl_block = "\n\n[EVIDENȚIERI MARCATE DE TINE (UTILIZATORUL) ÎN PDF-UL ACESTUI STUDIU]:\n" + "\n".join(hl_lines)
+                text = text + hl_block
 
             keep = max(0, min(len(text), room))
             candidates.append({

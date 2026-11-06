@@ -26,6 +26,14 @@ interface Props {
 
 type TabMode = 'search' | 'paste' | 'manual'
 
+function importFeedbackMessage(res: BulkImportResponse): string {
+  return `Importat ${res.total_imported} studii` +
+    (res.pdfs_downloaded ? `, ${res.pdfs_downloaded} PDF-uri descărcate` : '') +
+    (res.pdfs_failed ? `, PDF-uri indisponibile: ${res.pdfs_failed}` : '') +
+    (res.pdfs_index_failed ? `, PDF-uri descărcate, dar neindexate: ${res.pdfs_index_failed}` : '') +
+    (res.total_skipped ? `, ${res.total_skipped} sărite (existau deja)` : '')
+}
+
 export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props) {
   const toast = useToast()
   const [tab, setTab] = useState<TabMode>('search')
@@ -145,11 +153,7 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
         auto_download_pdfs: autoDownloadSearchPdfs,
       })
       setLastImportSummary(res)
-      toast.success(
-        `Importat ${res.total_imported} studii` +
-        (res.pdfs_downloaded ? `, ${res.pdfs_downloaded} PDF-uri descărcate` : '') +
-        (res.total_skipped ? `, ${res.total_skipped} sărite (existau deja)` : '')
-      )
+      toast.success(importFeedbackMessage(res))
       onImportComplete()
     } catch (err: any) {
       toast.error('Importul a eșuat: ' + (err?.message || 'eroare necunoscută'))
@@ -173,11 +177,7 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
         auto_download_pdfs: autoDownloadPastePdfs,
       })
       setLastImportSummary(res)
-      toast.success(
-        `Importat ${res.total_imported} studii` +
-        (res.pdfs_downloaded ? `, ${res.pdfs_downloaded} PDF-uri descărcate` : '') +
-        (res.total_skipped ? `, ${res.total_skipped} sărite (existau deja)` : '')
-      )
+      toast.success(importFeedbackMessage(res))
       setPasteText('')
       onImportComplete()
     } catch (err: any) {
@@ -247,7 +247,9 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
       if (res.total_imported > 0) {
         toast.success(
           `Studiul "${manualTitle.slice(0, 45)}..." a fost adăugat cu succes!` +
-          (res.pdfs_downloaded ? ' (PDF descărcat)' : '')
+          (res.pdfs_downloaded ? ' (PDF descărcat)' : '') +
+          (res.pdfs_failed ? ` (PDF indisponibil: ${res.pdfs_failed})` : '') +
+          (res.pdfs_index_failed ? ` (PDF neindexat: ${res.pdfs_index_failed})` : '')
         )
         onImportComplete()
         onClose()
@@ -267,6 +269,9 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
     'Dopamină și învățare prin recompensă',
     'Efectele meditației asupra atenției',
   ]
+  const failedPdfCount = lastImportSummary?.pdfs_failed ?? 0
+  const failedIndexCount = lastImportSummary?.pdfs_index_failed ?? 0
+  const importHasPdfIssues = failedPdfCount > 0 || failedIndexCount > 0
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
@@ -756,6 +761,7 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
                 <button
                   type="submit"
                   disabled={savingManual || !manualTitle.trim()}
+                  aria-busy={savingManual}
                   className="btn-primary flex items-center gap-2 text-xs"
                 >
                   {savingManual ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookmarkPlus className="w-4 h-4" />}
@@ -767,10 +773,21 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
 
           {/* Import summary card if import recently completed */}
           {lastImportSummary && (
-            <div className="bg-verdigris-soft border border-verdigris/25 p-4 rounded-xl text-xs space-y-2 mt-4 animate-fade-in">
-              <div className="flex items-center gap-2 text-verdigris font-bold">
-                <CheckCircle2 className="w-4 h-4" />
-                Rezumat Import: {lastImportSummary.total_imported} adăugate, {lastImportSummary.total_skipped} sărite, {lastImportSummary.pdfs_downloaded} PDF-uri descărcate.
+            <div
+              role="status"
+              aria-live="polite"
+              className={`border p-4 rounded-xl text-xs space-y-2 mt-4 animate-fade-in ${
+                importHasPdfIssues
+                  ? 'bg-brass-soft border-brass/25'
+                  : 'bg-verdigris-soft border-verdigris/25'
+              }`}
+            >
+              <div className={`flex items-center gap-2 font-bold ${importHasPdfIssues ? 'text-brass' : 'text-verdigris'}`}>
+                {importHasPdfIssues ? <AlertCircle className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
+                Rezumat import: {lastImportSummary.total_imported} adăugate, {lastImportSummary.total_skipped} sărite.
+                {' '}PDF-uri descărcate: {lastImportSummary.pdfs_downloaded}.
+                {failedPdfCount > 0 && ` PDF-uri indisponibile: ${failedPdfCount}.`}
+                {failedIndexCount > 0 && ` PDF-uri descărcate, dar neindexate: ${failedIndexCount}.`}
               </div>
 
               {lastImportSummary.imported.length > 0 && (
@@ -779,7 +796,9 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
                   <ul className="list-disc list-inside space-y-0.5 text-gray-700 dark:text-gray-300">
                     {lastImportSummary.imported.slice(0, 5).map(imp => (
                       <li key={imp.id} className="line-clamp-1">
-                        #{imp.id}: {imp.title} {imp.pdf_downloaded ? '📄 [PDF salvat]' : ''}
+                        #{imp.id}: {imp.title} {imp.pdf_downloaded
+                          ? imp.pdf_index_failed ? '📄 [PDF salvat; indexarea a eșuat]' : '📄 [PDF salvat]'
+                          : failedPdfCount > 0 ? '⚠️ [PDF indisponibil]' : ''}
                       </li>
                     ))}
                     {lastImportSummary.imported.length > 5 && (
@@ -829,6 +848,7 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
                 type="button"
                 onClick={handleImportSelectedSearch}
                 disabled={importingSearch || selectedSearchIndices.size === 0}
+                aria-busy={importingSearch}
                 className="btn-primary text-xs flex items-center gap-2"
               >
                 {importingSearch ? (
@@ -850,12 +870,13 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
                 type="button"
                 onClick={handleImportPaste}
                 disabled={importingPaste || !pasteText.trim()}
+                aria-busy={importingPaste}
                 className="btn-primary text-xs flex items-center gap-2"
               >
                 {importingPaste ? (
                   <>
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Se analizează & importă...
+                    Se analizează și caută PDF-uri...
                   </>
                 ) : (
                   <>

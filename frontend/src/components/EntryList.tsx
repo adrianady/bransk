@@ -7,11 +7,13 @@ import type { Entry, Relationship, Tag } from '../lib/types'
 export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
   const toast = useToast()
   const [entries, setEntries] = useState<Entry[]>([])
+  const [totalCount, setTotalCount] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [offset, setOffset] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [showArchived, setShowArchived] = useState(false)
+  const [sortBy, setSortBy] = useState('date_desc')
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<{ entry: Entry; rank: number }[] | null>(null)
   const [searching, setSearching] = useState(false)
@@ -20,10 +22,11 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
     setLoading(true)
     setError('')
     try {
-      const data = await api.entries.list({ limit: 100, offset: nextOffset, archived })
-      if (nextOffset === 0) setEntries(data)
-      else setEntries(prev => [...prev, ...data])
-      setHasMore(data.length === 100)
+      const { items, total } = await api.entries.listPage({ limit: 100, offset: nextOffset, archived, sort: sortBy })
+      if (nextOffset === 0) setEntries(items)
+      else setEntries(prev => [...prev, ...items])
+      setTotalCount(total)
+      setHasMore(nextOffset + items.length < total)
       setOffset(nextOffset)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Intrările nu s-au putut încărca')
@@ -37,7 +40,7 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
     setSearchResults(null)
     setEntries([])
     load(0, showArchived)
-  }, [showArchived])
+  }, [showArchived, sortBy])
 
   const runSearch = async () => {
     const q = query.trim()
@@ -60,7 +63,9 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       const entriesData: Entry[] = []
       let offset = 0
       while (true) {
-        const page = await api.entries.list({ limit: 500, offset })
+        // include=content: the export needs the full text, which the regular
+        // list view no longer ships (preview only).
+        const page = await api.entries.list({ limit: 500, offset, include: 'content' })
         entriesData.push(...page)
         if (page.length < 500) break
         offset += 500
@@ -191,20 +196,32 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
   return (
     <div className="space-y-4">
       {/* Toolbar: search, archive toggle, export/import */}
-      <div className="flex flex-wrap gap-2">
-        <div className="flex flex-1 min-w-[220px] gap-2">
+      <div className="flex flex-wrap gap-2 items-center">
+        <div className="flex flex-1 min-w-[200px] gap-2">
           <input
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && runSearch()}
-            className="input flex-1"
+            className="input flex-1 min-w-0"
             placeholder="Caută în intrări…"
             aria-label="Caută în intrări"
           />
-          <button onClick={runSearch} disabled={searching} className="btn-secondary" aria-label="Caută">
+          <button onClick={runSearch} disabled={searching} className="btn-secondary shrink-0" aria-label="Caută">
             <Search className="w-4 h-4" />
           </button>
         </div>
+        <select
+          value={sortBy}
+          onChange={e => setSortBy(e.target.value)}
+          className="input w-auto text-sm"
+          aria-label="Ordonează intrările"
+          title="Ordonare (se aplică server-side, împreună cu paginarea)"
+        >
+          <option value="date_desc">Data ↓ (nou)</option>
+          <option value="date_asc">Data ↑ (vechi)</option>
+          <option value="title">Titlu A–Z</option>
+          <option value="importance">Importanță ↓</option>
+        </select>
         <button
           onClick={() => setShowArchived(!showArchived)}
           className={`btn-ghost text-sm ${showArchived ? 'text-chrono-600' : ''}`}
@@ -251,7 +268,7 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
               >
                 <h3 className="font-semibold mb-1 break-words">{entry.title}</h3>
                 {entry.entry_date && <p className="text-xs text-gray-500 mb-1">{entry.entry_date}</p>}
-                <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2 break-words">{entry.content}</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2 break-words">{entry.content_preview || entry.content}</p>
                 <p className="text-xs text-gray-400 mt-1">relevanță {rank.toFixed(2)}</p>
               </button>
             ))}
@@ -259,7 +276,12 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
         )
       ) : (
         <>
-          <p className="text-sm text-gray-500">{entries.length} intrări {showArchived ? '(arhivate)' : ''}</p>
+          <p className="text-sm text-gray-500">
+            {totalCount != null && totalCount > entries.length
+              ? `${entries.length} din ${totalCount} intrări`
+              : `${entries.length} intrări`}{' '}
+            {showArchived ? '(arhivate)' : ''}
+          </p>
           {error && (
             <div className="card border-madder/25 text-sm text-madder flex items-center justify-between gap-2">
               <span className="flex items-center gap-2">
@@ -277,7 +299,7 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
               >
                 <h3 className="font-semibold mb-1 break-words">{entry.title}</h3>
                 {entry.entry_date && <p className="text-xs text-gray-500 mb-1">{entry.entry_date}</p>}
-                <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2 break-words">{entry.content}</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2 break-words">{entry.content_preview || entry.content}</p>
                 {entry.tags && (
                   <div className="flex gap-1 mt-2 flex-wrap">
                     {entry.tags.split(',').map(t => t.trim()).filter(Boolean).map(t => (

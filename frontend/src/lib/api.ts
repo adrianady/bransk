@@ -4,6 +4,9 @@ import type {
   AiCustomSaveRequest,
   AiOpenCodeConfigState,
   AiOpenCodeSaveRequest,
+  AiOpenCodeConsoleConfigState,
+  AiOpenCodeConsoleSaveRequest,
+  AiModelChoiceRequest,
   AiModelChoiceResponse,
   AiModelsResponse,
   AiProviderChoiceResponse,
@@ -11,6 +14,11 @@ import type {
   AiStatusResponse,
   BulkImportResponse,
   ChatHistoryItem,
+  BibliographyResponse,
+  GlobalSearchResponse,
+  PdfHighlight,
+  ScreeningDecisionRow,
+  ScreeningSummary,
   Entry,
   ExternalSearchResponse,
   GraphData,
@@ -56,10 +64,9 @@ import type {
 // Dynamic API Base URL resolution with fallback to relative /api proxy
 const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/api';
 
-// ── Access token (only used when the server is exposed on the network) ──────
-// The backend answers /api/auth/status with `required`. When it is true, the
-// user types the token printed by start.sh once; it is kept in localStorage and
-// sent with every request. Loopback instances never ask for it.
+// ── Legacy bearer token for network access ──────────────────────────────────
+// It remains supported for existing devices and account setup/reset. Password
+// sessions use an HttpOnly cookie and never put the password in browser storage.
 const TOKEN_KEY = 'chronokg-token';
 /** Fired when the server rejects the stored token, so the gate can ask again. */
 export const AUTH_EVENT = 'chronokg:unauthorized';
@@ -106,7 +113,7 @@ function notifyUnauthorized(): void {
   }
 }
 
-/** Headers for the handful of calls that use fetch directly (streams, PDFs). */
+/** Headers for calls that use fetch directly (streams, PDFs, and auth status). */
 function requestHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extra };
   const token = getAuthToken();
@@ -114,12 +121,24 @@ function requestHeaders(extra: Record<string, string> = {}): Record<string, stri
   return headers;
 }
 
-export async function fetchAuthStatus(): Promise<{ required: boolean }> {
+export interface AuthStatus {
+  required: boolean
+  password_configured?: boolean
+  authenticated?: boolean
+  token_authenticated?: boolean
+  session_authenticated?: boolean
+}
+
+export async function fetchAuthStatus(): Promise<AuthStatus> {
   // Short timeout: a hung server must not leave the gate on "checking…".
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);
   try {
-    const res = await fetch(`${BASE}/auth/status`, { signal: controller.signal });
+    const res = await fetch(`${BASE}/auth/status`, {
+      signal: controller.signal,
+      headers: requestHeaders(),
+      credentials: 'include',
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   } finally {
@@ -201,6 +220,7 @@ async function request<T>(path: string, options?: RequestInit & { timeoutMs?: nu
   try {
     const res = await fetch(`${BASE}${path}`, {
       ...init,
+      credentials: init.credentials ?? 'include',
       // Merge instead of spreading the caller's headers over these: spreading
       // `options` afterwards used to drop Content-Type whenever a caller passed
       // its own header object.
@@ -211,7 +231,7 @@ async function request<T>(path: string, options?: RequestInit & { timeoutMs?: nu
     });
     clearTimeout(timeoutId);
 
-    if (res.status === 401) notifyUnauthorized();
+    if (res.status === 401 && path !== '/auth/login') notifyUnauthorized();
 
     if (!res.ok) {
       // Keep the status and the parsed detail on the error so callers can tell
@@ -230,6 +250,31 @@ async function request<T>(path: string, options?: RequestInit & { timeoutMs?: nu
   }
 }
 
+export function setupSharedAccount(username: string, password: string) {
+  return request<{ configured: boolean; username: string }>('/auth/setup', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function loginSharedAccount(username: string, password: string) {
+  return request<{ authenticated: boolean; username: string }>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function logoutSharedAccount() {
+  return request<void>('/auth/logout', { method: 'POST', body: '{}' });
+}
+
+export function changeSharedPassword(password: string) {
+  return request<{ updated: boolean }>('/auth/password', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+}
+
 export async function fetchStudiesPage(params?: { limit?: number; offset?: number }): Promise<{ items: Entry[]; total: number }> {
   const q = new URLSearchParams();
   if (params?.limit) q.set('limit', String(params.limit));
@@ -237,6 +282,7 @@ export async function fetchStudiesPage(params?: { limit?: number; offset?: numbe
   const query = q.toString();
   const res = await fetch(`${BASE}/studies${query ? `?${query}` : ''}`, {
     headers: requestHeaders(),
+    credentials: 'include',
   });
   if (res.status === 401) notifyUnauthorized();
   if (!res.ok) {
@@ -254,13 +300,39 @@ export async function fetchStudiesPage(params?: { limit?: number; offset?: numbe
 export const api = {
   // Entries
   entries: {
-    list: (params?: { archived?: boolean; tag?: string; limit?: number; offset?: number }) => {
+    list: (params?: { archived?: boolean; tag?: string; limit?: number; offset?: number; include?: string; sort?: string }) => {
       const q = new URLSearchParams();
       if (params?.archived) q.set('archived', 'true');
       if (params?.tag) q.set('tag', params.tag);
       if (params?.limit) q.set('limit', String(params.limit));
       if (params?.offset) q.set('offset', String(params.offset));
+      if (params?.include) q.set('include', params.include);
+      if (params?.sort) q.set('sort', params.sort);
       return request<Entry[]>(`/entries?${q}`);
+    },
+    // Same query as `list`, but also reads X-Total-Count so the UI can show
+    // „100 din 275" instead of just the loaded page size.
+    listPage: async (params?: { archived?: boolean; tag?: string; limit?: number; offset?: number; include?: string; sort?: string }): Promise<{ items: Entry[]; total: number }> => {
+      const q = new URLSearchParams();
+      if (params?.archived) q.set('archived', 'true');
+      if (params?.tag) q.set('tag', params.tag);
+      if (params?.limit) q.set('limit', String(params.limit));
+      if (params?.offset) q.set('offset', String(params.offset));
+      if (params?.include) q.set('include', params.include);
+      if (params?.sort) q.set('sort', params.sort);
+      const res = await fetch(`${BASE}/entries?${q}`, {
+        headers: requestHeaders(),
+        credentials: 'include',
+      });
+      if (res.status === 401) notifyUnauthorized();
+      if (!res.ok) {
+        const { detail } = await readErrorBody(res);
+        throw new ApiError(readableError(detail, res.status), res.status, detail);
+      }
+      const items: Entry[] = await res.json();
+      const header = res.headers.get('X-Total-Count');
+      const total = header === null ? NaN : Number(header);
+      return { items, total: Number.isFinite(total) ? total : items.length };
     },
     get: (id: number) => request<Entry>(`/entries/${id}`),
     create: (data: Partial<Entry>) =>
@@ -271,6 +343,43 @@ export const api = {
       request<void>(`/entries/${id}`, { method: 'DELETE' }),
   },
 
+  // Citations — BibTeX/RIS export and the thesis bibliography
+  citations: {
+    bibliography: () => request<BibliographyResponse>('/citations/bibliography'),
+    cite: (entryId: number) => request<string>(`/citations/cite/${entryId}`),
+    // File download: the backend answers with Content-Disposition attachment.
+    export: async (format: 'bibtex' | 'ris', doiOnly = false): Promise<void> => {
+      const q = new URLSearchParams({ format });
+      if (doiOnly) q.set('doi_only', 'true');
+      const res = await fetch(`${BASE}/citations/export?${q}`, {
+        headers: requestHeaders(),
+        credentials: 'include',
+      });
+      if (res.status === 401) notifyUnauthorized();
+      if (!res.ok) {
+        const { detail } = await readErrorBody(res);
+        throw new ApiError(readableError(detail, res.status), res.status, detail);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = format === 'ris' ? 'bransk-bibliografie.ris' : 'bransk-bibliografie.bib';
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+  },
+
+  // Highlights — text selections saved from the native PDF reader
+  highlights: {
+    list: (entryId: number) => request<PdfHighlight[]>(`/studies/${entryId}/highlights`),
+    create: (entryId: number, data: { quote: string; note?: string; page_number?: number | null; document_id?: number | null }) =>
+      request<PdfHighlight>(`/studies/${entryId}/highlights`, { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: { note: string }) =>
+      request<PdfHighlight>(`/highlights/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    remove: (id: number) => request<void>(`/highlights/${id}`, { method: 'DELETE' }),
+  },
+
   // Search
   search: (q: string, params?: { from_date?: string; to_date?: string; tags?: string }) => {
     const p = new URLSearchParams({ q });
@@ -279,6 +388,10 @@ export const api = {
     if (params?.tags) p.set('tags', params.tags);
     return request<{ entry: Entry; rank: number }[]>(`/search?${p}`);
   },
+
+  // Global search — entries, studies, notes, highlights and PDF chunks
+  globalSearch: (q: string) =>
+    request<GlobalSearchResponse>(`/search/global?q=${encodeURIComponent(q)}`),
 
   // Timeline
   timeline: {
@@ -334,6 +447,7 @@ export const api = {
       const pending = fetch(`${BASE}/chat/stream`, {
         method: 'POST',
         headers: requestHeaders(),
+        credentials: 'include',
         body: JSON.stringify({ message, history: history || [] }),
         signal,
       });
@@ -363,10 +477,10 @@ export const api = {
       { timeoutMs: 20000 },
     ),
     // An empty id clears the override and returns to the .env default.
-    setModel: (model: string) =>
+    setModel: (model: string, provider?: string) =>
       request<AiModelChoiceResponse>('/ai/model', {
         method: 'POST',
-        body: JSON.stringify({ model_id: model }),
+        body: JSON.stringify({ model_id: model, ...(provider ? { provider } : {}) } satisfies AiModelChoiceRequest),
       }),
     // Every provider the server knows, which one is in use, and the failover order.
     providers: () => request<AiProvidersResponse>('/ai/providers', { timeoutMs: 20000 }),
@@ -391,6 +505,16 @@ export const api = {
     openCode: () => request<AiOpenCodeConfigState>('/ai/opencode'),
     saveOpenCode: (body: AiOpenCodeSaveRequest) =>
       request<AiOpenCodeConfigState>('/ai/opencode', {
+        method: 'POST', body: JSON.stringify(body), timeoutMs: 30000,
+      }),
+    openCodeConsole: () => request<AiOpenCodeConsoleConfigState>('/ai/opencode-console'),
+    saveOpenCodeConsole: (body: AiOpenCodeConsoleSaveRequest) =>
+      request<AiOpenCodeConsoleConfigState>('/ai/opencode-console', {
+        method: 'POST', body: JSON.stringify(body), timeoutMs: 30000,
+      }),
+    openCodeGo: () => request<AiOpenCodeConsoleConfigState>('/ai/opencode-go'),
+    saveOpenCodeGo: (body: AiOpenCodeConsoleSaveRequest) =>
+      request<AiOpenCodeConsoleConfigState>('/ai/opencode-go', {
         method: 'POST', body: JSON.stringify(body), timeoutMs: 30000,
       }),
   },
@@ -463,6 +587,7 @@ export const api = {
       const pending = fetch(`${BASE}/research/stream`, {
         method: 'POST',
         headers: requestHeaders(),
+        credentials: 'include',
         body: JSON.stringify({ topic, depth, save }),
         signal,
       });
@@ -503,12 +628,12 @@ export const api = {
           timeoutMs: 300000, // batch downloads can take minutes
         },
       ),
-    // The browser opens this URL itself (new tab / iframe), so the token has
-    // to travel in the query string — a header cannot be attached there.
-    pdfUrl: (id: number) => {
+    // PDF.js supports request headers, so keep credentials out of URLs that
+    // can be copied into browser history, logs, or referrer metadata.
+    pdfUrl: (id: number) => `${BASE}/studies/${id}/pdf`,
+    pdfHeaders: () => {
       const token = getAuthToken();
-      const suffix = token ? `?token=${encodeURIComponent(token)}` : '';
-      return `${BASE}/studies/${id}/pdf${suffix}`;
+      return token ? { Authorization: `Bearer ${token}` } : {};
     },
     // Searches every open source (OpenAlex, Unpaywall, Semantic Scholar,
     // Europe PMC, arXiv) for the paper itself, then indexes what it finds.
@@ -520,6 +645,8 @@ export const api = {
         url: string
         chars: number
         chunks: number
+        index_error?: boolean
+        text_save_error?: boolean
         tried: { url: string; source: string; kind?: string; error?: string }[]
       }>(`/studies/${id}/fulltext`, { method: 'POST', timeoutMs: 300000 }),
     searchExternal: (query: string, maxResults = 15) =>
@@ -554,6 +681,22 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ entry_ids: entryIds }),
       }),
+    // PRISMA screening decisions
+    screeningSummary: () => request<ScreeningSummary>('/studies/screening/summary'),
+    screeningDecisions: () => request<Record<string, ScreeningDecisionRow>>('/studies/screening/decisions'),
+    setScreening: (entryId: number, data: { decision: 'include' | 'exclude' | 'maybe'; reason?: string }) =>
+      request<ScreeningDecisionRow>(`/studies/${entryId}/screening`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    clearScreening: (entryId: number) =>
+      request<void>(`/studies/${entryId}/screening`, { method: 'DELETE' }),
+    // AI-assisted methodology: design / effect direction / quality proposal
+    aiAppraisal: (entryId: number) =>
+      request<{ entry_id: number; design: string; effect_direction: string; quality: number | null; justification: string }>(
+        `/studies/${entryId}/ai-appraisal`,
+        { method: 'POST', body: '{}', timeoutMs: 60000 },
+      ),
     notes: {
       list: (entryId: number) => request<StudyNote[]>(`/studies/${entryId}/notes`),
       all: () => request<StudyNote[]>('/studies/notes/all'),
@@ -614,6 +757,25 @@ export const api = {
     get: () => request<Project>('/project'),
     update: (patch: Partial<Project>) =>
       request<Project>('/project', { method: 'PUT', body: JSON.stringify(patch) }),
+    // Thesis as Word: the backend assembles chapters + bibliography.
+    downloadDocx: async (): Promise<void> => {
+      const res = await fetch(`${BASE}/project/export/docx`, {
+        headers: requestHeaders(),
+        credentials: 'include',
+      });
+      if (res.status === 401) notifyUnauthorized();
+      if (!res.ok) {
+        const { detail } = await readErrorBody(res);
+        throw new ApiError(readableError(detail, res.status), res.status, detail);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `teza-${new Date().toISOString().slice(0, 10)}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
     studies: (limit = 12) =>
       request<ProjectStudiesResponse>(`/project/studies?limit=${limit}`),
     analysis: () => request<ProjectAnalysisResponse>('/project/analysis', { timeoutMs: 30000 }),
@@ -711,6 +873,7 @@ export const api = {
       return fetch(`${BASE}/maintenance/analyze`, {
         method: 'POST',
         headers: requestHeaders(),
+        credentials: 'include',
         signal: controller.signal,
       }).finally(() => {
         clearTimeout(timeoutId);

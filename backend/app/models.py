@@ -4,7 +4,7 @@ Bransk — Pydantic models for API request/response.
 import re
 from datetime import date, datetime
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # A DOI is "10.<registrant>/<suffix>". Accept it with or without the
 # https://doi.org/ prefix, strip the prefix, and refuse anything else rather
@@ -28,6 +28,9 @@ def normalize_doi(value: str) -> str:
 
 # ── Entry models ──
 class EntryCreate(BaseModel):
+    # extra="forbid": a misspelled field (e.g. `url=` instead of `source=`)
+    # used to be silently dropped, losing data without any error.
+    model_config = ConfigDict(extra="forbid")
     title: str = Field(..., min_length=1, max_length=500)
     content: str = ""
     entry_date: Optional[str] = None  # ISO date or None
@@ -78,7 +81,10 @@ class EntryUpdate(BaseModel):
 class EntryResponse(BaseModel):
     id: int
     title: str
-    content: str
+    # Full content comes from the detail endpoint; the list view projects a
+    # short `content_preview` instead to keep the payload small.
+    content: str = ""
+    content_preview: str = ""
     entry_date: Optional[str] = None
     created_at: str
     updated_at: str
@@ -187,6 +193,10 @@ class SpacedRepetitionItem(BaseModel):
     next_review: Optional[str] = None
     quiz_enabled: bool = True
     question_count: int = 3
+    # Joined from entries so the UI can render titles without downloading the
+    # whole entries list just to label a review item.
+    entry_title: str = ""
+    content_preview: str = ""
 
 
 class ReviewSubmit(BaseModel):
@@ -214,6 +224,10 @@ class TodoResponse(BaseModel):
     completed: bool
     priority: str
     effort: str
+    # Joined from entries so the todo list shows real titles instead of
+    # "Intrarea nr. X" beyond the first 500 entries.
+    entry_title: str = ""
+    content_preview: str = ""
 
 
 # ── Reminder models ──
@@ -264,6 +278,19 @@ class PrismaFlow(BaseModel):
     records_screened: int = 0
     full_text_assessed: int = 0
     studies_included: int = 0
+
+
+class ScreeningDecisionInput(BaseModel):
+    decision: str = Field(..., pattern="^(include|exclude|maybe)$")
+    reason: str = Field("", max_length=1000)
+
+
+class ScreeningSummary(BaseModel):
+    studies_total: int = 0
+    included: int = 0
+    excluded: int = 0
+    maybe: int = 0
+    undecided: int = 0
 
 
 class ResearchRequest(BaseModel):

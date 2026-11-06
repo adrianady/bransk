@@ -63,7 +63,8 @@ def _patch_clients(monkeypatch, handler):
 def test_registry_lists_every_provider_and_skips_unconfigured_ones(fresh_settings, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "")
     catalogue = {p["id"]: p for p in llm.provider_catalogue()}
-    for pid in ("deepseek", "openai", "openrouter", "groq", "mistral", "together", "ollama", "mock"):
+    for pid in ("deepseek", "openai", "openrouter", "groq", "mistral", "together", "ollama",
+                "opencode_console", "opencode_go", "mock"):
         assert pid in catalogue, f"{pid} must be listed"
     assert catalogue["ollama"]["configured"] is True  # local, no key needed
     assert catalogue["groq"]["configured"] is False  # no key set
@@ -145,6 +146,83 @@ def test_each_provider_keeps_its_own_model(fresh_settings, monkeypatch):
     assert llm.provider_model("openai") == "gpt-4o"
     assert llm.provider_model("groq") == "llama-3.1-8b-instant"
     assert llm.provider_model("ollama") == llm.OLLAMA_MODEL
+
+
+def test_ollama_completion_and_stream_use_its_saved_model(fresh_settings, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    llm.set_active_provider("ollama")
+    llm.set_active_model("qwen2.5:32b", provider="ollama")
+    seen_models: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen_models.append(body["model"])
+        if body["stream"]:
+            return httpx.Response(
+                200,
+                text='data: {"choices":[{"delta":{"content":"local"}}]}\n\ndata: [DONE]\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "local completion"}}],
+            "usage": {},
+        })
+
+    _patch_clients(monkeypatch, handler)
+    provider, model, text = asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+
+    async def collect_stream():
+        return [chunk async for chunk in llm.stream_complete([{"role": "user", "content": "hi"}])]
+
+    chunks = asyncio.run(collect_stream())
+    assert (provider, model, text) == ("ollama", "qwen2.5:32b", "local completion")
+    assert [chunk[2] for chunk in chunks] == ["local"]
+    assert all(chunk[:2] == ("ollama", "qwen2.5:32b") for chunk in chunks)
+    assert seen_models == ["qwen2.5:32b", "qwen2.5:32b"]
+
+
+def test_mock_provider_can_be_selected_without_forcing_global_mock_mode(fresh_settings, monkeypatch):
+    monkeypatch.setattr(llm, "DEEPSEEK_API_KEY", "")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    llm.set_active_provider("mock")
+
+    def reject_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"Mock provider unexpectedly attempted {request.url.host}")
+
+    _patch_clients(monkeypatch, reject_network)
+
+    provider, model, text = asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+
+    async def collect_stream():
+        return [chunk async for chunk in llm.stream_complete([{"role": "user", "content": "hi"}])]
+
+    chunks = asyncio.run(collect_stream())
+    assert (provider, model, text) == ("mock", "mock-model", "[mock]")
+    assert chunks == [("mock", "mock-model", "[mock]")]
+
+
+def test_saving_custom_provider_model_does_not_change_active_provider_model(fresh_settings, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    llm.set_active_provider("openai")
+    llm.set_active_model("gpt-4o-mini", provider="openai")
+
+    with TestClient(app) as client:
+        response = client.post("/api/ai/custom", json={
+            "base_url": "http://127.0.0.1:8099/v1",
+            "api_key": "local-test-key",
+            "model": "local-model",
+            "label": "Local",
+            "activate": False,
+        })
+
+    assert response.status_code == 200
+    assert response.json()["active"] == "openai"
+    assert llm.provider_model("openai") == "gpt-4o-mini"
+    assert llm.provider_model("custom") == "local-model"
 
 
 def test_all_providers_failing_raises_one_clear_error(fresh_settings, monkeypatch):

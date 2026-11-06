@@ -10,13 +10,14 @@ import {
   Trash2,
   CheckSquare,
   Square,
+  BookMarked,
 } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
 import { subjectTags } from '../lib/tags'
 import { useToast } from './Toast'
 import { ImportStudiesModal } from './ImportStudiesModal'
 import { StudyPdfModal } from './StudyPdfModal'
-import type { Entry } from '../lib/types'
+import type { Entry, ScreeningDecisionRow, ScreeningSummary } from '../lib/types'
 
 interface Props {
   onSelectEntry: (entry: Entry) => void
@@ -63,8 +64,18 @@ export function StudiesView({ onSelectEntry }: Props) {
   const [error, setError] = useState('')
   const [filterType, setFilterType] = useState('')
   const [filterQuality, setFilterQuality] = useState(0)
+  // PRISMA screening: record include/exclude/maybe per study, with a filter.
+  const [screeningMode, setScreeningMode] = useState(false)
+  const [screeningDecisions, setScreeningDecisions] = useState<Record<string, ScreeningDecisionRow>>({})
+  const [screeningSummary, setScreeningSummary] = useState<ScreeningSummary | null>(null)
+  const [filterScreening, setFilterScreening] = useState('')
+  // Library filters the audit asked for: only readable / identified studies.
+  const [filterPdf, setFilterPdf] = useState(false)
+  const [filterDoi, setFilterDoi] = useState(false)
+  const [filterYear, setFilterYear] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [downloadingAll, setDownloadingAll] = useState(false)
+  const [downloadingPdf, setDownloadingPdf] = useState<Record<number, boolean>>({})
   // Study ids whose full text is being hunted right now (one request each).
   const [fetchingText, setFetchingText] = useState<Record<number, boolean>>({})
   const [importModalOpen, setImportModalOpen] = useState(false)
@@ -171,10 +182,40 @@ export function StudiesView({ onSelectEntry }: Props) {
     }
   }
 
+  const loadScreening = async () => {
+    try {
+      const [decisions, summary] = await Promise.all([
+        api.studies.screeningDecisions(),
+        api.studies.screeningSummary(),
+      ])
+      setScreeningDecisions(decisions)
+      setScreeningSummary(summary)
+    } catch {
+      // Screening is auxiliary; the library must load without it.
+    }
+  }
+
+  const applyScreening = async (studyId: number, decision: 'include' | 'exclude' | 'maybe') => {
+    try {
+      const updated = await api.studies.setScreening(studyId, { decision })
+      setScreeningDecisions(prev => ({ ...prev, [String(studyId)]: updated }))
+      setScreeningSummary(await api.studies.screeningSummary())
+    } catch (err) {
+      toast.error('Decizia nu s-a putut salva: ' + (err instanceof Error ? err.message : 'eroare'))
+    }
+  }
+
   const types = [...new Set(studies.map(s => s.study_type).filter(Boolean))].sort()
   const filtered = studies.filter(s => {
     if (filterType && s.study_type !== filterType) return false
     if (filterQuality > 0 && (s.quality ?? 0) < filterQuality) return false
+    if (filterScreening) {
+      const dec = screeningDecisions[String(s.id)]?.decision
+      if (filterScreening === 'undecided' ? !!dec : dec !== filterScreening) return false
+    }
+    if (filterPdf && !s.pdf_path) return false
+    if (filterDoi && !s.doi) return false
+    if (filterYear.trim() && !(s.entry_date || '').startsWith(filterYear.trim())) return false
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase()
       const match = (s.title || '').toLowerCase().includes(q) ||
@@ -223,9 +264,24 @@ export function StudiesView({ onSelectEntry }: Props) {
             <Plus className="w-4 h-4" />
             Adaugă / Importă Studii
           </button>
-          <button onClick={downloadAll} disabled={downloadingAll} className="btn-secondary flex-1 sm:flex-none text-xs sm:text-sm whitespace-nowrap flex items-center justify-center gap-1">
-            <Download className="w-4 h-4" />
-            {downloadingAll ? 'Se descarcă…' : 'Descarcă toate PDF-urile'}
+          <button onClick={downloadAll} disabled={downloadingAll} aria-busy={downloadingAll} className="btn-secondary flex-1 sm:flex-none text-xs sm:text-sm whitespace-nowrap flex items-center justify-center gap-1">
+            {downloadingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            {downloadingAll ? 'Se descarcă PDF-urile…' : 'Descarcă toate PDF-urile'}
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                await api.citations.export('bibtex')
+                toast.success('BibTeX descărcat (.bib)')
+              } catch (err) {
+                toast.error('Exportul a eșuat: ' + (err instanceof Error ? err.message : 'eroare'))
+              }
+            }}
+            className="btn-secondary flex-1 sm:flex-none text-xs sm:text-sm whitespace-nowrap flex items-center justify-center gap-1"
+            title="Exportă bibliografia pentru Zotero / Mendeley / Word"
+          >
+            <BookMarked className="w-4 h-4" />
+            Export BibTeX
           </button>
           <button onClick={load} className="btn-secondary p-2" aria-label="Reîmprospătează studiile">
             <RefreshCw className="w-4 h-4" />
@@ -263,8 +319,56 @@ export function StudiesView({ onSelectEntry }: Props) {
           <option value={3}>3★ și peste</option>
           <option value={4}>4★ și peste</option>
         </select>
-        {(filterType || filterQuality > 0 || searchQuery) && (
-          <button onClick={() => { setFilterType(''); setFilterQuality(0); setSearchQuery('') }} className="btn-ghost text-sm">Golește filtrele</button>
+        <button
+          onClick={() => { const next = !screeningMode; setScreeningMode(next); if (next) loadScreening() }}
+          className={`btn-secondary text-sm ${screeningMode ? '!bg-yellow-100 dark:!bg-yellow-950/40 !border-yellow-400' : ''}`}
+          title="Mod PRISMA: decide include/exclude pentru fiecare studiu"
+        >
+          Screening PRISMA
+        </button>
+        <button
+          onClick={() => setFilterPdf(!filterPdf)}
+          className={`btn-secondary text-sm ${filterPdf ? '!bg-emerald-50 dark:!bg-emerald-950/40 !border-emerald-400' : ''}`}
+          title="Doar studiile cu PDF descărcat local"
+        >
+          Are PDF
+        </button>
+        <button
+          onClick={() => setFilterDoi(!filterDoi)}
+          className={`btn-secondary text-sm ${filterDoi ? '!bg-emerald-50 dark:!bg-emerald-950/40 !border-emerald-400' : ''}`}
+          title="Doar studiile cu DOI"
+        >
+          Are DOI
+        </button>
+        <input
+          type="number"
+          inputMode="numeric"
+          value={filterYear}
+          onChange={e => setFilterYear(e.target.value)}
+          placeholder="an"
+          aria-label="Filtrează după an"
+          className="input w-20 text-sm"
+          title="Anul publicării (prefix, ex. 2026)"
+        />
+        {screeningMode && (
+          <select value={filterScreening} onChange={e => setFilterScreening(e.target.value)} className="input w-auto text-sm">
+            <option value="">Toate deciziile</option>
+            <option value="include">Doar incluse</option>
+            <option value="exclude">Doar excluse</option>
+            <option value="maybe">Doar „poate”</option>
+            <option value="undecided">Doar nerecenzate</option>
+          </select>
+        )}
+        {(filterType || filterQuality > 0 || searchQuery || filterScreening || filterPdf || filterDoi || filterYear) && (
+          <button onClick={() => { setFilterType(''); setFilterQuality(0); setSearchQuery(''); setFilterScreening(''); setFilterPdf(false); setFilterDoi(false); setFilterYear('') }} className="btn-ghost text-sm">Golește filtrele</button>
+        )}
+        {screeningMode && screeningSummary && (
+          <span className="text-xs text-gray-500 self-center">
+            PRISMA: <b className="text-emerald-600 dark:text-emerald-400">{screeningSummary.included}</b> incluse ·
+            {' '}<b className="text-madder">{screeningSummary.excluded}</b> excluse ·
+            {' '}<b className="text-brass">{screeningSummary.maybe}</b> poate ·
+            {' '}{screeningSummary.undecided} nerecenzate din {screeningSummary.studies_total}
+          </span>
         )}
       </div>
 
@@ -365,6 +469,38 @@ export function StudiesView({ onSelectEntry }: Props) {
                 ) : null}
               </div>
               {study.authors && <p className="text-xs text-gray-500 mb-2 line-clamp-1 break-words">✍️ {study.authors}</p>}
+              {screeningMode && (
+                <div className="flex items-center gap-1.5 mb-2" onClick={e => { e.stopPropagation(); e.preventDefault() }}>
+                  {(['include', 'exclude', 'maybe'] as const).map(dec => {
+                    const current = screeningDecisions[String(study.id)]?.decision
+                    const styles: Record<string, string> = {
+                      include: 'bg-emerald-600 border-emerald-600',
+                      exclude: 'bg-madder border-madder',
+                      maybe: 'bg-brass border-brass',
+                    }
+                    const labels = { include: '✓ Include', exclude: '✕ Exclude', maybe: '? Poate' }
+                    return (
+                      <button
+                        key={dec}
+                        type="button"
+                        onClick={() => applyScreening(study.id, dec)}
+                        className={`text-[11px] px-2 py-0.5 rounded border font-semibold transition-colors ${
+                          current === dec
+                            ? `${styles[dec]} text-white`
+                            : 'bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'
+                        }`}
+                      >
+                        {labels[dec]}
+                      </button>
+                    )
+                  })}
+                  {screeningDecisions[String(study.id)]?.reason && (
+                    <span className="text-[10px] text-gray-400 truncate" title={screeningDecisions[String(study.id)].reason}>
+                      {screeningDecisions[String(study.id)].reason}
+                    </span>
+                  )}
+                </div>
+              )}
               {study.source && (
                 <p className="text-xs text-gray-400 mb-2 break-all min-w-0">
                   🔗 {study.source}
@@ -387,10 +523,11 @@ export function StudiesView({ onSelectEntry }: Props) {
                   >
                     📄 Citește PDF & Notițe
                   </button>
-                ) : (study.source || study.content.includes('**PDF:**')) ? (
+                ) : (study.source || (study.content || study.content_preview || '').includes('**PDF:**')) ? (
                   <button
                     onClick={async e => {
                       e.stopPropagation()
+                      setDownloadingPdf(prev => ({ ...prev, [study.id]: true }))
                       try {
                         await api.studies.download(study.id)
                         toast.success('PDF descărcat cu succes!')
@@ -405,11 +542,17 @@ export function StudiesView({ onSelectEntry }: Props) {
                         } else {
                           toast.error('Descărcarea PDF a eșuat: ' + (err instanceof Error ? err.message : 'problemă de rețea'))
                         }
+                      } finally {
+                        setDownloadingPdf(prev => ({ ...prev, [study.id]: false }))
                       }
                     }}
-                    className="btn-ghost text-xs px-2 py-1"
+                    disabled={downloadingPdf[study.id]}
+                    aria-busy={downloadingPdf[study.id] || false}
+                    className="btn-ghost text-xs px-2 py-1 disabled:opacity-50"
                   >
-                    <FileText className="w-3.5 h-3.5" /> Descarcă PDF
+                    {downloadingPdf[study.id]
+                      ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Se descarcă PDF-ul…</>
+                      : <><FileText className="w-3.5 h-3.5" /> Descarcă PDF</>}
                   </button>
                 ) : null}
                 {/* Always available: the stored URL is often wrong, so let the
@@ -444,7 +587,7 @@ export function StudiesView({ onSelectEntry }: Props) {
                 </button>
               </div>
               <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-3 flex-1 break-words">
-                {study.content.replace(/[#*`\[\]()]/g, '').slice(0, 300)}
+                {(study.content_preview || study.content || '').replace(/[#*`\[\]()]/g, '').slice(0, 300)}
               </p>
               {study.tags && (
                 <div className="flex gap-1 mt-2 flex-wrap">
@@ -481,11 +624,13 @@ export function StudiesView({ onSelectEntry }: Props) {
           <button
             onClick={handleBulkDownload}
             disabled={bulkDownloading}
+            aria-busy={bulkDownloading}
             className="btn-secondary text-xs bg-gray-800 hover:bg-gray-700 border-gray-600 text-white flex items-center gap-1.5 py-1.5 px-3"
             title="Descarcă PDF-uri pentru studiile selectate"
           >
-            {bulkDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-            Descarcă PDF-uri ({selectedIds.size})
+            {bulkDownloading
+              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Se descarcă PDF-uri…</>
+              : <><Download className="w-3.5 h-3.5" /> Descarcă PDF-uri ({selectedIds.size})</>}
           </button>
 
           <button

@@ -30,6 +30,9 @@ def client(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def clear_catalogue_cache(monkeypatch):
     monkeypatch.setattr(llm, "_catalogue_cache", {"at": 0.0, "models": {}})
+    # The resolved window is cached per model name; tests swap catalogues, so
+    # every test starts with an empty window cache too.
+    llm._context_window_cache.clear()
 
 
 def test_window_is_read_from_the_provider(monkeypatch):

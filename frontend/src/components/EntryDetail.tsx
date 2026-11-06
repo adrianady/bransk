@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Pencil, Archive, ArchiveRestore, Trash2, GraduationCap } from 'lucide-react'
+import { ArrowLeft, Pencil, Archive, ArchiveRestore, Trash2, GraduationCap, Sparkles, Loader2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
@@ -80,6 +80,7 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProj
   const [reminderTitle, setReminderTitle] = useState('')
   const [reminderTrigger, setReminderTrigger] = useState('')
   const [reminderType, setReminderType] = useState('once')
+  const [appraising, setAppraising] = useState(false)
   const [activeTab, setActiveTab] = useState<'info' | 'links' | 'todo' | 'review' | 'reminders' | 'qa'>('info')
 
   useEffect(() => {
@@ -282,6 +283,35 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProj
               )}
             </div>
             {entry.authors && <p className="text-gray-600 dark:text-gray-400"><strong>Autori:</strong> {entry.authors}</p>}
+            {(!entry.design || entry.quality == null || !entry.effect_direction) && (
+              <div>
+                <button
+                  onClick={async () => {
+                    setAppraising(true)
+                    try {
+                      const res = await api.studies.aiAppraisal(entry.id)
+                      toast.success(`AI: ${res.design || 'design necunoscut'} · ${res.effect_direction || 'efect n/d'} · ${res.quality ?? '?'}/5`)
+                      onUpdate({
+                        ...entry,
+                        design: res.design || entry.design,
+                        effect_direction: res.effect_direction || entry.effect_direction,
+                        quality: res.quality ?? entry.quality,
+                      })
+                    } catch (err) {
+                      toast.error('Evaluarea AI a eșuat: ' + (err instanceof Error ? err.message : 'eroare'))
+                    } finally {
+                      setAppraising(false)
+                    }
+                  }}
+                  disabled={appraising}
+                  className="btn-secondary text-xs py-1 px-2.5 inline-flex items-center gap-1.5"
+                  title="Modelul estimează designul, direcția efectului și calitatea din textul studiului; poți corecta apoi în editor"
+                >
+                  {appraising ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                  AI estimează designul și calitatea
+                </button>
+              </div>
+            )}
             {/* A DOI resolved against Crossref is the trustworthy identifier.
                 The stored `source` URL came from the research pipeline and is
                 often wrong, so it is shown as "unverified" beside it. */}

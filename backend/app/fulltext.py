@@ -85,6 +85,8 @@ class FulltextResult:
     url: str = ""
     chars: int = 0
     chunks: int = 0
+    index_error: bool = False
+    text_save_error: bool = False
     tried: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -95,6 +97,8 @@ class FulltextResult:
             "url": self.url,
             "chars": self.chars,
             "chunks": self.chunks,
+            "index_error": self.index_error,
+            "text_save_error": self.text_save_error,
             "tried": self.tried,
         }
 
@@ -431,19 +435,25 @@ async def fetch_fulltext(entry_id: int, *, index: bool = True) -> dict:
                 attempt["file"] = fname
                 result.tried.append(attempt)
                 if index:
-                    try:
-                        from app import studytext
-                        from app.pdf_rag import extract_pdf_text, index_pdf
+                    from app import studytext
+                    from app.pdf_rag import extract_pdf_text, index_pdf
 
+                    try:
                         result.chunks = await index_pdf(entry_id, pdf_path_for(entry_id))
+                    except Exception as exc:  # noqa: BLE001 - the file is still useful
+                        result.index_error = True
+                        logger.warning("Indexing #%s failed: %s", entry_id, exc)
+                    else:
                         # Keep the readable text next to the PDF as well: one
                         # grep-able file per study, and the source for a future
                         # re-index that does not need the PDF again.
-                        pdf_text = await asyncio.to_thread(extract_pdf_text, pdf_path_for(entry_id))
-                        if pdf_text.strip():
-                            await asyncio.to_thread(studytext.save_text, entry_id, entry["title"], pdf_text)
-                    except Exception as exc:  # noqa: BLE001 - the file is still useful
-                        logger.warning("Indexing #%s failed: %s", entry_id, exc)
+                        try:
+                            pdf_text = await asyncio.to_thread(extract_pdf_text, pdf_path_for(entry_id))
+                            if pdf_text.strip():
+                                await asyncio.to_thread(studytext.save_text, entry_id, entry["title"], pdf_text)
+                        except Exception as exc:  # noqa: BLE001 - RAG chunks remain indexed
+                            result.text_save_error = True
+                            logger.warning("Saving extracted text for #%s failed: %s", entry_id, exc)
                 return result.as_dict()
             except ValueError as exc:  # SSRF guard said no
                 attempt["error"] = f"blocked: {exc}"

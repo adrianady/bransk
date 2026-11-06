@@ -1,7 +1,10 @@
 export interface Entry {
   id: number;
   title: string;
-  content: string;
+  // Full text comes from the detail endpoint; list views carry a short
+  // preview so the payload stays small (see X-Total-Count on /entries).
+  content?: string;
+  content_preview?: string;
   entry_date: string | null;
   created_at: string;
   updated_at: string;
@@ -66,6 +69,7 @@ export interface BulkImportResponse {
     pdf_url?: string;
     source?: string;
     pdf_downloaded: boolean;
+    pdf_index_failed: boolean;
   }[];
   skipped: {
     title: string;
@@ -76,6 +80,8 @@ export interface BulkImportResponse {
   total_imported: number;
   total_skipped: number;
   pdfs_downloaded: number;
+  pdfs_failed: number;
+  pdfs_index_failed: number;
 }
 
 export interface StudyNote {
@@ -205,6 +211,10 @@ export interface SpacedRepetitionItem {
   next_review: string | null;
   quiz_enabled: boolean;
   question_count: number;
+  // Joined from entries so review cards show real titles without a
+  // separate 500-entry download.
+  entry_title?: string;
+  content_preview?: string;
 }
 
 export interface TodoItem {
@@ -214,6 +224,9 @@ export interface TodoItem {
   completed: boolean;
   priority: string;
   effort: string;
+  // Joined from entries (see SpacedRepetitionItem).
+  entry_title?: string;
+  content_preview?: string;
 }
 
 export interface Reminder {
@@ -730,6 +743,8 @@ export interface AiModelInfo {
   name: string;
   context_window: number | null;
   input_modalities: string[];
+  /** zero-price model (Go includes these; Console hides them) */
+  free?: boolean;
 }
 
 /** GET /ai/models: the provider's catalogue plus the model actually in use. */
@@ -739,6 +754,12 @@ export interface AiModelsResponse {
   from_provider: boolean;
   /** false when the env default is an alias the catalogue does not list */
   active_listed?: boolean;
+  /** false when the current Console model is free-tier and unavailable to external clients */
+  active_supported?: boolean;
+  /** zero-price models; Console blocks them, Go includes them */
+  free_model_ids?: string[];
+  /** free models excluded from this service's catalogue (Console only) */
+  blocked_free_model_ids?: string[];
   note?: string;
   env_default?: string;
 }
@@ -763,6 +784,12 @@ export interface AiStatusResponse {
 export interface AiModelChoiceResponse {
   active: string;
   cleared: boolean;
+}
+
+export interface AiModelChoiceRequest {
+  model_id: string;
+  /** Save a provider-specific model without switching the active provider. */
+  provider?: string;
 }
 
 /** One entry of GET /ai/providers. */
@@ -824,4 +851,97 @@ export interface AiOpenCodeConfigState {
 export interface AiOpenCodeSaveRequest {
   base_url: string;
   directory: string;
+}
+
+/** OpenCode Console inference settings; the Bearer key itself is never returned. */
+export interface AiOpenCodeConsoleConfigState {
+  configured: boolean;
+  base_url: string;
+  has_key: boolean;
+}
+
+export interface AiOpenCodeConsoleSaveRequest {
+  base_url: string;
+  api_key?: string;
+  clear_key?: boolean;
+}
+
+export interface BibliographyReference {
+  entry_id: number;
+  title: string;
+  authors: string;
+  year: string;
+  doi: string;
+  apa: string;
+  cited: boolean;
+  has_doi: boolean;
+}
+
+export interface BibliographyResponse {
+  total: number;
+  cited_count: number;
+  references: BibliographyReference[];
+}
+
+export interface PdfHighlight {
+  id: number;
+  entry_id: number;
+  document_id: number | null;
+  page_number: number | null;
+  quote: string;
+  note: string;
+  created_at: string;
+}
+
+export interface GlobalSearchNote {
+  id: number;
+  entry_id: number;
+  content: string;
+  page_number: number | null;
+  course_context: string;
+  entry_title: string;
+}
+
+export interface GlobalSearchHighlight {
+  id: number;
+  entry_id: number;
+  quote: string;
+  note: string;
+  page_number: number | null;
+  entry_title: string;
+}
+
+export interface GlobalSearchChunk {
+  id: number;
+  entry_id: number;
+  chunk_index: number;
+  page_number: number | null;
+  preview: string;
+  entry_title: string;
+  score?: number;
+}
+
+export interface GlobalSearchResponse {
+  query: string;
+  total: number;
+  entries: { id: number; title: string; entry_date: string | null; tags: string; importance: number; content_preview: string }[];
+  studies: { id: number; title: string; authors: string; entry_date: string | null; doi: string; pdf_path: string; quality: number | null; study_type: string }[];
+  notes: GlobalSearchNote[];
+  highlights: GlobalSearchHighlight[];
+  chunks: GlobalSearchChunk[];
+}
+
+export interface ScreeningSummary {
+  studies_total: number;
+  included: number;
+  excluded: number;
+  maybe: number;
+  undecided: number;
+}
+
+export interface ScreeningDecisionRow {
+  entry_id: number;
+  decision: 'include' | 'exclude' | 'maybe';
+  reason: string;
+  updated_at: string;
 }
