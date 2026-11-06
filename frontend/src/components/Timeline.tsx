@@ -66,6 +66,9 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
   const [allTags, setAllTags] = useState<string[]>([])
   const [visLoaded, setVisLoaded] = useState(false)
   const [search, setSearch] = useState('')
+  // „Nicio rezultat" trebuie diferențiat de „biblioteca e goală": cu filtre
+  // active, mesajul de first-run („Creează prima intrare") ar fi înșelător.
+  const hasActiveFilters = Boolean(filterFrom || filterTo || filterTag || search.trim())
   const [density, setDensity] = useState<TimelineBuckets | null>(null)
   const [bucketSize, setBucketSize] = useState<'century' | 'decade'>('century')
   const [showMobileFilters, setShowMobileFilters] = useState(false)
@@ -124,7 +127,7 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
   // entries is before scrolling a 1676-year axis.
   useEffect(() => {
     let alive = true
-    api.timeline.buckets({ bucket: bucketSize, tags: filterTag || undefined })
+    api.timeline.buckets({ bucket: bucketSize, tags: filterTag || undefined, from_date: filterFrom || undefined, to_date: filterTo || undefined, q: search.trim() || undefined })
       .then(d => { if (alive) setDensity(d) })
       .catch(() => { if (alive) setDensity(null) })
     return () => { alive = false }
@@ -441,11 +444,11 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
           <button onClick={loadEntries} className="btn-secondary">↻ Reîncearcă</button>
         </div>
       ) : entries.filter(e => e.entry_date).length === 0 ? (
-        entries.length > 0 ? (
+        hasActiveFilters ? (
           <div className="card text-center py-8">
             <p className="text-gray-500 mb-2">Nicio intrare cu dată nu corespunde filtrelor actuale.</p>
             <button
-              onClick={() => { setFilterFrom(''); setFilterTo(''); setFilterTag('') }}
+              onClick={() => { setFilterFrom(''); setFilterTo(''); setFilterTag(''); setSearch('') }}
               className="btn-ghost text-sm"
             >Golește filtrele</button>
           </div>

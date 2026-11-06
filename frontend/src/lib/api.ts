@@ -404,12 +404,13 @@ export const api = {
       return request<{ entries: TimelineEntry[]; total: number }>(`/timeline?${p}`);
     },
     stats: () => request<TimelineStats>('/timeline/stats'),
-    buckets: (params?: { bucket?: 'century' | 'decade' | 'year'; from_date?: string; to_date?: string; tags?: string }) => {
+    buckets: (params?: { bucket?: 'century' | 'decade' | 'year'; from_date?: string; to_date?: string; tags?: string; q?: string }) => {
       const p = new URLSearchParams();
       if (params?.bucket) p.set('bucket', params.bucket);
       if (params?.from_date) p.set('from_date', params.from_date);
       if (params?.to_date) p.set('to_date', params.to_date);
       if (params?.tags) p.set('tags', params.tags);
+      if (params?.q) p.set('q', params.q);
       return request<TimelineBuckets>(`/timeline/buckets?${p}`);
     },
   },

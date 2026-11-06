@@ -224,3 +224,20 @@ def test_entry_list_sort_options(client):
     assert by_date_asc[0]["entry_date"] == "2026-01-01"
 
     assert client.get("/api/entries", params={"sort": "bogus"}).status_code == 422
+
+
+# ── Histograma cronologiei respectă aceleași filtre ca lista (2026-11) ──────
+
+def test_timeline_buckets_honor_search_and_dates(client):
+    _mk(client, "Memoria procedurală", entry_date="2026-02-01")
+    _mk(client, "Alt subiect", entry_date="2026-02-02")
+
+    all_buckets = client.get("/api/timeline/buckets", params={"bucket": "year"}).json()
+    assert all_buckets["total"] == 2
+
+    filtered = client.get("/api/timeline/buckets", params={"bucket": "year", "q": "memoria procedurala"}).json()
+    assert filtered["total"] == 1, "bucket-urile trebuie să respecte căutarea diacritic-insensibilă"
+
+    dated = client.get("/api/timeline/buckets",
+                       params={"bucket": "year", "from_date": "2026-02-02", "to_date": "2026-02-02"}).json()
+    assert dated["total"] == 1

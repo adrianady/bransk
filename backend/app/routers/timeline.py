@@ -143,17 +143,19 @@ def timeline_buckets(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
     tags: Optional[str] = None,
+    q: Optional[str] = Query(None, description="Aceleași filtre de căutare ca /timeline"),
 ):
     """Entry counts per period, for the density strip above the timeline.
 
     Returns only non-empty buckets plus the range, so the UI can size each bar
     against the largest one and jump straight to a crowded era instead of
-    zooming by hand across sixteen centuries.
+    zooming by hand across sixteen centuries. Accepts the same filters as
+    /timeline, so the strip always reflects what is currently visible.
     """
     conn = get_db()
     try:
         params: list = []
-        where_sql = _where(params, from_date, to_date, tags, None)
+        where_sql = _where(params, from_date, to_date, tags, q)
         rows = conn.execute(
             f"""SELECT e.entry_date, e.tags, e.importance
                 FROM entries e
