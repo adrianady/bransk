@@ -810,7 +810,6 @@ def provider_catalogue() -> list[dict]:
             configured = is_configured(service=_console_service(pid)) and bool(model)
         elif pid == "mock":
             label = "Mock (offline)"
-            amount = ("", "mock-model")
         else:
             spec = _OPENAI_COMPATIBLE[pid]
             label, key, model = spec["label"], provider_key(pid), provider_model(pid)
