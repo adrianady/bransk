@@ -32,3 +32,6 @@ frontend/*.tsbuildinfo
 
 # One-off local tooling scripts (design audits) stay outside the repo
 frontend/.design-*.mjs
+
+# build artefacts accidentally created at the repo root
+node_modules/
