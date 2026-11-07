@@ -1540,7 +1540,7 @@ def get_study_notes(entry_id: int):
         conn.close()
 
 
-@router.post("/studies/{entry_id}/notes")
+@router.post("/studies/{entry_id}/notes", status_code=201)
 def create_study_note(entry_id: int, payload: StudyNoteCreate):
     """Attach a personal note (with course attribution and optional page ref) to a study/PDF."""
     conn = get_db()
@@ -1602,7 +1602,7 @@ def update_study_note(note_id: int, payload: StudyNoteUpdate):
         conn.close()
 
 
-@router.delete("/studies/notes/{note_id}")
+@router.delete("/studies/notes/{note_id}", status_code=204)
 def delete_study_note(note_id: int):
     """Delete a user study note."""
     conn = get_db()
