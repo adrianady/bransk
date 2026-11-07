@@ -344,6 +344,37 @@ async def chat(data: ChatRequest):
         raise HTTPException(status_code=503, detail=detail)
 
 
+async def _with_sse_keepalive(source, interval: float = 15.0):
+    """Emit SSE comments (`: ping`) while the stream goes quiet.
+
+    Free models (beam-free) and long tool phases can stay silent for over a
+    minute mid-stream; mobile clients then declare the connection dead even
+    though generation is healthy. A ping comment travels as bytes (resetting
+    the client's silence timer) and is ignored by every SSE parser. The inner
+    task is NEVER cancelled on timeout — cancelling it would kill the model
+    call the ping is meant to protect.
+    """
+    source_iter = source.__aiter__()
+    pending = asyncio.ensure_future(source_iter.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                yield ": ping\n\n"
+                continue
+            try:
+                item = pending.result()
+            except StopAsyncIteration:
+                return
+            yield item
+            pending = asyncio.ensure_future(source_iter.__anext__())
+    except asyncio.CancelledError:
+        pending.cancel()
+        raise
+    finally:
+        pending.cancel()
+
+
 @router.post("/chat/stream")
 async def chat_stream(data: ChatRequest, request: Request):
     """SSE streaming chat with auto-failover and research actions."""
@@ -556,7 +587,7 @@ async def chat_stream(data: ChatRequest, request: Request):
             yield f"data: {json.dumps({'type': 'error', 'content': content})}\n\n"
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(_with_sse_keepalive(generate()), media_type="text/event-stream")
 
 
 @router.post("/chat/confirm", response_model=dict)

@@ -238,13 +238,15 @@ export function ChatPanel({ onClose }: Props) {
       let actions: ChatAction[] = []
 
       // A dead link (phone locked, Wi-Fi switched, Tailscale drop) does not always
-      // reject the read: it can stay pending forever. 40 s without a single byte
+      // reject the read: it can stay pending forever. 90 s without a single byte
       // is treated as an interruption, so the user gets their partial answer and
-      // a resend button instead of an endless spinner.
+      // a resend button instead of an endless spinner. The server also emits
+      // `: ping` keepalive comments during silent stretches, so reaching 90 s
+      // means the link itself is gone, not just a slow model.
       lastByteRef.current = Date.now()
       stalledRef.current = false
       const watchdog = window.setInterval(() => {
-        if (Date.now() - lastByteRef.current > 40000) {
+        if (Date.now() - lastByteRef.current > 90000) {
           stalledRef.current = true
           controller.abort()
         }

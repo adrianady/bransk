@@ -726,3 +726,47 @@ def test_tool_results_text_labels_new_actions():
     assert "12 chunk-uri" in text
     assert "Linia unu." in text
 
+
+
+def test_sse_keepalive_pings_during_silence():
+    """Free models stall >40s mid-stream; the server must keep the link warm."""
+    import asyncio
+
+    from app.routers.chat import _with_sse_keepalive
+
+    async def slow_source():
+        await asyncio.sleep(1.2)
+        yield "data: {\"type\": \"chunk\", \"content\": \"gata\"}\n\n"
+
+    async def collect():
+        out = []
+        async for chunk in _with_sse_keepalive(slow_source(), interval=0.25):
+            out.append(chunk)
+        return out
+
+    out = asyncio.run(collect())
+    pings = [c for c in out if c.startswith(": ping")]
+    assert pings, "keepalive-ul trebuie să trimită ping-uri în liniște"
+    assert out[-1] == "data: {\"type\": \"chunk\", \"content\": \"gata\"}\n\n"
+    assert len(pings) >= 2
+
+
+def test_sse_keepalive_stops_cleanly():
+    import asyncio
+
+    from app.routers.chat import _with_sse_keepalive
+
+    async def instant():
+        yield "data: a\n\n"
+        yield "data: [DONE]\n\n"
+
+    out = asyncio.run(asyncio.wait_for(
+        _collect(_with_sse_keepalive(instant(), interval=0.2)), timeout=5))
+    assert out == ["data: a\n\n", "data: [DONE]\n\n"]
+
+
+async def _collect(agen):
+    out = []
+    async for chunk in agen:
+        out.append(chunk)
+    return out
