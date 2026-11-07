@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, Cpu, CheckCircle2, XCircle, HelpCircle, Loader2 } from 'lucide-react'
+import { X, Cpu, CheckCircle2, XCircle, HelpCircle, Loader2, PartyPopper } from 'lucide-react'
 import { api } from '../lib/api'
+import { useToast } from './Toast'
 import type {
   AiModelsResponse,
   AiOpenCodeConfigState,
@@ -52,6 +53,7 @@ const blankDirect = (url: string): DirectServiceState => ({
 })
 
 export function AiStatusModal({ onClose }: { onClose: () => void }) {
+  const toast = useToast()
   const [status, setStatus] = useState<AiStatusResponse | null>(null)
   const [error, setError] = useState('')
   const [catalogue, setCatalogue] = useState<AiModelsResponse | null>(null)
@@ -151,10 +153,15 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
     try {
       const body = await api.ai.setProvider(providerId)
       const label = providers?.providers.find(p => p.id === body.active)?.label || body.active
-      setProviderNote(`Furnizor activ: ${label}. Conversațiile următoare îl folosesc.`)
       await loadProviders()
+      const model = providers?.providers.find(p => p.id === body.active)?.model || ''
+      const msg = `Furnizor activ: ${label}${model ? ` · model: ${model}` : ''}. Conversațiile următoare îl folosesc.`
+      setProviderNote(msg)
+      toast.success(msg)
     } catch (e) {
-      setProviderNote(e instanceof Error ? e.message : 'Schimbarea furnizorului a eșuat.')
+      const msg = e instanceof Error ? e.message : 'Schimbarea furnizorului a eșuat.'
+      setProviderNote(msg)
+      toast.error(msg)
     } finally {
       setChoosing(false)
     }
@@ -722,7 +729,10 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                   </p>
                 )}
                 {providerNote && (
-                  <p className="text-xs text-chrono-600 dark:text-chrono-400 mt-1">{providerNote}</p>
+                  <div className="mt-1.5 flex items-start gap-1.5 text-xs font-semibold text-chrono-700 dark:text-chrono-300 bg-chrono-50 dark:bg-chrono-950/60 border border-chrono-200 dark:border-chrono-800 rounded-lg px-2 py-1.5">
+                    <PartyPopper className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{providerNote}</span>
+                  </div>
                 )}
                 {providers && settingsProvider && (() => {
                   const selected = providers.providers.find(p => p.id === settingsProvider)

@@ -263,3 +263,37 @@ def test_no_open_source_leaves_the_study_untouched(monkeypatch, text_dir):
         assert not studytext.has_text(9)
 
     asyncio.run(_run())
+
+
+def test_arxiv_ids_extracted_from_entry():
+    from app.fulltext import _arxiv_ids_in_entry
+
+    entry = {
+        "source": "https://arxiv.org/abs/2301.07067v2",
+        "content": "Vezi și arXiv:2401.12345 și arXiv 2001.07067",
+    }
+    ids = _arxiv_ids_in_entry(entry)
+    assert "2301.07067v2" in ids
+    assert "2401.12345" in ids
+    assert "2001.07067" in ids
+
+
+def test_websearch_pdfs_keep_only_pdf_links(monkeypatch):
+    import asyncio
+
+    from app import fulltext
+
+    async def fake_search(query, max_results=5):
+        return [
+            {"url": "https://example.com/paper.pdf", "title": "Paper PDF"},
+            {"url": "https://example.com/landing", "title": "Landing page"},
+            {"url": "ftp://x/p.pdf", "title": "no"},
+        ]
+
+    monkeypatch.setattr(fulltext, "clean_title", lambda t: t)
+    import app.web_search as ws
+
+    monkeypatch.setattr(ws, "search_web", fake_search)
+    out = asyncio.run(fulltext._websearch_pdfs("Some long enough title here"))
+    assert [c.url for c in out] == ["https://example.com/paper.pdf"]
+    assert all(c.source == "websearch" for c in out)

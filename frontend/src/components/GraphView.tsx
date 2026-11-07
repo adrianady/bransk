@@ -251,7 +251,23 @@ export function GraphView({ onSelectEntry }: Props) {
       // keeps the labels overlapping. So labels are shown only where they carry
       // meaning — the focused node, its neighbours and the hubs — and every
       // other node keeps its full title in the tooltip and in the panel.
-      const cutLabel = (t: string) => (t.length > 26 ? t.slice(0, 25) + '…' : t)
+      const cutLabel = (t: string) => {
+        // Wrap to two short lines: a narrow box spreads better under the
+        // physics solver than a 200px-wide slab that collides with neighbours.
+        const cut = t.length > 40 ? t.slice(0, 39) + '…' : t
+        if (cut.length <= 20) return cut
+        const words = cut.split(' ')
+        const line1: string[] = []
+        let len = 0
+        let i = 0
+        while (i < words.length && len < 20) {
+          line1.push(words[i])
+          len += words[i].length + 1
+          i += 1
+        }
+        const rest = words.slice(i).join(' ')
+        return rest ? line1.join(' ') + '\n' + rest : cut
+      }
 
       const graphNodes = visible.nodes.filter(n => !n.isolated)
       const nodes = new vis.DataSet(graphNodes.map(n => {
@@ -308,10 +324,13 @@ export function GraphView({ onSelectEntry }: Props) {
           ...e,
           width: isFocusEdge ? 2.4 : (isGeneric ? 1 : 1.6),
           dashes: isGeneric ? [4, 4] : false,
+          // Straight edges: curved spaghetti was one of the main reasons the
+          // middle of the graph read as noise. The type/roundness fields stay
+          // because vis-timeline's types demand them even when disabled.
           smooth: {
-            enabled: true,
+            enabled: false,
             type: 'curvedCW',
-            roundness: 0.15,
+            roundness: 0,
           },
           color: {
             color: isGeneric ? (isDark ? '#3a4554' : '#b7c1ce') : (e.color || '#2f5fa8'),
@@ -344,20 +363,22 @@ export function GraphView({ onSelectEntry }: Props) {
             face: '"Source Sans 3 Variable", "Source Sans 3", sans-serif',
           },
           margin: { top: 7, right: 11, bottom: 7, left: 11 },
-          widthConstraint: { maximum: 200 },
+          widthConstraint: { maximum: 150 },
           labelHighlightBold: true,
         },
-        physics: {
+          physics: {
           enabled: physics,
-          stabilization: { iterations: physics ? 180 : 0, updateInterval: 25 },
+          stabilization: { iterations: physics ? 220 : 0, updateInterval: 25 },
           solver: 'forceAtlas2Based',
           forceAtlas2Based: {
-            // Balanced spring length and controlled repulsion keep the graph clustered and legible
-            gravitationalConstant: -75,
-            centralGravity: 0.015,
-            springLength: 130,
+            // Stronger repulsion + longer springs spread the boxes so the
+            // wrapped two-line labels do not collide (the old -75/130 pair
+            // stacked 200px boxes on top of each other).
+            gravitationalConstant: -150,
+            centralGravity: 0.02,
+            springLength: 180,
             springConstant: 0.05,
-            damping: 0.6,
+            damping: 0.5,
             avoidOverlap: 1,
           },
         },

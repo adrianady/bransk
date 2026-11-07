@@ -289,6 +289,46 @@ async def _arxiv(client: httpx.AsyncClient, title: str) -> list[Candidate]:
     return out
 
 
+def _arxiv_ids_in_entry(entry: dict) -> list[str]:
+    """arXiv IDs the user already saved in the source URL or the content."""
+    import re
+
+    blob = f"{entry.get('source') or ''} {entry.get('content') or ''}"
+    ids: list[str] = []
+    for m in re.finditer(r"ar[Xx]iv[:\s]*([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", blob):
+        ids.append(m.group(1))
+    for m in re.finditer(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", blob, re.I):
+        if m.group(1) not in ids:
+            ids.append(m.group(1))
+    return ids
+
+
+async def _websearch_pdfs(title: str, client: httpx.AsyncClient | None = None) -> list[Candidate]:
+    """Web-browsing step: DuckDuckGo/Serper finds direct PDF links by title.
+
+    Runs LAST in the chain — open-academic sources are trusted first, this is
+    the catch-all for papers that exist only as stray PDFs on the open web.
+    """
+    if not title or len(title.strip()) < 8:
+        return []
+    try:
+        from app.web_search import search_web
+
+        results = await search_web(f'"{clean_title(title)}" filetype:pdf', max_results=6)
+    except Exception as exc:  # noqa: BLE001 - discovery must never raise
+        logger.info("Web search for PDFs failed: %s", type(exc).__name__)
+        return []
+    out: list[Candidate] = []
+    for r in results:
+        url = (r.get("url") or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        if not (".pdf" in url.lower() or "pdf" in (r.get("title") or "").lower()):
+            continue
+        out.append(Candidate(url=url, source="websearch", note="found via web search"))
+    return out
+
+
 async def find_fulltext(entry: dict, client: httpx.AsyncClient | None = None) -> list[Candidate]:
     """Ordered list of places where this study's text may live."""
     own = client is None
@@ -326,6 +366,14 @@ async def find_fulltext(entry: dict, client: httpx.AsyncClient | None = None) ->
 
         candidates.extend(await _europe_pmc(client, doi, title))
         candidates.extend(await _arxiv(client, title))
+        # arXiv IDs the user already saved — the exact preprint, no title match.
+        for aid in _arxiv_ids_in_entry(entry):
+            candidates.append(Candidate(url=f"https://arxiv.org/pdf/{aid}", source="arxiv", note="saved arXiv ID"))
+        # Web-browsing catch-all: direct PDFs found by search, tried last.
+        try:
+            candidates.extend(await _websearch_pdfs(title))
+        except Exception as exc:  # noqa: BLE001 - discovery must never raise
+            logger.info("Web search candidates failed: %s", type(exc).__name__)
 
         seen: set[str] = set()
         unique: list[Candidate] = []
@@ -433,6 +481,18 @@ async def fetch_fulltext(entry_id: int, *, index: bool = True) -> dict:
                     continue
                 result.status, result.source, result.url = "pdf", cand.source, cand.url
                 attempt["file"] = fname
+                # Persist pdf_path HERE as well: without this, the file sat on
+                # disk while the row kept saying "no PDF" — the screen went on
+                # offering a download that had already succeeded.
+                conn = get_db()
+                try:
+                    conn.execute(
+                        "UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
+                        [fname, entry_id],
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
                 result.tried.append(attempt)
                 if index:
                     from app import studytext
