@@ -24,7 +24,7 @@ import anyio
 logger = logging.getLogger("chronokg.studytext")
 
 # Same switch and default as the PDFs: everything lives under backend/data,
-# which is on the HDD where the project is (/media/adrian/D4C42C44C42C2B662).
+# which sits on the external HDD mount where the project lives.
 TEXT_DIR = Path(
     __import__("os").getenv(
         "CHRONOKG_STUDYTEXT_DIR",

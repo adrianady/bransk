@@ -29,3 +29,6 @@ documentation/
 
 # TypeScript incremental build cache
 frontend/*.tsbuildinfo
+
+# One-off local tooling scripts (design audits) stay outside the repo
+frontend/.design-*.mjs

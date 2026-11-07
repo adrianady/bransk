@@ -23,9 +23,11 @@ THREADS="${THREADS:-6}"
 
 # Binarul CPU explicit. NU ne bazăm pe "llama-server" din PATH: wrapper-ul din
 # ~/.local/bin/llama-server exportă libs CUDA și rulează build-ul CUDA, deci
-# serverul ajungea pe GPU deși scriptul se vrea pe CPU.
-LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-/home/adrian/.local/opt/llama-cpu/bin/llama-server}"
-LLAMA_CPU_LIB="${LLAMA_CPU_LIB:-/home/adrian/.local/opt/llama-cpu/lib}"
+# serverul ajungea pe GPU deși scriptul se vrea pe CPU. Calea implicită folosește
+# $USER, ca scriptul să nu înglobeze un nume de utilizator; suprascrie cu
+# LLAMA_SERVER_BIN / LLAMA_CPU_LIB dacă instalarea e în alt loc.
+LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-/home/$USER/.local/opt/llama-cpu/bin/llama-server}"
+LLAMA_CPU_LIB="${LLAMA_CPU_LIB:-/home/$USER/.local/opt/llama-cpu/lib}"
 
 # Build-ul CPU are nevoie de propriile librării. Punem calea CPU PRIMA (are
 # prioritate), păstrând restul LD_LIBRARY_PATH dacă era deja setat.
