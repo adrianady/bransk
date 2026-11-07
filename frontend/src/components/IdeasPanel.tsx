@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, Lightbulb, Loader2, Wand2 } from 'lucide-react'
+import { Plus, Trash2, Lightbulb, Loader2, Wand2, Pencil, Check, X } from 'lucide-react'
 import { api } from '../lib/api'
 import { useToast } from './Toast'
 import type { Idea } from '../lib/types'
@@ -38,6 +38,29 @@ export function IdeasPanel() {
   const [saving, setSaving] = useState(false)
   const [suggesting, setSuggesting] = useState(false)
   const [suggestions, setSuggestions] = useState<{ text: string; category: string }[]>([])
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [savingEdit, setSavingEdit] = useState(false)
+
+  const startEdit = (idea: Idea) => {
+    setEditingId(idea.id)
+    setEditDraft(idea.text)
+  }
+
+  const saveEdit = async (ideaId: number) => {
+    const clean = editDraft.trim()
+    if (!clean) return
+    setSavingEdit(true)
+    try {
+      const updated = await api.project.ideas.update(ideaId, { text: clean })
+      setIdeas(prev => prev.map(i => (i.id === ideaId ? updated : i)))
+      setEditingId(null)
+    } catch (err) {
+      toast.error('Idea nu s-a putut salva: ' + (err instanceof Error ? err.message : ''))
+    } finally {
+      setSavingEdit(false)
+    }
+  }
 
   const load = async (cat = filter) => {
     setLoading(true)
@@ -202,12 +225,43 @@ export function IdeasPanel() {
                 <span className={`badge text-xs shrink-0 ${CATEGORY_STYLE[idea.category] || CATEGORY_STYLE.general}`}>
                   {CATEGORIES.find(c => c.id === idea.category)?.label || idea.category}
                 </span>
-                <span className="text-sm flex-1 min-w-0 break-words">{idea.text}</span>
-                <button onClick={() => remove(idea.id)}
-                  className="btn-ghost text-xs shrink-0 opacity-60 hover:opacity-100"
-                  aria-label={`Șterge ideea: ${idea.text.slice(0, 40)}`}>
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                {editingId === idea.id ? (
+                  <div className="flex-1 min-w-0 flex gap-1.5">
+                    <input
+                      value={editDraft}
+                      onChange={e => setEditDraft(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') saveEdit(idea.id)
+                        if (e.key === 'Escape') setEditingId(null)
+                      }}
+                      autoFocus
+                      className="input flex-1 min-w-0 text-sm py-1"
+                      aria-label="Editează idea"
+                    />
+                    <button onClick={() => saveEdit(idea.id)} disabled={savingEdit || !editDraft.trim()}
+                      className="btn-primary text-xs py-1 px-2 shrink-0" aria-label="Salvează ideea">
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={() => setEditingId(null)}
+                      className="btn-ghost text-xs shrink-0" aria-label="Renunță la editare">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <span className="text-sm flex-1 min-w-0 break-words">{idea.text}</span>
+                    <button onClick={() => startEdit(idea)}
+                      className="btn-ghost text-xs shrink-0 opacity-60 hover:opacity-100"
+                      aria-label={`Editează ideea: ${idea.text.slice(0, 40)}`}>
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={() => remove(idea.id)}
+                      className="btn-ghost text-xs shrink-0 opacity-60 hover:opacity-100"
+                      aria-label={`Șterge ideea: ${idea.text.slice(0, 40)}`}>
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </>
+                )}
               </li>
             ))}
           </ul>

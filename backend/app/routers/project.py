@@ -1654,6 +1654,36 @@ def delete_idea(idea_id: int):
         conn.close()
 
 
+class IdeaUpdate(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+    category: str | None = None
+
+
+@router.put("/project/ideas/{idea_id}")
+def update_idea(idea_id: int, body: IdeaUpdate):
+    """Edit an idea in place — the list previously allowed only add/delete."""
+    category = body.category if body.category in _IDEA_CATEGORIES else None
+    conn = get_db()
+    try:
+        if category:
+            cur = conn.execute(
+                "UPDATE project_ideas SET text = ?, category = ? WHERE id = ?",
+                [body.text.strip(), category, idea_id],
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE project_ideas SET text = ? WHERE id = ?",
+                [body.text.strip(), idea_id],
+            )
+        conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Idea not found")
+        row = conn.execute("SELECT * FROM project_ideas WHERE id = ?", [idea_id]).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
 @router.post("/project/ideas/suggest")
 async def suggest_ideas():
     """Optional: ask the model for ideas grounded in the real library."""

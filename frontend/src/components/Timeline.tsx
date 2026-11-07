@@ -205,6 +205,7 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
       const defaultStart = hasPreModern ? '1960-01-01' : undefined
       const defaultEnd = hasPreModern ? `${nowYear + 1}-01-01` : undefined
 
+      const isMobile = window.innerWidth < 640
       const options = {
         stack: true,
         groupOrder: 'order',
@@ -212,8 +213,12 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
         verticalScroll: true,
         zoomKey: 'ctrlKey' as const,
         groupHeightMode: 'fitItems' as const,
-        maxHeight: '480px',
-        margin: { item: { horizontal: 4, vertical: 3 }, axis: 4 },
+        maxHeight: isMobile ? '380px' : '480px',
+        // Pe ecrane mici fontul itemelor e deja redus din CSS (max-width 150px);
+        // marginile mai strânse cresc densitatea utilă fără stack supraîncărcat.
+        margin: isMobile
+          ? { item: { horizontal: 2, vertical: 2 }, axis: 3 }
+          : { item: { horizontal: 4, vertical: 3 }, axis: 4 },
         start: filterFrom || defaultStart,
         end: filterTo || defaultEnd,
       }

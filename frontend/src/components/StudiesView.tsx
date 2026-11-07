@@ -69,6 +69,8 @@ export function StudiesView({ onSelectEntry }: Props) {
   const [screeningDecisions, setScreeningDecisions] = useState<Record<string, ScreeningDecisionRow>>({})
   const [screeningSummary, setScreeningSummary] = useState<ScreeningSummary | null>(null)
   const [filterScreening, setFilterScreening] = useState('')
+  // Draft reasons per study id; saved on Enter from the inline input.
+  const [reasonDrafts, setReasonDrafts] = useState<Record<number, string>>({})
   // Library filters the audit asked for: only readable / identified studies.
   const [filterPdf, setFilterPdf] = useState(false)
   const [filterDoi, setFilterDoi] = useState(false)
@@ -195,10 +197,15 @@ export function StudiesView({ onSelectEntry }: Props) {
     }
   }
 
-  const applyScreening = async (studyId: number, decision: 'include' | 'exclude' | 'maybe') => {
+  const applyScreening = async (studyId: number, decision: 'include' | 'exclude' | 'maybe', reason?: string) => {
     try {
-      const updated = await api.studies.setScreening(studyId, { decision })
+      const updated = await api.studies.setScreening(studyId, { decision, reason: reason ?? '' })
       setScreeningDecisions(prev => ({ ...prev, [String(studyId)]: updated }))
+      setReasonDrafts(prev => {
+        const next = { ...prev }
+        delete next[studyId]
+        return next
+      })
       setScreeningSummary(await api.studies.screeningSummary())
     } catch (err) {
       toast.error('Decizia nu s-a putut salva: ' + (err instanceof Error ? err.message : 'eroare'))
@@ -494,11 +501,28 @@ export function StudiesView({ onSelectEntry }: Props) {
                       </button>
                     )
                   })}
-                  {screeningDecisions[String(study.id)]?.reason && (
+                  {screeningDecisions[String(study.id)]?.reason && !reasonDrafts[study.id] && (
                     <span className="text-[10px] text-gray-400 truncate" title={screeningDecisions[String(study.id)].reason}>
                       {screeningDecisions[String(study.id)].reason}
                     </span>
                   )}
+                </div>
+              )}
+              {screeningMode && screeningDecisions[String(study.id)]?.decision && (
+                <div className="mb-2" onClick={e => { e.stopPropagation(); e.preventDefault() }}>
+                  <input
+                    value={reasonDrafts[study.id] ?? ''}
+                    onChange={e => setReasonDrafts(prev => ({ ...prev, [study.id]: e.target.value }))}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        const dec = screeningDecisions[String(study.id)].decision
+                        applyScreening(study.id, dec, reasonDrafts[study.id] ?? '')
+                      }
+                    }}
+                    placeholder="motivul deciziei (Enter salvează)"
+                    className="input w-full text-[11px] py-1 px-2"
+                    aria-label={`Motiv decizie pentru ${study.title}`}
+                  />
                 </div>
               )}
               {study.source && (

@@ -819,6 +819,8 @@ export const api = {
         request<Idea[]>(`/project/ideas${category ? `?category=${encodeURIComponent(category)}` : ''}`),
       create: (idea: { text: string; category?: string; section_id?: string }) =>
         request<Idea>('/project/ideas', { method: 'POST', body: JSON.stringify(idea) }),
+      update: (id: number, data: { text: string; category?: string }) =>
+        request<Idea>(`/project/ideas/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
       remove: (id: number) => request<void>(`/project/ideas/${id}`, { method: 'DELETE' }),
       suggest: () =>
         request<{ ideas: { text: string; category: string }[]; from_llm: boolean; note?: string }>(

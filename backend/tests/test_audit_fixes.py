@@ -241,3 +241,17 @@ def test_timeline_buckets_honor_search_and_dates(client):
     dated = client.get("/api/timeline/buckets",
                        params={"bucket": "year", "from_date": "2026-02-02", "to_date": "2026-02-02"}).json()
     assert dated["total"] == 1
+
+
+# ── Editarea ideilor (PUT /project/ideas/{id}) ──────────────────────────────
+
+def test_idea_update_text_and_category(client):
+    created = client.post("/api/project/ideas", json={"text": "Prima schiță", "category": "general"}).json()
+    updated = client.put(f"/api/project/ideas/{created['id']}",
+                         json={"text": "Schiță revizuită", "category": "metoda"}).json()
+    assert updated["text"] == "Schiță revizuită"
+    assert updated["category"] == "metoda"
+    listed = client.get("/api/project/ideas").json()
+    assert [i["text"] for i in listed if i["id"] == created["id"]] == ["Schiță revizuită"]
+    assert client.put("/api/project/ideas/9999", json={"text": "x"}).status_code == 404
+    assert client.put(f"/api/project/ideas/{created['id']}", json={"text": ""}).status_code == 422
