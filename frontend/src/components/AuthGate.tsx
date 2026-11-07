@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
 import { KeyRound, Loader2, LockKeyhole, LogOut, ShieldCheck } from 'lucide-react'
 import {
   AUTH_EVENT,
@@ -20,6 +20,17 @@ function messageOf(error: unknown, fallback: string): string {
 }
 
 /** Enforces network auth while keeping the local-first instance frictionless. */
+/** Lets the app surfaces (e.g. the mobile drawer) offer logout without a
+ *  fixed button covering the header controls. */
+export const AuthContext = createContext<{
+  sessionAuthenticated: boolean
+  logout: () => Promise<void>
+}>({ sessionAuthenticated: false, logout: async () => {} })
+
+export function useAuthStatus() {
+  return useContext(AuthContext)
+}
+
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [mode, setMode] = useState<GateMode>('checking')
   const [authStatus, setAuthStatus] = useState<AuthStatus>({ required: false })
@@ -387,14 +398,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <>
+    <AuthContext.Provider value={{ sessionAuthenticated: Boolean(authStatus.session_authenticated) && !authStatus.token_authenticated, logout }}>
       {children}
       {authStatus.session_authenticated && !authStatus.token_authenticated && (
         <button
           type="button"
           onClick={logout}
           disabled={submitting}
-          className="fixed z-40 top-3 right-3 btn-secondary shadow-lg"
+          className="fixed z-40 top-3 right-3 btn-secondary shadow-lg hidden md:inline-flex"
           aria-label="Ieși din cont"
         >
           {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <LogOut className="w-4 h-4" />}
@@ -474,6 +485,6 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           </form>
         </div>
       )}
-    </>
+    </AuthContext.Provider>
   )
 }

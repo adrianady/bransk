@@ -2,10 +2,11 @@ import { useCallback, useState, useEffect, lazy, Suspense } from 'react'
 import {
   CalendarDays, Network, BookOpenText, Dna, FileText, RotateCcw, ListChecks, Lightbulb,
   Bot, Sun, Moon, Plus, Settings2,
-  GraduationCap, Menu, X,
+  GraduationCap, Menu, X, LogOut,
 } from 'lucide-react'
 import { ProjectView } from './components/ProjectView'
 import { CommandPalette } from './components/CommandPalette'
+import { useAuthStatus } from './components/AuthGate'
 import { isLibraryView } from './lib/navigation'
 import { api, ApiError } from './lib/api'
 import { useToast } from './components/Toast'
@@ -67,6 +68,31 @@ const VIEW_ICONS: Record<View, React.ComponentType<{ className?: string }>> = {
   review: RotateCcw,
   todos: ListChecks,
   thoughts: Lightbulb,
+}
+
+/** Mobile-only: logout lives in the drawer, so the session button can't
+ *  cover the header controls the way the old fixed one did. */
+function LogoutDrawerItem({ onNavigate }: { onNavigate: () => void }) {
+  const auth = useAuthStatus()
+  const [leaving, setLeaving] = useState(false)
+  if (!auth.sessionAuthenticated) return null
+  return (
+    <button
+      type="button"
+      disabled={leaving}
+      onClick={async () => {
+        setLeaving(true)
+        await auth.logout()
+        onNavigate()
+        setLeaving(false)
+      }}
+      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-madder hover:bg-surface-2 transition-colors border-t border-line mt-2 pt-3"
+      aria-label="Ieși din cont"
+    >
+      <LogOut className="w-5 h-5 shrink-0" />
+      <span>Ieșire din cont</span>
+    </button>
+  )
 }
 
 export default function App() {
@@ -367,6 +393,7 @@ export default function App() {
                     </button>
                   )
                 })}
+                <LogoutDrawerItem onNavigate={() => setMobileMenuOpen(false)} />
               </div>
             </nav>
           </div>

@@ -45,7 +45,7 @@ export function LibraryView({ activeTab, onTabChange, studiesPane, entriesPane }
   return (
     <div className="space-y-3">
       <div
-        className="inline-flex w-full sm:w-auto rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-100/70 dark:bg-gray-900/60 p-1 gap-1"
+        className="inline-flex w-full sm:w-auto rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-100 dark:bg-gray-900 p-1 gap-1 sticky top-14 z-10 sm:static sm:bg-gray-100/70 sm:dark:bg-gray-900/60"
         role="tablist"
         aria-label="Bibliotecă"
       >
