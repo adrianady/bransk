@@ -413,7 +413,12 @@ export function StudiesView({ onSelectEntry }: Props) {
                 }}
                 role="button"
                 tabIndex={0}
-                onKeyDown={e => { if (e.key === 'Enter') onSelectEntry(study) }}
+                onKeyDown={e => {
+                  // Same guard as onClick: Enter inside an inner input/button
+                  // (e.g. the screening reason field) must not open the entry.
+                  if ((e.target as HTMLElement).closest('button, a, input, select, textarea')) return
+                  if (e.key === 'Enter') onSelectEntry(study)
+                }}
                 className={`card min-w-0 text-left cursor-pointer transition-all flex flex-col relative ${
                   isSelected
                     ? 'ring-2 ring-chrono-500 bg-chrono-50/20 dark:bg-chrono-950/20 border-chrono-400 dark:border-chrono-600 shadow-sm'
