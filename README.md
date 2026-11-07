@@ -8,7 +8,7 @@ Bransk is built on ChronoKG as its technical base and extends it with dissertati
 
 The original ChronoKG GitHub URL could not be confirmed from this checkout: no Git remote is configured, and no matching public source repository was identified. The existing attribution below links to BrainBook, from which portions were ported.
 
-Bransk repository: [github.com/adrianady/bransk](https://github.com/adrianady/bransk) (private for now).
+Bransk repository: [github.com/adrianady/bransk](https://github.com/adrianady/bransk).
 
 ## Features
 
