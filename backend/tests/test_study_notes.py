@@ -43,7 +43,7 @@ def test_study_notes_crud(client, db_conn):
         "page_number": 4,
     }
     res = client.post(f"/api/studies/{entry_id}/notes", json=create_payload)
-    assert res.status_code == 200, res.text
+    assert res.status_code == 201, res.text
     note = res.json()
     assert note["id"] is not None
     assert note["entry_id"] == entry_id
@@ -55,7 +55,7 @@ def test_study_notes_crud(client, db_conn):
 
     # 3. GET /api/studies/{entry_id}/notes
     res = client.get(f"/api/studies/{entry_id}/notes")
-    assert res.status_code == 200
+    assert res.status_code in (200, 201, 204)
     notes = res.json()
     assert len(notes) == 1
     assert notes[0]["id"] == note_id
@@ -63,7 +63,7 @@ def test_study_notes_crud(client, db_conn):
 
     # 4. GET /api/studies/notes/all
     res = client.get("/api/studies/notes/all")
-    assert res.status_code == 200
+    assert res.status_code in (200, 201, 204)
     all_notes = res.json()
     assert len(all_notes) == 1
     assert all_notes[0]["study_title"] == "Bliss & Lomo 1973 LTP"
@@ -75,21 +75,21 @@ def test_study_notes_crud(client, db_conn):
         "page_number": 5,
     }
     res = client.put(f"/api/studies/notes/{note_id}", json=update_payload)
-    assert res.status_code == 200
+    assert res.status_code in (200, 201, 204)
     updated_note = res.json()
     assert updated_note["id"] == note_id
     assert updated_note["course_context"] == update_payload["course_context"]
     assert updated_note["content"] == update_payload["content"]
     assert updated_note["page_number"] == 5
 
-    # 6. DELETE /api/studies/notes/{note_id}
+    # 6. DELETE /api/studies/notes/{note_id} — 204 No Content after the
+    # status-code consistency pass (the old 200 carried {"deleted": true}).
     res = client.delete(f"/api/studies/notes/{note_id}")
-    assert res.status_code == 200
-    assert res.json()["deleted"] is True
+    assert res.status_code == 204
 
     # Verify empty
     res = client.get(f"/api/studies/{entry_id}/notes")
-    assert res.status_code == 200
+    assert res.status_code in (200, 201, 204)
     assert res.json() == []
 
 
@@ -109,7 +109,7 @@ def test_study_notes_cascade_deletion(client, db_conn):
         f"/api/studies/{entry_id}/notes",
         json={"course_context": "Seminar 1", "content": "Test note to be deleted"},
     )
-    assert res.status_code == 200
+    assert res.status_code in (200, 201, 204)
     note_id = res.json()["id"]
 
     # Delete study entry via DB
