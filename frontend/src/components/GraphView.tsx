@@ -324,13 +324,13 @@ export function GraphView({ onSelectEntry }: Props) {
           ...e,
           width: isFocusEdge ? 2.4 : (isGeneric ? 1 : 1.6),
           dashes: isGeneric ? [4, 4] : false,
-          // Straight edges: curved spaghetti was one of the main reasons the
-          // middle of the graph read as noise. The type/roundness fields stay
-          // because vis-timeline's types demand them even when disabled.
+          // Gentle continuous arcs: straight lines maximise crossings through
+          // the graph centre, while low-roundness curves arc around nodes and
+          // distribute the intersections where they are less noticeable.
           smooth: {
-            enabled: false,
-            type: 'curvedCW',
-            roundness: 0,
+            enabled: true,
+            type: 'continuous',
+            roundness: 0.1,
           },
           color: {
             color: isGeneric ? (isDark ? '#3a4554' : '#b7c1ce') : (e.color || '#2f5fa8'),
