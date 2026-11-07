@@ -483,16 +483,20 @@ async def fetch_fulltext(entry_id: int, *, index: bool = True) -> dict:
                 attempt["file"] = fname
                 # Persist pdf_path HERE as well: without this, the file sat on
                 # disk while the row kept saying "no PDF" — the screen went on
-                # offering a download that had already succeeded.
-                conn = get_db()
+                # offering a download that had already succeeded. Best-effort:
+                # a DB hiccup must not flip the result into an error.
                 try:
-                    conn.execute(
-                        "UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
-                        [fname, entry_id],
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
+                    conn = get_db()
+                    try:
+                        conn.execute(
+                            "UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
+                            [fname, entry_id],
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                except Exception as persist_exc:  # noqa: BLE001
+                    logger.warning("pdf_path persistence for #%s failed: %s", entry_id, persist_exc)
                 result.tried.append(attempt)
                 if index:
                     from app import studytext
