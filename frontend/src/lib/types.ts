@@ -77,6 +77,7 @@ export interface BulkImportResponse {
     reason: string;
     existing_id?: number;
   }[];
+  unresolved_identifiers?: { identifier: string; reason: string }[];
   total_imported: number;
   total_skipped: number;
   pdfs_downloaded: number;

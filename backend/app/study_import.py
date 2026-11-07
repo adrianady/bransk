@@ -458,6 +458,7 @@ async def bulk_import_studies(
 ) -> dict[str, Any]:
     """Import a batch of studies or freeform identifiers into Bransk."""
     candidate_items: list[dict] = list(studies)
+    unresolved: list[dict] = []
 
     # 1. Parse and resolve any raw_text identifiers
     if raw_text and raw_text.strip():
@@ -472,9 +473,17 @@ async def bulk_import_studies(
 
                 tasks = [_res(i) for i in identifiers]
                 resolved_results = await asyncio.gather(*tasks, return_exceptions=True)
-                for r in resolved_results:
+                for id_str, r in zip(identifiers, resolved_results):
                     if isinstance(r, dict) and r.get("title"):
                         candidate_items.append(r)
+                    else:
+                        # Nu arunca identificatorul tăcut: raportul final trebuie
+                        # să arate exact ce nu a putut fi rezolvat și de ce.
+                        unresolved.append({
+                            "identifier": id_str,
+                            "reason": (str(r)[:120] if isinstance(r, Exception)
+                                       else "Nerezolvat în bazele academice (Crossref/Europe PMC/arXiv)"),
+                        })
 
     # Deduplicate candidates amongst themselves by DOI or title
     unique_candidates: list[dict] = []
@@ -598,6 +607,7 @@ async def bulk_import_studies(
     return {
         "imported": imported_records,
         "skipped": skipped_records,
+        "unresolved_identifiers": unresolved,
         "total_imported": len(imported_records),
         "total_skipped": len(skipped_records),
         "pdfs_downloaded": pdfs_downloaded,

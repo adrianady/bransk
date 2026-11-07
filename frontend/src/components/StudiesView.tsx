@@ -32,6 +32,16 @@ const typeColors: Record<string, string> = {
   study: 'bg-accent-soft text-accent-strong',
 }
 
+/** Heuristic: does the saved source actually look like a direct PDF link?
+ *  A Crossref DOI landing page promised "PDF disponibil" for years and the
+ *  download button then failed with 502 — the badge now tells the truth. */
+function hasDirectPdfHint(study: Entry): boolean {
+  if (study.content?.includes('**PDF:**')) return true
+  const src = (study.source || '').toLowerCase()
+  if (!src) return false
+  return /\.pdf([?#].*)?$/.test(src) || src.includes('/pdf/') || src.includes('download')
+}
+
 // Display-only translations: the stored values stay canonical (they are sent to
 // the API and keyed in typeColors above), only the visible label changes.
 const studyTypeLabels: Record<string, string> = {
@@ -476,8 +486,12 @@ export function StudiesView({ onSelectEntry }: Props) {
                 {study.entry_date && <span className="text-xs text-gray-500">📅 {study.entry_date.slice(0, 4)}</span>}
                 {study.pdf_path ? (
                   <span className="badge text-xs badge-verdigris font-medium">PDF descărcat</span>
-                ) : (study.source || study.content?.includes('**PDF:**')) ? (
+                ) : hasDirectPdfHint(study) ? (
                   <span className="badge text-xs badge-brass border border-brass/25">PDF disponibil</span>
+                ) : (study.source || study.content) ? (
+                  <span className="badge text-xs badge-muted" title="Sursa este o pagină web, nu un PDF direct — „Descarcă PDF” poate eșua; folosește „Text integral”">
+                    Sursă web
+                  </span>
                 ) : null}
               </div>
               {study.authors && <p className="text-xs text-gray-500 mb-2 line-clamp-1 break-words">✍️ {study.authors}</p>}

@@ -1306,7 +1306,18 @@ async def download_study_pdf_endpoint(entry_id: int):
             finally:
                 conn.close()
     if not fname:
-        raise HTTPException(502, "Could not download the study PDF (missing or unreachable URL)")
+        if url:
+            raise HTTPException(
+                502,
+                "PDF-ul nu a putut fi obținut de la sursă (pagina nu este un PDF direct sau nu răspunde). "
+                "Alternativ: „Text integral” caută în conținutul disponibil, „Descarcă toate PDF-urile” "
+                "încearcă și arhivele deschise (Europe PMC), sau plasează manual fișierul în folderul de studii.",
+            )
+        raise HTTPException(
+            502,
+            "Acest studiu nu are un URL PDF direct salvat. Alternativ: „Text integral”, sau adaugă manual "
+            "PDF-ul în folderul de studii.",
+        )
     await anyio.to_thread.run_sync(_set_pdf_path, entry_id, fname)
     indexed = await index_pdf(entry_id, pdf_path_for(entry_id))
     return {"pdf_path": fname, "indexed_chunks": indexed}

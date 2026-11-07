@@ -820,6 +820,19 @@ export function ImportStudiesModal({ isOpen, onClose, onImportComplete }: Props)
                   </ul>
                 </div>
               )}
+
+              {(lastImportSummary.unresolved_identifiers?.length ?? 0) > 0 && (
+                <div className="space-y-1 pt-1 border-t border-madder/20">
+                  <p className="font-semibold text-madder">Nerezolvate (nu au fost găsite în bazele academice):</p>
+                  <ul className="list-disc list-inside space-y-0.5 text-gray-600 dark:text-gray-400">
+                    {lastImportSummary.unresolved_identifiers!.slice(0, 5).map((u, idx) => (
+                      <li key={idx} className="line-clamp-1">
+                        {u.identifier} — <span className="italic">{u.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>
