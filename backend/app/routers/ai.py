@@ -1,7 +1,7 @@
 """AI observability endpoints: call event log + provider/embedding status."""
 import json
 import logging
-
+import time
 import anyio
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -358,3 +358,64 @@ async def ai_model_choose(body: ModelChoice):
                 )
     chosen = set_active_model(wanted, provider=provider) if body.provider else set_active_model(wanted)
     return {"active": chosen, "cleared": not wanted}
+
+class TestConnectionRequest(BaseModel):
+    provider: str = Field(..., max_length=50)
+    model: str = Field("", max_length=200)
+
+
+@router.post("/ai/test-connection")
+async def ai_test_connection(body: TestConnectionRequest):
+    """Pings a provider to verify authentication and live network round-trip latency."""
+    provider = body.provider.strip().lower()
+    known_providers = {p["id"] for p in provider_catalogue()}
+    if provider not in known_providers:
+        raise HTTPException(400, f"Provider necunoscut: {provider}")
+
+    from app.llm import _call_openai_compatible, provider_model
+
+    target_model = body.model.strip() or provider_model(provider)
+    if not target_model:
+        cat = await model_catalogue(provider)
+        if cat.get("models"):
+            target_model = cat["models"][0]["id"]
+
+    start = time.perf_counter()
+    try:
+        if provider == "mock":
+            await anyio.sleep(0.04)
+            return {
+                "ok": True,
+                "provider": provider,
+                "model": "mock",
+                "latency_ms": 40,
+                "message": "Conexiune mock offline verificată.",
+            }
+
+        reply, _ = await _call_openai_compatible(
+            provider,
+            messages=[{"role": "user", "content": "Răspunde cu 1."}],
+            temperature=0.1,
+            json_mode=False,
+            max_tokens=5,
+        )
+        elapsed_ms = round((time.perf_counter() - start) * 1000)
+        return {
+            "ok": True,
+            "provider": provider,
+            "model": target_model,
+            "latency_ms": elapsed_ms,
+            "message": f"Conexiune confirmată ({elapsed_ms} ms).",
+        }
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - start) * 1000)
+        err_msg = str(exc)
+        logger.warning("Connection test failed for %s: %s", provider, err_msg)
+        return {
+            "ok": False,
+            "provider": provider,
+            "model": target_model,
+            "latency_ms": elapsed_ms,
+            "error": err_msg,
+            "message": f"Eșec conectare ({elapsed_ms} ms): {err_msg[:120]}",
+        }

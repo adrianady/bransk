@@ -12,6 +12,7 @@ import type {
   AiProviderChoiceResponse,
   AiProvidersResponse,
   AiStatusResponse,
+  AiTestConnectionResponse,
   BulkImportResponse,
   ChatHistoryItem,
   BibliographyResponse,
@@ -58,6 +59,7 @@ import type {
   TimelineStats,
   TitleAnalysis,
   TodoItem,
+  TopicBrainstormResponse,
   TopicsResponse,
 } from './types';
 
@@ -522,8 +524,13 @@ export const api = {
       request<AiOpenCodeConsoleConfigState>('/ai/opencode-go', {
         method: 'POST', body: JSON.stringify(body), timeoutMs: 30000,
       }),
+    testConnection: (provider: string, model = '') =>
+      request<AiTestConnectionResponse>('/ai/test-connection', {
+        method: 'POST',
+        body: JSON.stringify({ provider, model }),
+        timeoutMs: 25000,
+      }),
   },
-
   // Spaced Repetition
   spacedRepetition: {
     list: () => request<SpacedRepetitionItem[]>('/spaced-repetition/items'),
@@ -794,6 +801,12 @@ export const api = {
       request<Project>('/project/topics/choose', {
         method: 'POST',
         body: JSON.stringify({ title, question }),
+      }),
+    brainstormTopics: (focus = '', count = 5) =>
+      request<TopicBrainstormResponse>('/project/topics/brainstorm', {
+        method: 'POST',
+        body: JSON.stringify({ focus, count }),
+        timeoutMs: 90000,
       }),
     // Deterministic checks only — free, instant.
     title: () => request<TitleAnalysis>('/project/title'),

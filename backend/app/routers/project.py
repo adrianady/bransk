@@ -2174,3 +2174,95 @@ def project_topic_choose(body: TopicChoice):
         return _row_to_project(row)
     finally:
         conn.close()
+
+
+class TopicBrainstormRequest(BaseModel):
+    focus: str = Field("", max_length=300, description="Unghi de focalizare sau direcție specifică")
+    count: int = Field(5, ge=2, le=8)
+
+
+@router.post("/project/topics/brainstorm")
+async def project_topics_brainstorm(body: TopicBrainstormRequest):
+    """Brainstorms grounded academic thesis topics using the LLM and the study library,
+    computing live library coverage for each generated candidate."""
+    conn = get_db()
+    try:
+        project = _ensure_project(conn)
+        ranked = _rank_studies(conn, project, limit=12)
+    finally:
+        conn.close()
+
+    corpus = "\n".join(
+        f"- {s['title']} ({s['year'] or 'n/d'}) [{s['authors'] or ''}]"
+        for s in ranked
+    ) or "(fără studii)"
+
+    focus_clause = f"Concentrează-te pe direcția: {body.focus.strip()}." if body.focus.strip() else ""
+
+    prompt = f"""Ești un coordonator academic și conducător științific de doctorate și dizertații.
+Ajută studentul să facă un brainstorming avansat pentru teme de cercetare originale și publicabile.
+
+Contextul lucrării:
+Titlu actual: {project.get('title') or 'Nespecificat'}
+Domeniu: {project.get('field') or 'Neuroștiințe / Psihologie clinică'}
+Tip lucrare: {project.get('work_type') or 'Disertație'}
+{focus_clause}
+
+Studii cheie din biblioteca studentului:
+{corpus}
+
+Generează exact {body.count} propuneri de teme de cercetare academice de nivel avansat.
+Fiecare temă trebuie să fie ancorată empiric în literatura de mai sus, să aibă variabile clar definite și formulare științifică impecabilă în limba română.
+
+Răspunde DOAR cu JSON valid:
+{{
+  "topics": [
+    {{
+      "title": "Titlu academic precis, specificând variabilele și populația",
+      "question": "Întrebare de cercetare clară și verificabilă empiric",
+      "rationale": "Justificare de 2-3 fraze a relevanței teoretice și empirice, ancorată în studiile din bibliotecă",
+      "variables": "VI: [variabile independente] | VD: [variabile dependente] | Mediatori/Moderatori: [...]",
+      "pico": "P: [Populație] | I: [Intervenție/Expunere] | C: [Comparație/Control] | O: [Rezultat]"
+    }}
+  ]
+}}
+Nu adăuga niciun text în afara JSON-ului."""
+
+    reply = await _llm([{"role": "system", "content": prompt}], temperature=0.6, max_tokens=3500)
+    topics_out: list[dict] = []
+    if reply:
+        match = re.search(r"\{.*\}", reply, re.S)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                raw_topics = parsed.get("topics", [])
+                conn = get_db()
+                try:
+                    for t in raw_topics:
+                        t_title = str(t.get("title") or "").strip()
+                        t_q = str(t.get("question") or "").strip()
+                        if not t_title:
+                            continue
+                        coverage = _coverage(conn, t_title, t_q)
+                        topics_out.append({
+                            "title": t_title,
+                            "question": t_q,
+                            "rationale": str(t.get("rationale") or "").strip(),
+                            "variables": str(t.get("variables") or "").strip(),
+                            "pico": str(t.get("pico") or "").strip(),
+                            "source": "ai_brainstorm",
+                            "coverage": coverage,
+                        })
+                finally:
+                    conn.close()
+            except Exception as e:
+                logger.warning("Failed to parse brainstorm topics: %s", e)
+
+    order = {"solidă": 0, "posibilă": 1, "fragilă": 2, "nepotrivită": 3}
+    topics_out.sort(key=lambda c: (order.get(c["coverage"]["verdict"], 9), -c["coverage"]["matched"]))
+
+    return {
+        "topics": topics_out,
+        "from_llm": bool(topics_out),
+        "count": len(topics_out),
+    }

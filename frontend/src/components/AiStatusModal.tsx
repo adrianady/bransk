@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, Cpu, CheckCircle2, XCircle, HelpCircle, Loader2, PartyPopper } from 'lucide-react'
+import { X, Cpu, CheckCircle2, XCircle, HelpCircle, Loader2, PartyPopper, Zap, Search, Sparkles } from 'lucide-react'
 import { api } from '../lib/api'
 import { useToast } from './Toast'
 import type {
@@ -9,6 +9,7 @@ import type {
   AiProviderInfo,
   AiProvidersResponse,
   AiStatusResponse,
+  AiTestConnectionResponse,
 } from '../lib/types'
 
 const ENV_MANAGED_PROVIDERS = new Set(['deepseek', 'openai', 'openrouter', 'groq', 'mistral', 'together'])
@@ -37,6 +38,16 @@ const DIRECT_DEFAULT_URLS: Record<DirectService, string> = {
   console: 'https://opencode.ai/inference',
   go: 'https://opencode.ai/inference/go',
 }
+
+const PRESET_TEMPLATES = [
+  { label: 'DeepSeek Direct', url: 'https://api.deepseek.com/v1', model: 'deepseek-chat', provider: 'deepseek' },
+  { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-3.5-sonnet', provider: 'openrouter' },
+  { label: 'Groq Cloud', url: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', provider: 'groq' },
+  { label: 'Ollama Local', url: 'http://localhost:11434/v1', model: 'qwen2.5:7b', provider: 'ollama' },
+  { label: 'OpenCode Console', url: 'https://opencode.ai/inference', model: 'deepseek-v4.1-flash', provider: 'opencode_console' },
+  { label: 'OpenCode Go', url: 'https://opencode.ai/inference/go', model: 'beam-free', provider: 'opencode_go' },
+  { label: 'LM Studio / Local', url: 'http://localhost:1234/v1', model: 'local-model', provider: 'custom' },
+]
 
 type DirectServiceState = {
   url: string
@@ -88,6 +99,44 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
     go: blankDirect(DIRECT_DEFAULT_URLS.go),
   })
   const autoTestedOpenCode = useRef({ console: '', go: '', local: '' })
+  const [testingConn, setTestingConn] = useState<Record<string, boolean>>({})
+  const [connResults, setConnResults] = useState<Record<string, AiTestConnectionResponse>>({})
+  const [modelSearch, setModelSearch] = useState('')
+  const [modelFilter, setModelFilter] = useState<'all' | 'large' | 'flash' | 'free'>('all')
+
+  const testConnection = async (providerId: string, modelId?: string) => {
+    setTestingConn(prev => ({ ...prev, [providerId]: true }))
+    try {
+      const res = await api.ai.testConnection(providerId, modelId)
+      setConnResults(prev => ({ ...prev, [providerId]: res }))
+      if (res.ok) {
+        toast.success(`[${providerId}] ${res.message}`)
+      } else {
+        toast.error(`[${providerId}] ${res.message}`)
+      }
+    } catch (err: unknown) {
+      toast.error(`Eșec test conexiune: ${err instanceof Error ? err.message : 'eroare'}`)
+    } finally {
+      setTestingConn(prev => ({ ...prev, [providerId]: false }))
+    }
+  }
+
+  const filterModelsList = <T extends { id: string; name?: string; context_window?: number | null; free?: boolean }>(models: T[]): T[] => {
+    return models.filter(m => {
+      if (modelSearch.trim()) {
+        const q = modelSearch.toLowerCase()
+        const match = (m.id || '').toLowerCase().includes(q) || (m.name || '').toLowerCase().includes(q)
+        if (!match) return false
+      }
+      if (modelFilter === 'large' && (m.context_window || 0) < 128000) return false
+      if (modelFilter === 'flash') {
+        const id = m.id.toLowerCase()
+        if (!id.includes('flash') && !id.includes('mini') && !id.includes('turbo') && !id.includes('spark')) return false
+      }
+      if (modelFilter === 'free' && !m.free) return false
+      return true
+    })
+  }
 
   const patchDirect = (service: DirectService, patch: Partial<DirectServiceState>) =>
     setDirect(current => ({ ...current, [service]: { ...current[service], ...patch } }))
@@ -663,7 +712,7 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
       className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
           <h2 className="text-lg font-bold flex items-center gap-2">
             <Cpu className="w-5 h-5 text-chrono-700" /> Furnizori AI și stare
@@ -716,7 +765,31 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                             </span>
                           </span>
                         </span>
-                        <span className="mt-1 block truncate text-[10px] text-gray-500">Model: {p.model || 'nesetat'}</span>
+                        <div className="mt-1 flex items-center justify-between gap-1">
+                          <span className="truncate text-[10px] text-gray-500">Model: {p.model || 'nesetat'}</span>
+                          {p.configured && (
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                void testConnection(p.id, p.model)
+                              }}
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 font-mono inline-flex items-center gap-1 cursor-pointer shrink-0"
+                              title="Testează conexiunea activă la acest provider"
+                            >
+                              {testingConn[p.id] ? (
+                                <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                              ) : connResults[p.id] ? (
+                                connResults[p.id].ok ? (
+                                  <span className="text-verdigris font-semibold">✓ {connResults[p.id].latency_ms}ms</span>
+                                ) : (
+                                  <span className="text-madder font-semibold">✕ eroare</span>
+                                )
+                              ) : (
+                                <><Zap className="w-2.5 h-2.5 text-accent" /> Test</>
+                              )}
+                            </span>
+                          )}
+                        </div>
                       </button>
                     ))}
                   </div>
@@ -758,7 +831,29 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                             {choosing ? 'Activez…' : `Activează ${selectedLabel}`}
                           </button>
                         )}
+                        {selected?.configured && (
+                          <button
+                            type="button"
+                            onClick={() => selected && void testConnection(selected.id, selected.model)}
+                            disabled={testingConn[selected.id]}
+                            className="btn-secondary text-xs px-2.5 py-1.5 inline-flex items-center gap-1"
+                            title="Testează conexiunea la server"
+                          >
+                            {testingConn[selected.id] ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3 text-brass" />}
+                            <span>{testingConn[selected.id] ? 'Testez…' : 'Testează conexiunea'}</span>
+                          </button>
+                        )}
                       </div>
+                      {selected && connResults[selected.id] && (
+                        <div className={`mt-2 p-2 rounded-lg text-xs flex items-center justify-between ${
+                          connResults[selected.id].ok
+                            ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                            : 'bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-300 border border-red-200 dark:border-red-800'
+                        }`}>
+                          <span>{connResults[selected.id].message}</span>
+                          <span className="font-mono text-[10px] font-bold">{connResults[selected.id].latency_ms} ms</span>
+                        </div>
+                      )}
                       {isOpenCodeHub && (
                         <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3" role="group" aria-label="Metode OpenCode">
                           <button type="button" aria-pressed={openCodeMethod === 'console'} onClick={() => setOpenCodeMethod('console')} className={`rounded-lg border p-2 text-left text-xs ${openCodeMethod === 'console' ? 'border-chrono-500 bg-chrono-50 dark:border-chrono-600 dark:bg-chrono-950/30' : 'border-gray-200 dark:border-gray-700'}`}>
@@ -780,12 +875,42 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                           <p className="text-[11px] text-gray-500">Cheia nu se afișează și se gestionează în <code>backend/.env</code> ca <code>{ENV_KEY_NAMES[selected.id]}</code>. {selected.configured ? 'Cheie detectată.' : 'Cheie nedetectată.'}</p>
                           <button type="button" onClick={() => void loadCatalogue(selected.id)} disabled={catalogueBusy} className="btn-secondary text-xs px-2 py-1">{catalogueBusy && catalogueProvider === selected.id ? 'Citesc…' : 'Citește modelele'}</button>
                           {catalogueProvider === selected.id && catalogue?.models.length ? (
-                            <label className="block text-[11px] text-gray-500">Model pentru {selected.label}
-                              <select value={providerModelDrafts[selected.id] ?? catalogue.active} onChange={e => setProviderModelDrafts(current => ({ ...current, [selected.id]: e.target.value }))} disabled={choosing} className="input mt-1 w-full text-xs" aria-label={`Model ${selected.label}`}>
-                                {!catalogue.models.some(model => model.id === (providerModelDrafts[selected.id] ?? catalogue.active)) && <option value={providerModelDrafts[selected.id] ?? catalogue.active}>{providerModelDrafts[selected.id] ?? catalogue.active} (model salvat)</option>}
-                                {catalogue.models.map(model => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
-                              </select>
-                            </label>
+                            <div className="space-y-1.5">
+                              <div className="flex items-center gap-1.5 pt-1">
+                                <input
+                                  value={modelSearch}
+                                  onChange={e => setModelSearch(e.target.value)}
+                                  placeholder="Caută model (nume, id, context)..."
+                                  className="input flex-1 text-xs py-1 px-2"
+                                />
+                                <div className="flex gap-1 text-[10px]">
+                                  {(['all', 'large', 'flash', 'free'] as const).map(f => (
+                                    <button
+                                      key={f}
+                                      type="button"
+                                      onClick={() => setModelFilter(f)}
+                                      className={`px-1.5 py-0.5 rounded border transition-colors ${
+                                        modelFilter === f
+                                          ? 'bg-chrono-600 text-white border-chrono-600'
+                                          : 'bg-surface border-line text-muted hover:text-ink'
+                                      }`}
+                                    >
+                                      {f === 'all' ? 'Toate' : f === 'large' ? '128k+' : f === 'flash' ? 'Rapide' : 'Gratuite'}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                              <label className="block text-[11px] text-gray-500">Model pentru {selected.label}
+                                <select value={providerModelDrafts[selected.id] ?? catalogue.active} onChange={e => setProviderModelDrafts(current => ({ ...current, [selected.id]: e.target.value }))} disabled={choosing} className="input mt-1 w-full text-xs" aria-label={`Model ${selected.label}`}>
+                                  {!catalogue.models.some(model => model.id === (providerModelDrafts[selected.id] ?? catalogue.active)) && <option value={providerModelDrafts[selected.id] ?? catalogue.active}>{providerModelDrafts[selected.id] ?? catalogue.active} (model salvat)</option>}
+                                  {filterModelsList(catalogue.models).map(model => (
+                                    <option key={model.id} value={model.id}>
+                                      {model.name} · {model.id}{model.context_window ? ` · ${Math.round(model.context_window / 1000)}k ctx` : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            </div>
                           ) : (
                             <label className="block text-[11px] text-gray-500">Model pentru {selected.label}
                               <input value={providerModelDrafts[selected.id] ?? selected.model} onChange={e => setProviderModelDrafts(current => ({ ...current, [selected.id]: e.target.value }))} className="input mt-1 w-full text-xs" aria-label={`Model ${selected.label}`} />
@@ -833,7 +958,29 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                 )}
 
                 {settingsProvider === 'custom' && (
-                  <div className="mt-2 space-y-1.5 rounded-lg border border-gray-200 dark:border-gray-700 p-2">
+                  <div className="mt-2 space-y-2 rounded-lg border border-gray-200 dark:border-gray-700 p-2.5">
+                    {/* Quick Presets Bar */}
+                    <div>
+                      <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider block mb-1">
+                        Șabloane rapide (Presets)
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {PRESET_TEMPLATES.map(tmpl => (
+                          <button
+                            key={tmpl.label}
+                            type="button"
+                            onClick={() => {
+                              setCustomUrl(tmpl.url)
+                              setCustomModel(tmpl.model)
+                            }}
+                            className="text-[10px] px-2 py-0.5 rounded border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 transition-colors"
+                          >
+                            {tmpl.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
                     <label className="block text-[11px] text-gray-500">URL API (ex. http://127.0.0.1:8080/v1)
                       <input
                         value={customUrl}

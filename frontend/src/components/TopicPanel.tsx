@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import {
   Compass, Loader2, CheckCircle2, AlertCircle, XCircle, FileText, ChevronRight, Lightbulb,
+  Sparkles, BookmarkPlus, Plus,
 } from 'lucide-react'
 import { api } from '../lib/api'
 import { useToast } from './Toast'
-import type { Project, TopicCandidate, TopicCoverage, TopicsResponse } from '../lib/types'
+import type { Project, TopicCandidate, TopicCoverage, TopicsResponse, BrainstormTopicItem } from '../lib/types'
 
 interface Props {
   onProjectChange: (p: Project) => void
@@ -62,6 +63,42 @@ export function TopicPanel({ onProjectChange, onOpenTitle }: Props) {
   const [choosing, setChoosing] = useState<string | null>(null)
   const [titleDraft, setTitleDraft] = useState('')
   const [questionDraft, setQuestionDraft] = useState('')
+  const [brainstormFocus, setBrainstormFocus] = useState('')
+  const [brainstorming, setBrainstorming] = useState(false)
+  const [brainstormResults, setBrainstormResults] = useState<BrainstormTopicItem[]>([])
+  const [savingIdea, setSavingIdea] = useState<Record<string, boolean>>({})
+
+  const runBrainstorm = async () => {
+    setBrainstorming(true)
+    try {
+      const res = await api.project.brainstormTopics(brainstormFocus, 5)
+      setBrainstormResults(res.topics)
+      if (res.topics.length > 0) {
+        toast.success(`Generat ${res.topics.length} propuneri de teme fundamentate pe biblioteca ta!`)
+      } else {
+        toast.info('Modelul nu a returnat propuneri noi.')
+      }
+    } catch (err: unknown) {
+      toast.error('Brainstorming-ul a eșuat: ' + (err instanceof Error ? err.message : 'eroare'))
+    } finally {
+      setBrainstorming(false)
+    }
+  }
+
+  const saveTopicAsIdea = async (topic: BrainstormTopicItem) => {
+    setSavingIdea(prev => ({ ...prev, [topic.title]: true }))
+    try {
+      await api.project.ideas.create({
+        text: `${topic.title}\nÎntrebare: ${topic.question}\n${topic.variables}`,
+        category: 'teorie',
+      })
+      toast.success('Tema a fost adăugată ca idee de cercetare!')
+    } catch (err: unknown) {
+      toast.error('Salvarea ideii a eșuat: ' + (err instanceof Error ? err.message : 'eroare'))
+    } finally {
+      setSavingIdea(prev => ({ ...prev, [topic.title]: false }))
+    }
+  }
 
   const load = async () => {
     setLoading(true)
@@ -128,6 +165,104 @@ export function TopicPanel({ onProjectChange, onOpenTitle }: Props) {
           <CoverageLine cov={c.coverage} />
         </div>
       ))}
+
+      {/* ── AI Brainstorming Engine for Thesis Topics ── */}
+      <div className="card space-y-3 border-accent/40 bg-gradient-to-br from-surface to-accent-soft/20">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="font-semibold text-sm flex items-center gap-2 text-ink">
+              <Sparkles className="w-4 h-4 text-accent" /> Brainstorming AI din biblioteca ta
+            </h3>
+            <p className="text-xs text-muted mt-0.5">
+              Generează teme de dizertație originale ancorate direct în studiile tale, calculate cu gradul de acoperire empirică din bibliotecă.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            value={brainstormFocus}
+            onChange={e => setBrainstormFocus(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !brainstorming && runBrainstorm()}
+            placeholder="Focalizare opțională (ex: medierea capacității de mentalizare, adolescenți, modele dimensionale)..."
+            className="input flex-1 text-xs"
+          />
+          <button
+            type="button"
+            onClick={runBrainstorm}
+            disabled={brainstorming}
+            className="btn-primary text-xs px-3 py-1.5 whitespace-nowrap inline-flex items-center gap-1.5 shrink-0"
+          >
+            {brainstorming ? (
+              <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Brainstorming…</>
+            ) : (
+              <><Sparkles className="w-3.5 h-3.5" /> Generează teme inovatoare</>
+            )}
+          </button>
+        </div>
+
+        {brainstormResults.length > 0 && (
+          <div className="mt-3 space-y-3 pt-2 border-t border-line">
+            <p className="text-xs font-semibold text-accent-strong">
+              Propuneri de cercetare generate ({brainstormResults.length}):
+            </p>
+            <div className="space-y-3">
+              {brainstormResults.map(t => (
+                <div key={t.title} className="rounded-xl border border-line bg-surface p-3 space-y-2">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <h4 className="font-semibold text-sm text-ink leading-snug">{t.title}</h4>
+                      <p className="text-xs text-muted mt-0.5 font-medium">{t.question}</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => saveTopicAsIdea(t)}
+                        disabled={savingIdea[t.title]}
+                        className="btn-secondary text-xs px-2.5 py-1 inline-flex items-center gap-1"
+                        title="Salvează în Idei de lucru"
+                      >
+                        <BookmarkPlus className="w-3.5 h-3.5" />
+                        <span>{savingIdea[t.title] ? 'Salvez…' : 'În Idei'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => choose(t.title, t.question)}
+                        disabled={choosing !== null}
+                        className="btn-primary text-xs px-2.5 py-1 inline-flex items-center gap-1"
+                      >
+                        {choosing === t.title ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                        <span>Adoptă tema</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {t.rationale && (
+                    <p className="text-xs text-gray-700 dark:text-gray-300 bg-surface-2 p-2 rounded-lg leading-relaxed">
+                      <span className="font-medium text-ink">Fundamentare:</span> {t.rationale}
+                    </p>
+                  )}
+
+                  <div className="flex flex-wrap gap-2 text-[11px]">
+                    {t.variables && (
+                      <span className="badge badge-muted truncate max-w-full" title={t.variables}>
+                        📊 {t.variables}
+                      </span>
+                    )}
+                    {t.pico && (
+                      <span className="badge badge-accent truncate max-w-full" title={t.pico}>
+                        🔬 {t.pico}
+                      </span>
+                    )}
+                  </div>
+
+                  <CoverageLine cov={t.coverage} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Seeds, best-supported first */}
       <div className="card">

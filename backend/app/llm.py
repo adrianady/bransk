@@ -275,7 +275,7 @@ async def complete(
             model = _model_for(provider)
             log_ai_event(provider, model, "complete", True,
                          latency_ms=int((time.monotonic() - t0) * 1000),
-                         prompt_chars=chars, reply_chars=len(text),
+                         prompt_chars=chars, reply_chars=len(text or ""),
                          prompt_tokens=pt, completion_tokens=ct)
             return (provider, model, text)
         except Exception as exc:  # noqa: BLE001 - each provider may fail differently
@@ -889,7 +889,9 @@ async def _call_openai_compatible(provider: str, messages: list, temperature: fl
         else:
             resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"], data.get("usage") or {}
+        msg = data.get("choices", [{}])[0].get("message", {}) if isinstance(data, dict) else {}
+        content = msg.get("content") or msg.get("reasoning_content") or ""
+        return str(content or ""), data.get("usage") or {}
 
 
 async def _stream_openai_compatible(provider: str, messages: list, temperature: float, max_tokens: int):
@@ -952,7 +954,9 @@ async def _call_deepseek(messages: list, temperature: float, json_mode: bool, ma
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"], data.get("usage") or {}
+        msg = data.get("choices", [{}])[0].get("message", {}) if isinstance(data, dict) else {}
+        content = msg.get("content") or msg.get("reasoning_content") or ""
+        return str(content or ""), data.get("usage") or {}
 
 
 async def _stream_deepseek(messages: list, temperature: float, max_tokens: int):
@@ -1027,7 +1031,8 @@ async def _iter_sse_content(resp: httpx.Response):
         if data_str in ("[DONE]", ""):
             break
         try:
-            delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {}).get("content", "")
+            d = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
+            delta = d.get("content") or d.get("reasoning_content") or ""
         except (json.JSONDecodeError, IndexError, KeyError, TypeError):
             continue
         if delta:

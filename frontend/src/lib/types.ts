@@ -656,8 +656,27 @@ export interface TopicCoverage {
 export interface TopicCandidate {
   title: string;
   question: string;
-  source: 'seed' | 'current';
+  source: 'seed' | 'current' | 'ai_brainstorm';
   coverage: TopicCoverage;
+  rationale?: string;
+  variables?: string;
+  pico?: string;
+}
+
+export interface BrainstormTopicItem {
+  title: string;
+  question: string;
+  rationale: string;
+  variables: string;
+  pico: string;
+  source: 'ai_brainstorm';
+  coverage: TopicCoverage;
+}
+
+export interface TopicBrainstormResponse {
+  topics: BrainstormTopicItem[];
+  from_llm: boolean;
+  count: number;
 }
 
 export interface TopicsResponse {
@@ -865,6 +884,20 @@ export interface AiOpenCodeConsoleSaveRequest {
   base_url: string;
   api_key?: string;
   clear_key?: boolean;
+}
+
+export interface AiTestConnectionRequest {
+  provider: string;
+  model?: string;
+}
+
+export interface AiTestConnectionResponse {
+  ok: boolean;
+  provider: string;
+  model: string;
+  latency_ms: number;
+  message: string;
+  error?: string;
 }
 
 export interface BibliographyReference {
