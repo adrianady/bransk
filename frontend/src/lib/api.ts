@@ -240,7 +240,11 @@ async function request<T>(path: string, options?: RequestInit & { timeoutMs?: nu
       throw new ApiError(readableError(detail, res.status), res.status, detail);
     }
     if (res.status === 204) return undefined as T;
-    return res.json();
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      return res.json();
+    }
+    return (await res.text()) as unknown as T;
   } catch (err: any) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {

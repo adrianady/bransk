@@ -519,6 +519,27 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
                   <Maximize2 className="w-3.5 h-3.5" />
                 </button>
               </div>
+              {/* Academic In-text Citation Helper */}
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!study) return
+                  try {
+                    const snippet = await api.citations.cite(study.id)
+                    const text = currentPage > 1
+                      ? snippet.replace(/\)$/, `, p. ${currentPage})`)
+                      : snippet
+                    await navigator.clipboard.writeText(text)
+                    toast.success(`Citare copiată: ${text}`)
+                  } catch {
+                    toast.error('Copierea citării a eșuat')
+                  }
+                }}
+                className="btn-secondary text-[11px] font-mono px-2 py-1 text-chrono-600 dark:text-chrono-400 hover:border-chrono-400 inline-flex items-center gap-1"
+                title="Copiază citarea academică pentru această pagină în teză"
+              >
+                Citează p. {currentPage}
+              </button>
             </div>
 
             {/* Canvas Scroll Viewport */}

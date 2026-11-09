@@ -628,6 +628,23 @@ export function StudiesView({ onSelectEntry }: Props) {
                     ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Caut…</>
                     : <><Search className="w-3.5 h-3.5" /> Text integral</>}
                 </button>
+                <button
+                  type="button"
+                  onClick={async e => {
+                    e.stopPropagation()
+                    try {
+                      const snippet = await api.citations.cite(study.id)
+                      await navigator.clipboard.writeText(snippet)
+                      toast.success(`Citare copiată: ${snippet}`)
+                    } catch {
+                      toast.error('Copierea citării a eșuat')
+                    }
+                  }}
+                  className="btn-ghost text-xs px-2 py-1 font-mono text-[11px]"
+                  title="Copiază citarea în text (Autor, An)"
+                >
+                  Citează
+                </button>
               </div>
               <p className="text-sm text-gray-600 dark:text-gray-400 line-clamp-3 flex-1 break-words">
                 {(study.content_preview || study.content || '').replace(/[#*`\[\]()]/g, '').slice(0, 300)}

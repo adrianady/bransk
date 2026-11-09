@@ -114,6 +114,8 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
   const [openSection, setOpenSection] = useState<string | null>(null)
   const [dirtySections, setDirtySections] = useState<Record<string, string>>({})
   const [savingSection, setSavingSection] = useState<string | null>(null)
+  const [lastSaved, setLastSaved] = useState<Record<string, string>>({})
+  const autoSaveTimersRef = useRef<Record<string, number>>({})
   const [generatingStructure, setGeneratingStructure] = useState(false)
   const [exportingDocx, setExportingDocx] = useState(false)
   const [evidenceMap, setEvidenceMap] = useState<ProjectEvidenceMap | null>(null)
@@ -141,8 +143,23 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
       setProject(p)
       setTitleDraft(p.title)
       onTitleChange?.(p.title || '')
-    } catch (err: any) {
-      toast.error('Proiectul nu s-a putut încărca: ' + (err?.message || 'necunoscut'))
+      if (p.structure) {
+        const restored: Record<string, string> = {}
+        for (const sec of p.structure) {
+          try {
+            const savedDraft = localStorage.getItem(`chronokg-draft-${sec.id}`)
+            if (savedDraft && savedDraft !== sec.content && savedDraft.trim().length > (sec.content || '').trim().length) {
+              restored[sec.id] = savedDraft
+            }
+          } catch {}
+        }
+        if (Object.keys(restored).length > 0) {
+          setDirtySections(prev => ({ ...prev, ...restored }))
+          toast.info('Am recuperat ciorna nesalvată a capitolelor din browser.')
+        }
+      }
+    } catch (err: unknown) {
+      toast.error('Proiectul nu s-a putut încărca: ' + (err instanceof Error ? err.message : 'necunoscut'))
     } finally {
       setLoading(false)
     }
@@ -294,7 +311,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
     await patch({ structure: project.structure.filter(s => s.id !== id) })
   }
 
-  const saveSectionContent = async (section: ProjectSection) => {
+  const saveSectionContent = async (section: ProjectSection, silent = false) => {
     if (!project) return
     const draft = dirtySections[section.id]
     if (draft === undefined) return
@@ -308,9 +325,52 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
         delete copy[section.id]
         return copy
       })
-      toast.success(`Salvat: ${section.title}`)
+      try {
+        localStorage.removeItem(`chronokg-draft-${section.id}`)
+      } catch {}
+      const timeStr = new Date().toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' })
+      setLastSaved(prev => ({ ...prev, [section.id]: timeStr }))
+      if (!silent) {
+        toast.success(`Salvat: ${section.title}`)
+      }
     }
   }
+
+  // Debounced auto-save: 1.5s after user stops typing
+  useEffect(() => {
+    if (!project) return
+    for (const section of project.structure) {
+      const draft = dirtySections[section.id]
+      if (draft !== undefined && draft !== section.content) {
+        try {
+          localStorage.setItem(`chronokg-draft-${section.id}`, draft)
+        } catch {}
+
+        clearTimeout(autoSaveTimersRef.current[section.id])
+        autoSaveTimersRef.current[section.id] = setTimeout(() => {
+          saveSectionContent(section, true)
+        }, 1500)
+      }
+    }
+    return () => {
+      Object.values(autoSaveTimersRef.current).forEach(clearTimeout)
+    }
+  }, [dirtySections, project])
+
+  // Warn before leaving if there are unsaved chapter edits
+  useEffect(() => {
+    const hasUnsaved = project?.structure.some(
+      s => dirtySections[s.id] !== undefined && dirtySections[s.id] !== s.content
+    )
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (hasUnsaved) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [dirtySections, project])
 
   const generateStructure = async () => {
     if (!project) return
@@ -375,7 +435,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
     }
   }
 
-  const exportThesisMarkdown = () => {
+  const exportThesisMarkdown = async () => {
     if (!project) return
     const lines: string[] = []
     lines.push(`# ${project.title || 'Lucrare de cercetare'}`)
@@ -431,6 +491,33 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
       lines.push('')
     }
 
+    // Complete bibliography matching Word (.docx) export
+    try {
+      const bib = await api.citations.bibliography()
+      if (bib.references && bib.references.length > 0) {
+        const cited = bib.references.filter(r => r.cited)
+        const consulted = bib.references.filter(r => !r.cited)
+
+        lines.push(`\n## Bibliografie\n`)
+        if (cited.length > 0) {
+          lines.push(`### Lucrări citate în text\n`)
+          cited.forEach((ref, idx) => {
+            lines.push(`${idx + 1}. ${ref.apa}`)
+          })
+          lines.push('')
+        }
+        if (consulted.length > 0) {
+          lines.push(`### Lucrări consultate\n`)
+          consulted.forEach((ref, idx) => {
+            lines.push(`${idx + 1}. ${ref.apa}`)
+          })
+          lines.push('')
+        }
+      }
+    } catch {
+      // If bibliography fetch fails, still export the text
+    }
+
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -439,7 +526,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
     a.download = `${safeTitle}-${new Date().toISOString().slice(0, 10)}.md`
     a.click()
     URL.revokeObjectURL(url)
-    toast.success('Teza a fost descărcată în format Markdown!')
+    toast.success('Teza a fost descărcată în format Markdown cu bibliografie!')
   }
 
   const progress = totals.target > 0 ? Math.min(100, Math.round((totals.written / totals.target) * 100)) : 0
@@ -697,21 +784,41 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
                           value={draft}
                           onChange={e => setDirtySections(prev => ({ ...prev, [section.id]: e.target.value }))}
                           placeholder="Scrie textul acestui capitol…"
-                          className="input w-full min-h-[140px] text-sm leading-relaxed resize-y"
+                          className="input w-full min-h-[220px] sm:min-h-[280px] text-sm sm:text-base leading-relaxed resize-y p-3"
                           spellCheck
                         />
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-[11px] text-gray-400">
-                            {isDirty ? 'Modificări nesalvate' : 'Salvat'}
-                          </span>
+                        <div className="flex items-center justify-between gap-2 flex-wrap pt-1">
+                          <div className="flex items-center gap-2">
+                            {savingSection === section.id ? (
+                              <span className="text-[11px] text-chrono-600 dark:text-chrono-400 flex items-center gap-1 font-medium">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Se salvează automat…
+                              </span>
+                            ) : isDirty ? (
+                              <span className="text-[11px] text-brass font-medium">
+                                Modificări nesalvate
+                              </span>
+                            ) : lastSaved[section.id] ? (
+                              <span className="text-[11px] text-verdigris flex items-center gap-1 font-medium">
+                                <Check className="w-3.5 h-3.5" /> Salvat automat la {lastSaved[section.id]}
+                              </span>
+                            ) : (
+                              <span className="text-[11px] text-gray-400">
+                                Salvat pe server
+                              </span>
+                            )}
+                            <span className="text-[11px] text-gray-400 hidden sm:inline">
+                              · Ctrl+K pentru a căuta studii
+                            </span>
+                          </div>
                           <button
+                            type="button"
                             onClick={() => saveSectionContent(section)}
                             disabled={!isDirty || savingSection === section.id}
                             className="btn-primary text-xs px-3 py-1.5"
                           >
                             {savingSection === section.id
                               ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Salvez…</>
-                              : <><Save className="w-3.5 h-3.5" /> Salvează</>}
+                              : <><Save className="w-3.5 h-3.5" /> Salvează acum</>}
                           </button>
                         </div>
                       </div>

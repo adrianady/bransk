@@ -85,6 +85,10 @@ def test_cite_snippet_author_variants(client):
            client.get(f"/api/citations/cite/{one['id']}").text == "(Smith, 2021)"
     assert client.get(f"/api/citations/cite/{two['id']}").text == "(Smith & Roe, 2021)"
     assert client.get(f"/api/citations/cite/{many['id']}").text == "(Smith et al., 2021)"
+    pubmed = _study(client, "PubMed author style", authors="Descartes F, Doba K et al.", entry_date="2026-01-01")
+    assert client.get(f"/api/citations/cite/{pubmed['id']}").text == "(Descartes et al., 2026)"
+    editor = _study(client, "Edited book", authors="Robert J. Sternberg (Ed.)", entry_date="2018-01-01")
+    assert client.get(f"/api/citations/cite/{editor['id']}").text == "(Sternberg, 2018)"
 
 
 def test_bibliography_marks_cited_studies(client):
@@ -101,3 +105,4 @@ def test_bibliography_marks_cited_studies(client):
     assert cited["title"] == "Sleep and memory"
     assert cited["apa"].startswith("Smith, I., & Roe, J. (2021). Sleep and memory.")
     assert cited["apa"].endswith("https://doi.org/10.1000/sleep-01")
+    assert cited["in_text"] == "(Smith & Roe, 2021)"

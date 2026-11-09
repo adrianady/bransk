@@ -874,6 +874,7 @@ export interface BibliographyReference {
   year: string;
   doi: string;
   apa: string;
+  in_text?: string;
   cited: boolean;
   has_doi: boolean;
 }

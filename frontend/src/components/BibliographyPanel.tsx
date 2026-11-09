@@ -72,11 +72,22 @@ export function BibliographyPanel() {
           )}
         </div>
       </div>
-      <div className="flex gap-1 shrink-0">
+      <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+        {r.in_text && (
+          <button
+            type="button"
+            onClick={async () => copy(r.in_text!, `Citarea în text ${r.in_text}`)}
+            className="btn-secondary text-[11px] font-mono px-2 py-1 text-chrono-600 dark:text-chrono-400 hover:border-chrono-400"
+            title={`Copiază citarea în text: ${r.in_text}`}
+          >
+            {r.in_text}
+          </button>
+        )}
         <button
-          onClick={async () => copy(r.apa, 'Referința')}
+          type="button"
+          onClick={async () => copy(r.apa, 'Referința APA')}
           className="btn-secondary text-xs px-2 py-1"
-          title="Copiază referința APA"
+          title="Copiază referința APA completă"
         >
           <Copy className="w-3.5 h-3.5" />
         </button>

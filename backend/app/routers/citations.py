@@ -48,6 +48,36 @@ def _display_year(entry: dict) -> str:
     return year if year.isdigit() else ""
 
 
+def _clean_author_name(name: str) -> str:
+    cleaned = re.sub(r"\s*[\(\[]\s*(?:eds?\.?|editors?|ed|eds)\s*[\)\]]", "", name, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\(Wiley Online Library\)|\(ScienceDirect\)|\(MDPI\)", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" ,;.")
+
+
+def _parse_author_name(name: str) -> tuple[str, str]:
+    """Extracts (surname, initials) accurately from either 'First Middle Last'
+    or 'Last FirstInitial' (e.g. PubMed style 'Descartes F', 'Doba K')."""
+    cleaned = _clean_author_name(name)
+    tokens = [t for t in re.split(r"\s+", cleaned.strip()) if t]
+    if not tokens:
+        return "", ""
+    if len(tokens) == 1:
+        s = tokens[0]
+        return s[:1].upper() + s[1:], ""
+
+    last = tokens[-1].rstrip(".")
+    first = tokens[0].rstrip(".")
+    if len(last) <= 2 and last.isalpha() and last.isupper() and (len(first) > 2 or not first.isupper()):
+        surname = " ".join(tokens[:-1])
+        initials = " ".join(f"{ch.upper()}." for ch in last)
+    else:
+        surname = tokens[-1]
+        initials = " ".join(f"{t[0].upper()}." for t in tokens[:-1] if t)
+
+    surname = surname[:1].upper() + surname[1:]
+    return surname, initials
+
+
 def _split_authors(authors: str) -> list[str]:
     """Authors are stored comma-separated; a trailing 'et al.' attaches to the
     last name ('Ioan Smith, Jane Roe et al.'), so strip it before splitting."""
@@ -61,13 +91,29 @@ def _has_others(authors: str) -> bool:
     return bool(re.search(r"\bet\.?\s+al\.?\s*$", (authors or "").strip(), re.IGNORECASE))
 
 
+def _in_text_citation(entry: dict) -> str:
+    authors = _split_authors(_display_authors(entry))
+    year = _display_year(entry) or "n.d."
+    if not authors:
+        return f"({_display_name(entry) or 'fără autor'}, {year})"
+    s1, _ = _parse_author_name(authors[0])
+    if not s1:
+        s1 = "fără autor"
+    if len(authors) == 1 and not _has_others(_display_authors(entry)):
+        return f"({s1}, {year})"
+    if len(authors) == 2 and not _has_others(_display_authors(entry)):
+        s2, _ = _parse_author_name(authors[1])
+        return f"({s1} & {s2 or 'al.'}, {year})"
+    return f"({s1} et al., {year})"
+
+
 def _cite_key(entry: dict, used: set) -> str:
     """smith2021memory — first author's surname, year, first title word."""
     authors = _split_authors(_display_authors(entry))
     surname = ""
     if authors:
-        first = authors[0].split()[-1] if authors[0].split() else authors[0]
-        surname = re.sub(r"[^a-zA-Z]", "", first).lower() or "anonim"
+        s, _ = _parse_author_name(authors[0])
+        surname = re.sub(r"[^a-zA-Z]", "", s).lower() or "anonim"
     year = _display_year(entry) or "nd"
     tokens = re.findall(r"[a-zA-ZăâîșțşţĂÂÎȘȚŞŢ]+", _display_name(entry))
     word = (tokens[0] if tokens else "").lower() or "fara-titlu"
@@ -223,21 +269,15 @@ def _bibliography_references(conn) -> list[dict]:
         year = _display_year(s)
         surname = ""
         if authors:
-            parts = authors[0].split()
-            surname = parts[-1] if parts else authors[0]
-
+            surname, _ = _parse_author_name(authors[0])
         # APA 7: Smith, J., & Roe, J. (2021). Title. https://doi.org/...
         def _initials(name: str) -> str:
-            tokens = [t for t in re.split(r"\s+", name.strip()) if t]
-            if len(tokens) <= 1:
-                surname = tokens[0] if tokens else ""
-                # Single-word entries are usually bare surnames from the
-                # library; present them capitalised instead of "achenbach".
-                return surname[:1].upper() + surname[1:] if surname else ""
-            surname = tokens[-1]
-            surname = surname[:1].upper() + surname[1:]
-            return f"{surname}, " + " ".join(f"{t[0].upper()}." for t in tokens[:-1] if t)
-
+            s, inits = _parse_author_name(name)
+            if not s:
+                return ""
+            if not inits:
+                return s
+            return f"{s}, {inits}"
         def _apa_join(names: list[str]) -> str:
             # "A, B, & C" — comma between all, ampersand before the last.
             if len(names) <= 1:
@@ -261,6 +301,7 @@ def _bibliography_references(conn) -> list[dict]:
             apa = apa[:-1]
 
         cited = bool(surname) and bool(year) and f"{surname.lower()}" in folded_text and year in folded_text
+        in_text = _in_text_citation(s)
         references.append({
             "entry_id": s["id"],
             "title": _display_name(s),
@@ -268,10 +309,10 @@ def _bibliography_references(conn) -> list[dict]:
             "year": year,
             "doi": doi,
             "apa": apa,
+            "in_text": in_text,
             "cited": cited,
             "has_doi": bool(doi),
         })
-
     references.sort(key=lambda r: (r["apa"] or "zzz").lower())
     return references
 
@@ -305,22 +346,11 @@ def cite_snippet(entry_id: int):
     conn = get_db()
     try:
         row = conn.execute(
-            f"SELECT id, title, study_type, authors, entry_date, doi, bib_title, bib_authors, bib_year FROM entries WHERE id = ? AND archived = 0",
+            "SELECT id, title, study_type, authors, entry_date, doi, bib_title, bib_authors, bib_year FROM entries WHERE id = ? AND archived = 0",
             [entry_id],
         ).fetchone()
     finally:
         conn.close()
     if not row:
         raise HTTPException(404, "Entry not found")
-    entry = dict(row)
-    authors = _split_authors(_display_authors(entry))
-    year = _display_year(entry) or "n.d."
-    if not authors:
-        return f"({_display_name(entry) or 'fără autor'}, {year})"
-    surname = authors[0].split()[-1] if authors[0].split() else authors[0]
-    if len(authors) == 1 and not _has_others(_display_authors(entry)):
-        return f"({surname}, {year})"
-    if len(authors) == 2 and not _has_others(_display_authors(entry)):
-        a2 = authors[1].split()[-1] if authors[1].split() else authors[1]
-        return f"({surname} & {a2}, {year})"
-    return f"({surname} et al., {year})"
+    return _in_text_citation(dict(row))
