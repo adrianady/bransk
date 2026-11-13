@@ -1,11 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '../lib/api'
+import { api, getAuthToken } from '../lib/api'
 import { useToast } from './Toast'
-import type { Entry, TheoryEvidence, TheoryNode, TheoryStatus } from '../lib/types'
+import type {
+  ClaimAggregate,
+  ClaimStancesResponse,
+  ClaimVerdict,
+  Entry,
+  StanceDirection,
+  TheoryEvidence,
+  TheoryNode,
+  TheoryStatus,
+} from '../lib/types'
 
 interface Props {
   onSelectEntry: (entry: Entry) => void
 }
+
+// A claim is a leaf of the theory tree; the backend marks it node_type='claim'
+// and carries the testable statement. TheoryNode itself is shared with plain
+// theories, so claim-only fields are optional here.
+type ClaimNode = TheoryNode & {
+  node_type?: 'claim' | 'theory'
+  statement?: string
+  studies_accepted?: number
+  verdict?: ClaimVerdict
+}
+
+const isClaim = (n: TheoryNode): n is ClaimNode => (n as ClaimNode).node_type === 'claim'
 
 const statusColors: Record<TheoryStatus, string> = {
   supported: '#2c6f63',
@@ -28,6 +49,39 @@ const nodeStyles: Record<TheoryStatus, { background: string; border: string; tex
   contested: { background: '#f4e8cf', border: '#9a742f', text: '#4a3714' },
   refuted: { background: '#f4dedd', border: '#a2403f', text: '#4a1c1c' },
   emerging: { background: '#e2eaf8', border: '#2f5fa8', text: '#1c3457' },
+}
+
+// Claim verdict colours reuse the existing theory palette so the claim layer
+// shares one visual language with the theory tree instead of a parallel one.
+// supports → verde (verdigris), contradicts → roșu (madder), mixed → portocaliu (brass),
+// neutral/insufficient → gri.
+const claimVerdictColor: Record<ClaimVerdict, string> = {
+  supports: statusColors.supported,
+  contradicts: statusColors.refuted,
+  mixed: statusColors.contested,
+  neutral: '#6b7280',
+  insufficient: '#6b7280',
+}
+
+const claimVerdictLabel: Record<ClaimVerdict, string> = {
+  supports: 'Susține',
+  contradicts: 'Contrazice',
+  mixed: 'Mixte',
+  neutral: 'Neutru',
+  insufficient: 'Insuficient',
+}
+
+const claimBadge = (node: TheoryNode, claimAggregates: Record<number, ClaimAggregate>): string => {
+  const agg = claimAggregates[node.id]
+  const studies = agg?.studies_accepted ?? 0
+  const verdict = agg?.verdict ?? 'insufficient'
+  if (studies < 2) return 'badge-muted'
+  switch (verdict) {
+    case 'supports': return 'badge-verdigris'
+    case 'contradicts': return 'badge-madder'
+    case 'mixed': return 'badge-brass'
+    default: return 'badge-muted'
+  }
 }
 
 const escapeHtml = (s: string) =>
@@ -53,6 +107,16 @@ export function TheoriesView({ onSelectEntry }: Props) {
   const [editForm, setEditForm] = useState({ name: '', description: '', status: 'emerging' as TheoryStatus, parent_id: '' })
   const [evForm, setEvForm] = useState({ entry_id: '', stance: 'pro' as 'pro' | 'contra', note: '', weight: 3 })
   const [subForm, setSubForm] = useState({ name: '', description: '' })
+  // Claim layer state: the selected node may be a theory or a claim. When a
+  // claim is selected, the evidence panel area switches to the per-study list.
+  const [claimAggregate, setClaimAggregate] = useState<ClaimAggregate | null>(null)
+  const [claimStances, setClaimStances] = useState<ClaimStancesResponse | null>(null)
+  const [claimAggregates, setClaimAggregates] = useState<Record<number, ClaimAggregate>>({})
+  const [showClaimForm, setShowClaimForm] = useState(false)
+  const [claimForm, setClaimForm] = useState({ name: '', statement: '' })
+  // Claims are hidden by default on mobile, visible on lg: screens, with a
+  // toggle. Per-branch collapse (the `collapsed` set) still applies inside.
+  const [showClaims, setShowClaims] = useState(() => window.innerWidth >= 1024)
   // Navigation for 48 theories: search filter, a "needs evidence" filter and
   // collapsible branches, remembered while the view stays mounted.
   const [search, setSearch] = useState('')
@@ -73,16 +137,45 @@ export function TheoriesView({ onSelectEntry }: Props) {
     setLoading(true)
     setError('')
     try {
-      const [treeData, entries] = await Promise.all([
-        api.theories.tree(),
+      const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/api'
+      const token = getAuthToken()
+      const headers: Record<string, string> = {}
+      if (token) headers.Authorization = `Bearer ${token}`
+      const [treeRes, entries] = await Promise.all([
+        fetch(`${BASE}/theories/tree?include_claims=true`, { headers, credentials: 'include' }),
         api.entries.list({ limit: 500 }),
       ])
+      if (!treeRes.ok) throw new Error(`HTTP ${treeRes.status}`)
+      const treeData: TheoryNode[] = await treeRes.json()
       setTree(treeData)
       const flat: TheoryNode[] = []
-      const visit = (nodes: TheoryNode[]) => nodes.forEach(n => { flat.push(n); visit(n.children) })
+      const claimIds: number[] = []
+      const visit = (nodes: TheoryNode[]) =>
+        nodes.forEach(n => {
+          flat.push(n)
+          if (isClaim(n)) claimIds.push(n.id)
+          visit(n.children)
+        })
       visit(treeData)
-      setTheories(flat)
+      // Only plain theories belong to the theory-scoped flat list (dropdowns,
+      // counts, theory detail). Claims live under their parent branch.
+      setTheories(flat.filter(n => !isClaim(n)))
       setAllEntries(entries)
+
+      // Attach aggregated verdicts so claim nodes can be coloured at render
+      // time without a per-node waterfall.
+      if (claimIds.length > 0) {
+        const aggregates = await Promise.all(
+          claimIds.map(id => api.claims.aggregate(id).catch(() => null)),
+        )
+        const byId: Record<number, ClaimAggregate> = {}
+        aggregates.forEach((agg, i) => {
+          if (agg) byId[claimIds[i]] = agg
+        })
+        setClaimAggregates(byId)
+      } else {
+        setClaimAggregates({})
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Arborele teoriilor nu s-a putut încărca')
     } finally {
@@ -97,18 +190,47 @@ export function TheoriesView({ onSelectEntry }: Props) {
 
   useEffect(() => {
     if (selectedId) {
-      api.theories.evidence(selectedId).then(setEvidence).catch(() => setEvidence([]))
       const t = theories.find(x => x.id === selectedId)
-      if (t) setEditForm({ name: t.name, description: t.description, status: t.status, parent_id: t.parent_id ? String(t.parent_id) : '' })
+      const findClaim = (nodes: TheoryNode[]): TheoryNode | null => {
+        for (const n of nodes) {
+          if (n.id === selectedId) return n
+          const found = findClaim(n.children)
+          if (found) return found
+        }
+        return null
+      }
+      const selectedNode = findClaim(tree) ?? t ?? null
+      if (selectedNode && isClaim(selectedNode)) {
+        setEvidence([])
+        setEditForm({ name: '', description: '', status: 'emerging', parent_id: '' })
+        api.claims.aggregate(selectedId).then(setClaimAggregate).catch(() => setClaimAggregate(null))
+        api.claims.stances(selectedId).then(setClaimStances).catch(() => setClaimStances(null))
+      } else if (selectedNode) {
+        api.theories.evidence(selectedId).then(setEvidence).catch(() => setEvidence([]))
+        setClaimAggregate(null)
+        setClaimStances(null)
+        setEditForm({
+          name: selectedNode.name,
+          description: selectedNode.description,
+          status: selectedNode.status,
+          parent_id: selectedNode.parent_id ? String(selectedNode.parent_id) : '',
+        })
+      }
     } else {
       setEvidence([])
+      setClaimAggregate(null)
+      setClaimStances(null)
+      setEditForm({ name: '', description: '', status: 'emerging', parent_id: '' })
     }
-  }, [selectedId, theories])
+  }, [selectedId, theories, tree])
 
   const { nodes, edges } = useMemo(() => {
     const nodes: any[] = []
     const edges: any[] = []
     const visit = (node: TheoryNode) => {
+      // Claims render only in the card/list view; the vis-network canvas keeps
+      // the theory tree intact so the force-directed graph never breaks.
+      if (isClaim(node)) return
       const hasEvidence = node.pro_count + node.contra_count > 0
       const s = nodeStyles[node.status]
       nodes.push({
@@ -229,7 +351,19 @@ export function TheoriesView({ onSelectEntry }: Props) {
     }
   }, [selectedId, visLoaded])
 
-  const selected = selectedId ? theories.find(t => t.id === selectedId) : null
+  const findNode = (id: number): TheoryNode | null => {
+    const go = (nodes: TheoryNode[]): TheoryNode | null => {
+      for (const n of nodes) {
+        if (n.id === id) return n
+        const found = go(n.children)
+        if (found) return found
+      }
+      return null
+    }
+    return go(tree)
+  }
+  const selected = selectedId ? findNode(selectedId) : null
+  const selectedIsClaim = selected != null && isClaim(selected)
   const proEvidence = evidence.filter(e => e.stance === 'pro')
   const contraEvidence = evidence.filter(e => e.stance === 'contra')
   const totalEvidence = theories.reduce((acc, t) => acc + t.pro_count + t.contra_count, 0)
@@ -283,6 +417,23 @@ export function TheoriesView({ onSelectEntry }: Props) {
       toast.success('Subteoria a fost creată')
     } catch (err: any) {
       toast.error('Subteoria nu s-a putut crea: ' + (err?.message || 'eroare necunoscută'))
+    }
+  }
+
+  const addClaim = async () => {
+    if (!selectedId || !claimForm.name.trim() || !claimForm.statement.trim()) return
+    try {
+      await api.claims.create({
+        parent_id: selectedId,
+        name: claimForm.name.trim(),
+        statement: claimForm.statement.trim(),
+      })
+      setClaimForm({ name: '', statement: '' })
+      setShowClaimForm(false)
+      await load()
+      toast.success('Alegerea a fost creată')
+    } catch (err: any) {
+      toast.error('Alegerea nu s-a putut crea: ' + (err?.message || 'eroare necunoscută'))
     }
   }
 
@@ -417,6 +568,14 @@ export function TheoriesView({ onSelectEntry }: Props) {
               className="btn-ghost text-sm"
               aria-label="Extinde toate ramurile"
             >Extinde tot</button>
+            <button
+              onClick={() => setShowClaims(v => !v)}
+              className={`btn-ghost text-sm ${showClaims ? 'text-verdigris' : ''}`}
+              aria-pressed={showClaims}
+              aria-label={showClaims ? 'Ascunde alegerile' : 'Arată alegerile'}
+            >
+              {showClaims ? '✓ Alegeri' : 'Alegeri'}
+            </button>
             <span className="text-xs text-gray-500">
               {visibleCount} din {theories.length} în vedere
             </span>
@@ -431,7 +590,7 @@ export function TheoriesView({ onSelectEntry }: Props) {
                   const s = networkRef.current?.getScale() || 1
                   networkRef.current?.moveTo({ scale: s * 1.3, animation: { duration: 250 } })
                 }}
-                className="w-7 h-7 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink font-bold text-base transition-colors"
+                className="touch-40 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink font-bold text-base transition-colors"
                 title="Mărește (Zoom in)"
               >+</button>
               <button
@@ -439,12 +598,12 @@ export function TheoriesView({ onSelectEntry }: Props) {
                   const s = networkRef.current?.getScale() || 1
                   networkRef.current?.moveTo({ scale: s * 0.77, animation: { duration: 250 } })
                 }}
-                className="w-7 h-7 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink font-bold text-base transition-colors"
+                className="touch-40 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink font-bold text-base transition-colors"
                 title="Micșorează (Zoom out)"
               >−</button>
               <button
                 onClick={() => networkRef.current?.fit({ animation: { duration: 350 } })}
-                className="w-7 h-7 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink text-xs font-semibold transition-colors"
+                className="touch-40 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink text-xs font-semibold transition-colors"
                 title="Încadrează tot arborele"
               >⛶</button>
             </div>
@@ -466,6 +625,8 @@ export function TheoriesView({ onSelectEntry }: Props) {
                   collapsed={collapsed}
                   onToggle={toggleCollapse}
                   search={search}
+                  showClaims={showClaims}
+                  claimAggregates={claimAggregates}
                 />
               ))}
             </ul>
@@ -513,7 +674,7 @@ export function TheoriesView({ onSelectEntry }: Props) {
       )}
 
       {/* Selected theory detail */}
-      {selected && (
+      {selected && !selectedIsClaim && (
         <div className="card space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0 space-y-2">
@@ -561,6 +722,7 @@ export function TheoriesView({ onSelectEntry }: Props) {
               <h4 className="font-semibold text-sm">Dovezi</h4>
               <div className="flex gap-2">
                 <button onClick={() => setShowAddSub(!showAddSub)} className="btn-secondary text-xs">+ Subteorie</button>
+                <button onClick={() => { setShowClaimForm(true); setClaimForm({ name: '', statement: '' }) }} className="btn-secondary text-xs">+ Alegere</button>
                 <button onClick={() => setShowAddEvidence(!showAddEvidence)} className="btn-primary text-xs">+ Leagă studiu</button>
               </div>
             </div>
@@ -593,6 +755,38 @@ export function TheoriesView({ onSelectEntry }: Props) {
                 <input value={evForm.note} onChange={e => setEvForm(f => ({ ...f, note: e.target.value }))}
                   className="input" placeholder="Notă (cum susține sau contrazice)" />
                 <button onClick={addEvidence} disabled={!evForm.entry_id} className="btn-primary text-sm">Leagă dovada</button>
+              </div>
+            )}
+
+            {showClaimForm && selected && !selectedIsClaim && (
+              <div className="mb-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg space-y-2">
+                <p className="text-[10px] font-semibold text-muted mb-1">
+                  Alegere nouă — „propusă de tine, nu de AI”
+                </p>
+                <input
+                  value={claimForm.name}
+                  onChange={e => setClaimForm(f => ({ ...f, name: e.target.value }))}
+                  className="input"
+                  placeholder="Numele alegerei"
+                />
+                <textarea
+                  value={claimForm.statement}
+                  onChange={e => setClaimForm(f => ({ ...f, statement: e.target.value }))}
+                  className="input min-h-[50px]"
+                  placeholder="Formulare testabil (ce afirmă alegerea)"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={addClaim}
+                    disabled={!claimForm.name.trim() || !claimForm.statement.trim()}
+                    className="btn-primary text-sm"
+                  >
+                    Crează alegerea
+                  </button>
+                  <button onClick={() => setShowClaimForm(false)} className="btn-ghost text-sm">
+                    Anulează
+                  </button>
+                </div>
               </div>
             )}
 
@@ -657,12 +851,82 @@ export function TheoriesView({ onSelectEntry }: Props) {
           </div>
         </div>
       )}
+      {/* Selected claim detail: per-study stance list in the same panel area. */}
+      {selectedIsClaim && selected && (
+        <div className="card space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0 space-y-2">
+              <input
+                defaultValue={selected.name}
+                readOnly
+                className="input font-semibold bg-transparent border-none px-0 py-0 text-ink dark:text-ink focus:ring-0"
+              />
+              <p className="text-sm text-muted font-mono">{`${(selected as ClaimNode).statement || selected.name}`}</p>
+              <div className="flex gap-2">
+                <span
+                  className={`badge ${claimBadge(selected, claimAggregates)}`}
+                >
+                  {claimAggregate ? claimVerdictLabel[claimAggregate.verdict] : 'Fără decizie'}
+                </span>
+                <span className="badge badge-muted">
+                  studii: {claimAggregate?.studies_accepted ?? 0}
+                </span>
+              </div>
+            </div>
+            <button onClick={() => setSelectedId(null)} className="btn-ghost text-sm">
+              Înapoi
+            </button>
+          </div>
+
+          <div>
+            <h4 className="font-semibold text-sm">Studii analizate</h4>
+            {claimStances && claimStances.accepted && claimStances.accepted.length > 0 ? (
+              <div className="space-y-1.5">
+                {claimStances.accepted.map(st => {
+                  const entry = allEntries.find(e => e.id === st.entry_id)
+                  return (
+                    <div key={st.id} className="p-2 bg-surface-2 rounded-lg text-sm flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <button
+                          className="text-left font-medium hover:text-accent min-w-0 transition-colors"
+                          onClick={() => {
+                            if (entry) onSelectEntry(entry)
+                          }}
+                        >
+                          {st.entry_title || entry?.title || 'Studiu necunoscut'}
+                        </button>
+                        <p className="text-[10px] text-muted">
+                          {st.direction === 'supports'
+                            ? 'Susține'
+                            : st.direction === 'contradicts'
+                              ? 'Contrazice'
+                              : 'Mixte'}
+                        </p>
+                      </div>
+                      <div className="text-[10px] text-muted">
+                        {st.evidence_quote
+                          ? `"${escapeHtml(st.evidence_quote)}"` +
+                            (st.evidence_page != null ? ` — p. ${st.evidence_page}` : '')
+                          : '—'}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500">
+                Nu a fost rulată încă nicio analiză pentru această alegere.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 
-function TreeNodeRow({ node, selectedId, onSelect, depth, collapsed, onToggle, search }: {
+function TreeNodeRow({ node, selectedId, onSelect, depth, collapsed, onToggle, search, showClaims, claimAggregates }: {
   node: TheoryNode
   selectedId: number | null
   onSelect: (id: number) => void
@@ -671,7 +935,12 @@ function TreeNodeRow({ node, selectedId, onSelect, depth, collapsed, onToggle, s
   onToggle: (id: number) => void
   /** Active search: matches auto-expand so a hit deep in the tree is visible. */
   search: string
+  /** Whether claim leaves are shown in this branch (default off on mobile). */
+  showClaims: boolean
+  /** Aggregated verdicts keyed by claim id, used to colour claim leaves. */
+  claimAggregates: Record<number, ClaimAggregate>
 }) {
+  const claim = isClaim(node)
   const linked = node.pro_count + node.contra_count > 0
   const hasChildren = node.children.length > 0
   const isOpen = search.trim() ? true : !collapsed.has(node.id)
@@ -683,21 +952,24 @@ function TreeNodeRow({ node, selectedId, onSelect, depth, collapsed, onToggle, s
         {hasChildren ? (
           <button
             onClick={() => onToggle(node.id)}
-            className="shrink-0 w-7 h-7 flex items-center justify-center text-xs text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
+            className="shrink-0 touch-40-neg flex items-center justify-center text-xs text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
             aria-expanded={isOpen}
             aria-label={`${isOpen ? 'Restrânge' : 'Extinde'} ramura ${node.name}`}
           >{isOpen ? '▾' : '▸'}</button>
         ) : (
           <span className="w-7 shrink-0" aria-hidden="true" />
         )}
-        <button
-          onClick={() => onSelect(node.id)}
-          aria-pressed={selectedId === node.id}
-          className={`flex-1 min-w-0 text-left text-sm flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 py-1 rounded hover:bg-surface-2 transition-colors ${
-            selectedId === node.id ? 'bg-accent-soft text-accent-strong' : ''
-          }`}
-          title={node.description || node.name}
-        >
+        {claim ? (
+          <ClaimRow node={node} selectedId={selectedId} onSelect={onSelect} depth={depth} claimAggregates={claimAggregates} />
+        ) : (
+          <button
+            onClick={() => onSelect(node.id)}
+            aria-pressed={selectedId === node.id}
+            className={`flex-1 min-w-0 text-left text-sm flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 py-1 rounded hover:bg-surface-2 transition-colors ${
+              selectedId === node.id ? 'bg-accent-soft text-accent-strong' : ''
+            }`}
+            title={node.description || node.name}
+          >
           {/* Indent is halved on phones: 18px per level left the name 2px wide. */}
           <span className="hidden sm:inline-block shrink-0" style={{ width: depth * 18 }} aria-hidden="true" />
           <span className="inline-block sm:hidden shrink-0" style={{ width: depth * 8 }} aria-hidden="true" />
@@ -726,23 +998,86 @@ function TreeNodeRow({ node, selectedId, onSelect, depth, collapsed, onToggle, s
           )}
           <span className="hidden sm:inline text-[10px] text-muted shrink-0">{statusLabels[node.status]}</span>
         </button>
+        )}
       </div>
       {hasChildren && isOpen && (
         <ul>
-          {node.children.map(child => (
-            <TreeNodeRow
-              key={child.id}
-              node={child}
-              selectedId={selectedId}
-              onSelect={onSelect}
-              depth={depth + 1}
-              collapsed={collapsed}
-              onToggle={onToggle}
-              search={search}
-            />
-          ))}
+          {node.children.map(child => {
+            if (isClaim(child)) {
+              if (!showClaims) return null
+              return (
+                <li key={child.id}>
+                  <ClaimRow
+                    node={child}
+                    selectedId={selectedId}
+                    onSelect={onSelect}
+                    depth={depth + 1}
+                    claimAggregates={claimAggregates}
+                  />
+                </li>
+              )
+            }
+            return (
+              <TreeNodeRow
+                key={child.id}
+                node={child}
+                selectedId={selectedId}
+                onSelect={onSelect}
+                depth={depth + 1}
+                collapsed={collapsed}
+                onToggle={onToggle}
+                search={search}
+                showClaims={showClaims}
+                claimAggregates={claimAggregates}
+              />
+            )
+          })}
         </ul>
       )}
     </li>
+  )
+}
+
+// A claim leaf renders smaller than a theory node: a square-ish coloured
+// marker, a monospace-ish statement, and a „studii: N” badge. Claims with
+// fewer than two accepted studies stay grey — one study cannot colour a claim.
+export function ClaimRow({ node, selectedId, onSelect, depth, claimAggregates }: {
+  node: ClaimNode
+  selectedId: number | null
+  onSelect: (id: number) => void
+  depth: number
+  claimAggregates: Record<number, ClaimAggregate>
+}) {  const agg = claimAggregates[node.id]
+  const studies = agg?.studies_accepted ?? 0
+  const verdict = agg?.verdict ?? 'insufficient'
+  const decided = studies >= 2
+  const color = decided ? claimVerdictColor[verdict] : '#6b7280'
+  const label = decided ? claimVerdictLabel[verdict] : 'Fără decizie'
+  return (
+    <button
+      onClick={() => onSelect(node.id)}
+      aria-pressed={selectedId === node.id}
+      className={`flex-1 min-w-0 text-left text-xs flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 py-1 rounded hover:bg-surface-2 transition-colors ${
+        selectedId === node.id ? 'bg-accent-soft text-accent-strong' : ''
+      }`}
+      title={node.statement || node.name}
+    >
+      <span className="hidden sm:inline-block shrink-0" style={{ width: depth * 18 }} aria-hidden="true" />
+      <span className="inline-block sm:hidden shrink-0" style={{ width: depth * 8 }} aria-hidden="true" />
+      <span className="w-3 h-3 shrink-0 inline-block" style={{ background: color }} aria-hidden="true" />
+      <span className="min-w-[6ch] flex-1 break-words font-mono text-xs">{node.statement || node.name}</span>
+      {decided ? (
+        <>
+          <span className="text-[10px] px-1.5 py-0.5 rounded shrink-0 font-semibold" style={{ background: color, color: '#ffffff' }}>
+            studii: {studies}
+          </span>
+          <span className="text-[10px] text-muted shrink-0">{label}</span>
+        </>
+      ) : (
+        <span className="text-[10px] px-1.5 py-0.5 rounded shrink-0 bg-surface-2 text-muted">
+          studii: {studies}
+        </span>
+      )}
+    </button>
   )
 }

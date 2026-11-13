@@ -80,7 +80,7 @@ def test_context_recall_offline():
             "/api/entries",
             json={"title": "Cooking pasta", "content": "Boil water add salt", "tags": "food"},
         )
-    from app.routers.chat import _build_context
+    from app.chat.context import _build_context
 
     ctx = _build_context("Bell inequalities violation")
     assert ctx

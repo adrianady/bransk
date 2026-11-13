@@ -10,6 +10,7 @@ import logging
 import ipaddress
 import os
 import re
+import shutil
 import socket
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,6 +24,53 @@ STUDIES_DIR = Path(os.getenv("CHRONOKG_STUDIES_DIR", str(Path(__file__).parent.p
 MAX_SIZE = 150 * 1024 * 1024  # 150 MB safety cap
 
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Bransk/0.1"}
+
+# A publisher or repository answering with one of these is not providing the
+# paper — it is refusing an automated client. 403/429 are decisive on their
+# own; 503 only counts when the body carries a challenge marker, because a
+# plain 503 is usually an outage.
+_BOT_STATUS = frozenset({401, 403, 429})
+# Challenge-page phrases. Generic words like "captcha" or "cloudflare" are
+# deliberately absent: an article *about* CAPTCHAs is not a challenge page.
+_BOT_MARKERS = (
+    "i am not a robot",
+    "i'm not a robot",
+    "i am a robot",
+    "verify you are human",
+    "verify you are a human",
+    "checking your browser",
+    "just a moment",
+    "attention required",
+    "cf-challenge",
+    "cf_chl_opt",
+    "challenge-platform",
+    "enable javascript and cookies to continue",
+    "please turn javascript on",
+    "unusual traffic",
+    "request blocked",
+    "bot detection",
+    "ddos protection",
+)
+
+
+def detect_bot_challenge(status_code: int, content_type: str = "", body: str = "") -> str:
+    """Return a short reason when a response is a bot challenge, else ``""``.
+
+    Downloads that "succeed" with an HTML challenge page are the failure this
+    guards against: the file is not a PDF, and the user needs a browser and a
+    manual upload instead of a silent failure.
+    """
+    ctype = (content_type or "").lower()
+    text = (body or "")[:20000].lower()
+    marker = next((m for m in _BOT_MARKERS if m in text), "")
+    if status_code in _BOT_STATUS:
+        return marker or f"http_{status_code}"
+    if status_code == 503 and marker:
+        return marker
+    if marker and ("html" in ctype or not ctype or "text" in ctype):
+        return marker
+    return ""
+
 
 
 def assert_public_download_url(url: str) -> None:
@@ -101,8 +149,68 @@ def extract_pdf_url(entry: dict) -> str:
     return match.group(0) if match else ""
 
 
-async def download_study_pdf(entry_id: int, url: str, title: str):
-    """Download a study PDF into the studies folder. Returns the filename or None."""
+def _atomic_write(dest: Path, write) -> bool:
+    """Write to a sibling temp file, then replace — never leave a half PDF."""
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        write(tmp)
+        if not is_valid_pdf_file(tmp):
+            tmp.unlink(missing_ok=True)
+            return False
+        os.replace(tmp, dest)
+        return True
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        logger.info("Could not store PDF at %s: %s", dest, exc)
+        return False
+
+
+def write_study_pdf_bytes(entry_id: int, title: str, data: bytes) -> str | None:
+    """Store bytes uploaded from the browser as this entry's PDF.
+
+    Returns the stored filename, or ``None`` when the upload is empty, too
+    large, or not a PDF. This is the manual-upload counterpart of
+    :func:`download_study_pdf`: the same folder, the same naming, the same
+    magic-byte check, so the reader and RAG cannot tell them apart.
+    """
+    if not data or len(data) > MAX_SIZE or not data.startswith(b"%PDF-"):
+        return None
+    dest = ensure_dir() / pdf_filename(entry_id, title)
+    if not _atomic_write(dest, lambda tmp: tmp.write_bytes(data)):
+        return None
+    logger.info("Stored uploaded PDF for entry %s: %s", entry_id, dest.name)
+    return dest.name
+
+
+def copy_study_pdf(entry_id: int, title: str, source) -> str | None:
+    """Copy an existing PDF (e.g. from Zotero storage) into the studies folder."""
+    src = Path(source)
+    if not is_valid_pdf_file(src):
+        return None
+    if src.stat().st_size > MAX_SIZE:
+        return None
+    dest = ensure_dir() / pdf_filename(entry_id, title)
+    try:
+        if src.resolve() == dest.resolve():
+            return dest.name
+    except OSError:
+        pass
+    if not _atomic_write(dest, lambda tmp: shutil.copyfile(src, tmp)):
+        return None
+    logger.info("Copied PDF for entry %s from %s", entry_id, src)
+    return dest.name
+
+
+async def download_study_pdf(entry_id: int, url: str, title: str, *, details: dict | None = None):
+    """Download a study PDF into the studies folder. Returns the filename or None.
+
+    ``details``, when supplied, is filled with ``status_code``, ``content_type``
+    and ``bot_challenge`` so callers can distinguish "no PDF exists" from "the
+    publisher wants a human in a browser".
+    """
+    if details is not None:
+        details.clear()
+        details.update({"status_code": 0, "content_type": "", "bot_challenge": ""})
     url = (url or "").strip()
     if not url.lower().startswith(("http://", "https://")):
         return None
@@ -135,21 +243,54 @@ async def download_study_pdf(entry_id: int, url: str, title: str):
             max_redirects=8,
         ) as client:
             async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
                 ctype = resp.headers.get("content-type", "").lower()
+                if details is not None:
+                    details["status_code"] = resp.status_code
+                    details["content_type"] = ctype
+                if resp.status_code >= 400:
+                    head = b""
+                    try:
+                        async for chunk in resp.aiter_bytes(8192):
+                            head += chunk
+                            break
+                    except Exception:  # noqa: BLE001 - the status is the signal
+                        pass
+                    reason = detect_bot_challenge(
+                        resp.status_code, ctype, head.decode("utf-8", "ignore")
+                    )
+                    if details is not None:
+                        details["bot_challenge"] = reason
+                    if reason:
+                        # Don't stream a challenge body to disk as if it were a PDF.
+                        logger.info(
+                            "Bot challenge for entry %s at %s (%s)",
+                            entry_id, url[:200], reason,
+                        )
+                        return None
+                    resp.raise_for_status()
                 size = 0
+                head = b""
                 with open(dest, "wb") as out:
                     async for chunk in resp.aiter_bytes(65536):
+                        if len(head) < 8192:
+                            head += chunk[: 8192 - len(head)]
                         size += len(chunk)
                         if size > MAX_SIZE:
                             break
                         out.write(chunk)
         valid = is_valid_pdf_file(dest) and size <= MAX_SIZE
         if not valid:
+            reason = detect_bot_challenge(
+                details.get("status_code", 0) if details else 0,
+                ctype,
+                head.decode("utf-8", "ignore"),
+            )
+            if details is not None:
+                details["bot_challenge"] = reason
             dest.unlink(missing_ok=True)
             logger.info(
-                "Rejected download for entry %s (%s bytes, ctype=%s, not a valid PDF)",
-                entry_id, size, ctype,
+                "Rejected download for entry %s (%s bytes, ctype=%s, not a valid PDF%s)",
+                entry_id, size, ctype, f", bot challenge: {reason}" if reason else "",
             )
             return None
         logger.info("Downloaded study PDF for entry %s: %s", entry_id, fname)
@@ -158,3 +299,66 @@ async def download_study_pdf(entry_id: int, url: str, title: str):
         logger.info("PDF download failed for entry %s: %s", entry_id, type(exc).__name__)
         dest.unlink(missing_ok=True)
         return None
+
+
+def compute_pdf_hash(file_bytes: bytes) -> str:
+    """SHA256 hex digest of PDF bytes (empty input -> empty string)."""
+    import hashlib
+
+    if not file_bytes:
+        return ""
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def compute_pdf_file_hash(path) -> str:
+    """SHA256 hex digest of a stored PDF file; ``""`` when unreadable."""
+    import hashlib
+
+    try:
+        h = hashlib.sha256()
+        with open(str(path), "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def find_entry_by_pdf_hash(conn, pdf_hash: str, exclude_id: int | None = None) -> dict | None:
+    """Return the live entry already storing *pdf_hash*, if any."""
+    if not (pdf_hash or "").strip():
+        return None
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+    if "pdf_hash" not in cols:
+        return None
+    if exclude_id is not None:
+        row = conn.execute(
+            "SELECT * FROM entries WHERE pdf_hash = ? AND id != ? AND archived = 0",
+            [pdf_hash, exclude_id],
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM entries WHERE pdf_hash = ? AND archived = 0",
+            [pdf_hash],
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def store_entry_pdf_hash(conn, entry_id: int, pdf_path=None) -> str:
+    """(Re)compute the SHA256 of the stored PDF and persist it on the entry.
+
+    Returns the digest (``""`` when no readable PDF). Never raises: a missing
+    column (pre-migration DB) or missing file simply yields ``""``.
+    """
+    try:
+        path = pdf_path or pdf_path_for(entry_id)
+        digest = compute_pdf_file_hash(path) if path else ""
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+        if "pdf_hash" in cols:
+            conn.execute(
+                "UPDATE entries SET pdf_hash = ? WHERE id = ?",
+                [digest, entry_id],
+            )
+        return digest
+    except Exception:  # noqa: BLE001 - hashing must never break an upload
+        return ""

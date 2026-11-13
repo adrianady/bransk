@@ -3,7 +3,7 @@ import {
   GraduationCap, Pencil, Check, X, Loader2, Sparkles, BookOpen, BarChart3,
   MessageSquareWarning, Plus, Trash2, ChevronDown, ChevronRight, Save,
   Lightbulb, AlertTriangle, Info, ExternalLink, RefreshCw, ListTree, CheckCircle2, Compass,
-  Download, BookMarked, FileDown,
+  Download, BookMarked, FileDown, ClipboardList, FolderPlus, Brain,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -14,9 +14,10 @@ import { IdeasPanel } from './IdeasPanel'
 import { BibliographyPanel } from './BibliographyPanel'
 import { TitlePanel } from './TitlePanel'
 import { TopicPanel } from './TopicPanel'
+import { QuestionnairesPanel } from './QuestionnairesPanel'
 import type {
   Project, ProjectSection, ProjectStudyRecommendation, ProjectAnalysisResponse,
-  ProjectFeedbackResponse, FeedbackItem, ProjectEvidenceMap, StudySource,
+  ProjectFeedbackResponse, FeedbackItem, ProjectEvidenceMap, StudySource, ProjectSummary,
 } from '../lib/types'
 
 const ThesisEvidenceMap = lazy(() => import('./ThesisEvidenceMap').then(module => ({ default: module.ThesisEvidenceMap })))
@@ -39,7 +40,7 @@ interface Props {
   focusClaim?: { sectionId: string; claimId: number; token: number } | null
 }
 
-type Tab = 'structure' | 'map' | 'studies' | 'readiness' | 'topic' | 'analysis' | 'feedback' | 'ideas' | 'bibliography'
+type Tab = 'structure' | 'map' | 'studies' | 'questionnaires' | 'readiness' | 'topic' | 'analysis' | 'feedback' | 'ideas' | 'bibliography'
 
 const WORK_TYPES: { value: string; label: string }[] = [
   { value: 'licenta', label: 'Licență' },
@@ -121,7 +122,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
   const [evidenceMap, setEvidenceMap] = useState<ProjectEvidenceMap | null>(null)
   const [mapStudies, setMapStudies] = useState<ProjectStudyRecommendation[]>([])
   const [loadingEvidenceMap, setLoadingEvidenceMap] = useState(false)
-
+  const [synthesizingConcepts, setSynthesizingConcepts] = useState(false)
   // Recommendations / analysis / feedback
   const [studies, setStudies] = useState<ProjectStudyRecommendation[]>([])
   const [libraryTotal, setLibraryTotal] = useState(0)
@@ -137,6 +138,59 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
   const [reviewError, setReviewError] = useState('')
   const [requestingReview, setRequestingReview] = useState(false)
 
+  // Multi-Project Isolation
+  const [projectList, setProjectList] = useState<ProjectSummary[]>([])
+  const [showProjectModal, setShowProjectModal] = useState(false)
+  const [newProjectTitle, setNewProjectTitle] = useState('')
+  const [creatingProject, setCreatingProject] = useState(false)
+
+  const loadProjects = useCallback(async () => {
+    try {
+      const res = await api.projects.list()
+      setProjectList(res.projects || [])
+    } catch {
+      // best-effort
+    }
+  }, [])
+
+  useEffect(() => {
+    loadProjects()
+  }, [loadProjects])
+
+  const handleSwitchProject = async (pid: number) => {
+    try {
+      const res = await api.projects.activate(pid)
+      setProject(res.project)
+      setTitleDraft(res.project.title || '')
+      onTitleChange?.(res.project.title || '')
+      toast.success(`Comutat la proiectul: ${res.project.title || 'Fără titlu'}`)
+      await loadProjects()
+    } catch (err) {
+      toast.error('Comutarea proiectului a eșuat: ' + (err instanceof Error ? err.message : 'eroare'))
+    }
+  }
+
+  const handleCreateNewProject = async () => {
+    if (!newProjectTitle.trim()) {
+      toast.error('Introdu un titlu pentru noul proiect.')
+      return
+    }
+    setCreatingProject(true)
+    try {
+      const created = await api.projects.create({ title: newProjectTitle.trim() })
+      setProject(created)
+      setTitleDraft(created.title || '')
+      onTitleChange?.(created.title || '')
+      setShowProjectModal(false)
+      setNewProjectTitle('')
+      toast.success('Noul proiect a fost creat și activat izolat!')
+      await loadProjects()
+    } catch (err) {
+      toast.error('Eroare la crearea proiectului: ' + (err instanceof Error ? err.message : 'eroare'))
+    } finally {
+      setCreatingProject(false)
+    }
+  }
   const loadProject = useCallback(async () => {
     try {
       const p = await api.project.get()
@@ -182,6 +236,39 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
       setLoadingEvidenceMap(false)
     }
   }, [toast])
+
+  // Build a concept/factor map from what was actually read: notes and PDF
+  // highlights are the evidence the extractor grounds every concept in.
+  const synthesizeConcepts = useCallback(async () => {
+    if (synthesizingConcepts) return
+    setSynthesizingConcepts(true)
+    try {
+      const { items } = await api.studies.all()
+      const read = items.filter(s => ['read', 'annotated'].includes(s.read_status || ''))
+      const source = read.length > 0 ? read : items
+      if (source.length === 0) {
+        toast.info('Nu există studii sau cărți în bibliotecă pentru sinteză.')
+        return
+      }
+      const res = await api.aiConcepts.extract({
+        entry_ids: source.slice(0, 30).map(s => s.id),
+        project_id: project?.id,
+      })
+      const nConcepts = res.concepts?.length ?? 0
+      const nRelations = res.relations?.length ?? 0
+      if (nConcepts === 0) {
+        toast.info('AI-ul nu a găsit concepte noi. Adaugă evidențieri sau notițe pe studii.')
+      } else {
+        toast.success(
+          `${nConcepts} concepte și ${nRelations} relații create din ${read.length > 0 ? 'studiile citite' : 'bibliotecă'}. Deschide Graful → „Concepte”.`
+        )
+      }
+    } catch (err: any) {
+      toast.error('Sinteza conceptelor a eșuat: ' + (err?.message || 'eroare'))
+    } finally {
+      setSynthesizingConcepts(false)
+    }
+  }, [project?.id, synthesizingConcepts, toast])
 
   const patch = useCallback(async (body: Partial<Project>, quiet = false) => {
     try {
@@ -542,6 +629,34 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
             <GraduationCap className="w-5 h-5 text-chrono-600 dark:text-chrono-400" />
           </div>
           <div className="flex-1 min-w-0">
+            {/* Multi-Project Isolation Switcher */}
+            <div className="flex flex-wrap items-center gap-2 mb-2 pb-2 border-b border-line">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-chrono-600 dark:text-chrono-400 bg-chrono-100 dark:bg-chrono-950 px-2 py-0.5 rounded">
+                Proiect Izolat
+              </span>
+              {projectList.length > 1 && (
+                <select
+                  value={project.id}
+                  onChange={e => handleSwitchProject(Number(e.target.value))}
+                  className="max-w-[calc(100vw-9rem)] truncate text-xs bg-surface border border-line rounded px-2 py-0.5 font-medium text-ink cursor-pointer"
+                  aria-label="Comută proiectul de cercetare"
+                >
+                  {projectList.map(p => (
+                    <option key={p.id} value={p.id} title={p.title || `Proiect #${p.id}`}>
+                      {p.title || `Proiect #${p.id}`}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                onClick={() => setShowProjectModal(true)}
+                className="btn-ghost text-xs py-0.5 px-2 flex items-center gap-1 text-gray-500 hover:text-ink ml-auto"
+                title="Creează o lucrare / un proiect izolat nou"
+              >
+                <FolderPlus className="w-3.5 h-3.5" />
+                <span>+ Proiect Nou</span>
+              </button>
+            </div>
             {editingTitle ? (
               <div className="flex items-start gap-2">
                 <input
@@ -587,7 +702,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
             {(project.title || '').length > 90 && (
               <button
                 onClick={() => setExpandedTitle(v => !v)}
-                className="text-[11px] text-chrono-600 dark:text-chrono-400 hover:underline mt-1 py-1 -my-1"
+                className="text-[11px] text-chrono-600 dark:text-chrono-400 hover:underline mt-1 py-2 touch-40"
               >
                 {expandedTitle ? 'Restrânge titlul' : 'Vezi titlul întreg'}
               </button>
@@ -649,32 +764,85 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
       </div>
 
       {/* ── Tabs (Horizontally scrollable on mobile) ── */}
-      <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 overflow-x-auto no-scrollbar pb-px flex-nowrap" role="tablist">
-        {([
-          ['structure', '📐 Structură', ListTree],
-          ['map', '🗺️ Hartă și dovezi', BookOpen],
-          ['studies', '📚 Studii recomandate', BookOpen],
-          ['readiness', '✅ Pregătire', CheckCircle2],
-          ['topic', '🧭 Tema', Compass],
-          ['analysis', '📊 Analiză temă', BarChart3],
-          ['feedback', '💬 Feedback', MessageSquareWarning],
-          ['ideas', '💡 Idei', Lightbulb],
-          ['bibliography', '📖 Bibliografie', BookMarked],
-        ] as const).map(([id, label]) => (
-          <button
-            key={id}
-            role="tab"
-            aria-selected={tab === id}
-            onClick={() => setTab(id)}
-            className={`px-3 sm:px-4 py-2 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 ${
-              tab === id
-                ? 'border-chrono-600 text-chrono-600 dark:text-chrono-400 font-semibold'
-                : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      {/* ── Modern Streamlined Project Workspaces ── */}
+      <div className="space-y-2">
+        <div className="flex flex-wrap gap-1.5 border-b border-gray-200 dark:border-gray-700 pb-px" role="tablist">
+          {([
+            { id: 'writing', label: '✍️ Structură & Redactare', defaultTab: 'structure', tabs: ['structure'] },
+            { id: 'methodology', label: '📋 Chestionare & Scale', defaultTab: 'questionnaires', tabs: ['questionnaires'] },
+            { id: 'advisor', label: '🧭 Diagnostic & Literatură', defaultTab: 'readiness', tabs: ['readiness', 'analysis', 'feedback', 'studies', 'topic'] },
+            { id: 'evidence', label: '🗺️ Hartă Teză & Bibliografie', defaultTab: 'map', tabs: ['map', 'bibliography', 'ideas'] },
+          ] as const).map(pillar => {
+            const isActive = (pillar.tabs as readonly string[]).includes(tab)
+            return (
+              <button
+                key={pillar.id}
+                role="tab"
+                aria-selected={isActive}
+                onClick={() => {
+                  if (!isActive) {
+                    setTab(pillar.defaultTab as Tab)
+                  }
+                }}
+                className={`px-3 sm:px-4 py-2 min-h-[40px] text-xs sm:text-sm font-medium border-b-2 transition-all whitespace-nowrap shrink-0 ${
+                  isActive
+                    ? 'border-chrono-600 text-chrono-600 dark:text-chrono-400 font-bold bg-chrono-50/50 dark:bg-chrono-950/20'
+                    : 'border-transparent text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
+                }`}
+              >
+                {pillar.label}
+              </button>
+            )
+          })}
+        </div>
+
+        {/* Sub-navigation for Diagnostic & Literatură */}
+        {(tab === 'readiness' || tab === 'analysis' || tab === 'feedback' || tab === 'studies' || tab === 'topic') && (
+          <div className="flex flex-wrap items-center gap-1.5 p-1 bg-gray-100 dark:bg-gray-800/60 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
+            {([
+              { id: 'readiness', label: '✅ Pregătire & Scor' },
+              { id: 'analysis', label: '📊 Analiză Temă' },
+              { id: 'feedback', label: '💬 Feedback' },
+              { id: 'studies', label: '📚 Studii Recomandate' },
+              { id: 'topic', label: '🧭 Idei de Temă' },
+            ] as const).map(st => (
+              <button
+                key={st.id}
+                onClick={() => setTab(st.id as Tab)}
+                className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
+                  tab === st.id
+                    ? 'bg-white dark:bg-gray-900 text-chrono-600 dark:text-chrono-400 shadow-sm font-semibold'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100'
+                }`}
+              >
+                {st.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Sub-navigation for Hartă Teză & Bibliografie */}
+        {(tab === 'map' || tab === 'bibliography' || tab === 'ideas') && (
+          <div className="flex flex-wrap items-center gap-1.5 p-1 bg-gray-100 dark:bg-gray-800/60 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
+            {([
+              { id: 'map', label: '🗺️ Hartă Afirmații & Dovezi' },
+              { id: 'bibliography', label: '📖 Bibliografie APA' },
+              { id: 'ideas', label: '💡 Idei de Cercetare' },
+            ] as const).map(st => (
+              <button
+                key={st.id}
+                onClick={() => setTab(st.id as Tab)}
+                className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
+                  tab === st.id
+                    ? 'bg-white dark:bg-gray-900 text-chrono-600 dark:text-chrono-400 shadow-sm font-semibold'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100'
+                }`}
+              >
+                {st.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* ── Structure tab ── */}
@@ -731,7 +899,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
                     <div className="flex items-center gap-2 p-2 sm:p-3">
                       <button
                         onClick={() => setOpenSection(isOpen ? null : section.id)}
-                        className="flex items-center gap-2 flex-1 min-w-0 text-left py-1 -my-1"
+                        className="flex items-center gap-2 flex-1 min-w-0 text-left py-2 touch-40"
                         aria-expanded={isOpen}
                       >
                         {isOpen ? <ChevronDown className="w-4 h-4 shrink-0 text-gray-400" />
@@ -753,7 +921,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
                       )}
                       <button
                         onClick={() => removeSection(section.id)}
-                        className="icon-btn text-muted hover:text-madder shrink-0"
+                        className="icon-btn text-muted hover:text-madder shrink-0 touch-40"
                         aria-label={`Șterge capitolul ${section.title}`}
                       >
                         <Trash2 className="w-4 h-4" />
@@ -833,17 +1001,35 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
 
       {/* ── Thesis map: chapters → claims → source evidence ── */}
       {tab === 'map' && (
-        <Suspense fallback={<div className="card flex items-center justify-center gap-2 py-10 text-sm text-gray-500"><Loader2 className="w-4 h-4 animate-spin" /> Se încarcă harta…</div>}>
-          <ThesisEvidenceMap
-            map={evidenceMap}
-            studies={mapStudies}
-            loading={loadingEvidenceMap}
-            onRefresh={loadEvidenceMap}
-            onSelectEntry={onSelectEntry}
-            onOpenSource={onOpenSource}
-            focusClaimId={focusClaim?.claimId}
-          />
-        </Suspense>
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted max-w-xl">
+              Sinteza citește notițele și evidențierile din studiile marcate „citit/adnotat” și le transformă în concepte și relații (factori → subfactori), pe care le vezi apoi în Graful „Concepte”.
+            </p>
+            <button
+              type="button"
+              onClick={() => void synthesizeConcepts()}
+              disabled={synthesizingConcepts}
+              className="btn-secondary text-xs"
+              title="Extrage concepte și relații din notele și evidențierile studiilor citite"
+            >
+              {synthesizingConcepts
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Sintetizez…</>
+                : <><Brain className="w-3.5 h-3.5" /> Sinteză concepte din studiile citite</>}
+            </button>
+          </div>
+          <Suspense fallback={<div className="card flex items-center justify-center gap-2 py-10 text-sm text-gray-500"><Loader2 className="w-4 h-4 animate-spin" /> Se încarcă harta…</div>}>
+            <ThesisEvidenceMap
+              map={evidenceMap}
+              studies={mapStudies}
+              loading={loadingEvidenceMap}
+              onRefresh={loadEvidenceMap}
+              onSelectEntry={onSelectEntry}
+              onOpenSource={onOpenSource}
+              focusClaimId={focusClaim?.claimId}
+            />
+          </Suspense>
+        </div>
       )}
 
       {/* ── Topic tab: choosing what to study ── */}
@@ -923,6 +1109,10 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
             </div>
           )}
         </div>
+      )}
+      {/* ── Questionnaires tab ── */}
+      {tab === 'questionnaires' && (
+        <QuestionnairesPanel projectId={project.id} />
       )}
 
       {/* ── Analysis tab ── */}
@@ -1129,6 +1319,46 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
               <button onClick={loadFeedback} className="btn-secondary">Încearcă din nou</button>
             </div>
           )}
+        </div>
+      )}
+      {/* Multi-Project Creation Modal */}
+      {showProjectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="card max-w-md w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b pb-3 border-line">
+              <h4 className="font-bold text-base flex items-center gap-2">
+                <FolderPlus className="w-5 h-5 text-chrono-600" />
+                <span>Creează Proiect Izolat Nou</span>
+              </h4>
+              <button onClick={() => setShowProjectModal(false)} className="icon-btn text-gray-400">✕</button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Fiecare proiect are propriul său titlu, structură de capitole, plan de cercetare și chestionare, complet izolate de alte lucrări.
+            </p>
+            <div>
+              <label className="block text-xs font-semibold text-gray-600 dark:text-gray-300 mb-1">
+                Titlul noului proiect *
+              </label>
+              <input
+                type="text"
+                value={newProjectTitle}
+                onChange={e => setNewProjectTitle(e.target.value)}
+                placeholder="Ex: Impactul atașamentului asupra rezilienței la adulți"
+                className="input w-full text-sm"
+                autoFocus
+                onKeyDown={e => {
+                  if (e.key === 'Enter') handleCreateNewProject()
+                }}
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-line">
+              <button onClick={() => setShowProjectModal(false)} className="btn-secondary text-xs">Renunță</button>
+              <button onClick={handleCreateNewProject} disabled={creatingProject} className="btn-primary text-xs flex items-center gap-1.5">
+                {creatingProject && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Creează Proiect</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

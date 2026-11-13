@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.routers.chat import _detect_research_intent, _parse_actions
+from app.chat import _detect_research_intent, _parse_actions
 from app.study_search import combine_search_terms, translate_scientific_query
 
 

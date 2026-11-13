@@ -105,7 +105,7 @@ export function EntryForm({ onClose, onSaved, editEntry }: Props) {
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
           <h2 className="text-lg font-bold">{editEntry ? 'Editează intrarea' : 'Intrare nouă'}</h2>
-          <button onClick={onClose} className="icon-btn" aria-label="Închide fereastra" title="Închide (Esc)">
+          <button onClick={onClose} className="icon-btn touch-40-neg" aria-label="Închide fereastra" title="Închide (Esc)">
             <X className="w-5 h-5" />
           </button>
         </div>

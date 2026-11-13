@@ -72,6 +72,8 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProj
   const [selectedKind, setSelectedKind] = useState('causes')
   const [mechanismText, setMechanismText] = useState('')
   const [linkTarget, setLinkTarget] = useState<number | null>(null)
+  // Hundreds of entries make a plain <select> unusable on a phone; this narrows it.
+  const [linkFilter, setLinkFilter] = useState('')
   const [todo, setTodo] = useState<TodoItem | null>(null)
   const [todoDraft, setTodoDraft] = useState<{ priority: string; effort: string; due_date: string }>({ priority: 'normal', effort: 'm', due_date: '' })
   const [srItem, setSrItem] = useState<SpacedRepetitionItem | null>(null)
@@ -455,13 +457,28 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProj
             <div className="mb-4 p-4 bg-gray-50 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700 rounded-xl space-y-3">
               <h4 className="text-sm font-semibold">Creează o nouă conexiune deterministă</h4>
               <div className="space-y-1">
+                <label className="text-xs text-gray-500 font-medium" htmlFor="link-target-filter">Caută ținta:</label>
+                <input
+                  id="link-target-filter"
+                  value={linkFilter}
+                  onChange={e => setLinkFilter(e.target.value)}
+                  placeholder="Scrie câteva litere din titlu…"
+                  className="input w-full text-sm mb-1"
+                />
                 <label className="text-xs text-gray-500 font-medium">Țintă conexiune:</label>
                 <select value={linkTarget ?? ''} onChange={e => setLinkTarget(Number(e.target.value))} className="input w-full text-sm">
                   <option value="">Selectează intrarea sau studiul țintă...</option>
-                  {allEntries.map(e => (
-                    <option key={e.id} value={e.id}>{e.title}</option>
-                  ))}
+                  {allEntries
+                    .filter(e => !linkFilter.trim() || (e.title || '').toLowerCase().includes(linkFilter.trim().toLowerCase()))
+                    .map(e => (
+                      <option key={e.id} value={e.id}>{e.title}</option>
+                    ))}
                 </select>
+                {linkFilter.trim() && (
+                  <p className="text-[11px] text-gray-500">
+                    {allEntries.filter(e => (e.title || '').toLowerCase().includes(linkFilter.trim().toLowerCase())).length} rezultate
+                  </p>
+                )}
               </div>
               <div className="space-y-1">
                 <label className="text-xs text-gray-500 font-medium">Tip relație:</label>

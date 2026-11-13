@@ -54,6 +54,23 @@ class EntryCreate(BaseModel):
     def _check_doi(cls, value):
         return normalize_doi(value)
 
+    read_status: str = "unread"
+    isbn: str = ""
+
+    @field_validator("read_status")
+    @classmethod
+    def _check_read_status(cls, value):
+        allowed = {"unread", "reading", "read", "annotated"}
+        text = (value or "").strip().lower()
+        if text and text not in allowed:
+            raise ValueError(f"read_status must be one of {sorted(allowed)}")
+        return text or "unread"
+
+    @field_validator("isbn")
+    @classmethod
+    def _check_isbn(cls, value):
+        return (value or "").strip()[:40]
+
 
 class EntryUpdate(BaseModel):
     title: Optional[str] = None
@@ -71,11 +88,29 @@ class EntryUpdate(BaseModel):
     effect_direction: Optional[str] = None
     pdf_path: Optional[str] = None
     doi: Optional[str] = None
+    read_status: Optional[str] = None
+    isbn: Optional[str] = None
 
     @field_validator("doi")
     @classmethod
     def _check_doi(cls, value):
         return normalize_doi(value) if value is not None else value
+
+    @field_validator("read_status")
+    @classmethod
+    def _check_read_status(cls, value):
+        if value is None:
+            return value
+        allowed = {"unread", "reading", "read", "annotated"}
+        text = str(value).strip().lower()
+        if text not in allowed:
+            raise ValueError(f"read_status must be one of {sorted(allowed)}")
+        return text
+
+    @field_validator("isbn")
+    @classmethod
+    def _check_isbn(cls, value):
+        return value.strip()[:40] if isinstance(value, str) else value
 
 
 class EntryResponse(BaseModel):
@@ -107,6 +142,9 @@ class EntryResponse(BaseModel):
     bib_title: str = ""
     bib_authors: str = ""
     bib_year: str = ""
+    pdf_hash: str = ""
+    read_status: str = "unread"
+    isbn: str = ""
 
 
 # ── Relationship models ──
@@ -418,3 +456,84 @@ class TheoryEvidence(BaseModel):
     note: str = ""
     weight: int = 3
     created_at: str = ""
+
+
+# ── Claim hierarchy + stance edges (slice 5) ──
+# Claims are leaves of the theories tree (node_type='claim'). Inputs keep
+# plain types on purpose: range/enum checks happen in the router so the 422
+# messages can stay in Romanian.
+
+
+class ClaimCreate(BaseModel):
+    parent_id: int
+    name: str = Field(..., min_length=1, max_length=300)
+    statement: str = Field(..., min_length=1)
+    test_variable: str = ""
+    test_condition: str = ""
+
+
+class ClaimStanceIn(BaseModel):
+    entry_id: int
+    direction: str
+    aspect: str = ""
+    highlight_id: Optional[int] = None
+    evidence_page: Optional[int] = None
+    evidence_start: Optional[int] = None
+    evidence_end: Optional[int] = None
+    evidence_quote: Optional[str] = None
+    reasoning: str = ""
+    confidence: Optional[float] = None
+    proposed_by: str = "ai"
+    provider: str = ""
+    model: str = ""
+
+
+class ClaimStancePatch(BaseModel):
+    action: Optional[str] = None
+    direction: Optional[str] = None
+    aspect: Optional[str] = None
+    highlight_id: Optional[int] = None
+    evidence_page: Optional[int] = None
+    evidence_start: Optional[int] = None
+    evidence_end: Optional[int] = None
+    evidence_quote: Optional[str] = None
+    reasoning: Optional[str] = None
+    confidence: Optional[float] = None
+
+
+# ── Document parse models (per-page vision transcription over HTTP) ──
+class ParseSummaryParsed(BaseModel):
+    native: int = 0
+    vision_ok: int = 0
+    vision_uncertain: int = 0
+    manual: int = 0
+    error: int = 0
+    missing: int = 0
+
+
+class ParseSummaryPage(BaseModel):
+    page: int
+    kind: str = ""
+    source: str = ""
+    status: str = ""
+    chars: int = 0
+
+
+class ParseSummaryResponse(BaseModel):
+    entry_id: int
+    pdf_path: str = ""
+    kind: str = ""
+    pages: int = 0
+    pages_native: int = 0
+    pages_scanned: int = 0
+    pages_empty: int = 0
+    parsed: ParseSummaryParsed = Field(default_factory=ParseSummaryParsed)
+    per_page: list[ParseSummaryPage] = Field(default_factory=list)
+
+
+class PageTextResponse(BaseModel):
+    page: int
+    text: str = ""
+    source: str = ""
+    status: str = ""
+    char_count: int = 0

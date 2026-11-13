@@ -1,33 +1,86 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Search, Download, Upload, AlertTriangle, RefreshCw } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
 import { useToast } from './Toast'
+import {
+  LIBRARY_PAGE_KEY,
+  LIBRARY_SEARCH_KEY,
+  LIBRARY_SORT_KEY,
+  readStoredNumber,
+  readStoredString,
+  writeStored,
+} from '../lib/libraryState'
 import type { Entry, Relationship, Tag } from '../lib/types'
 
-export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
+const PAGE_SIZE = 100
+
+interface Props {
+  onSelect: (e: Entry) => void
+  /** „Toate intrările” vs the notes/ideas facet of the unified library. */
+  mode?: 'all' | 'notes'
+}
+
+export function EntryList({ onSelect, mode = 'all' }: Props) {
   const toast = useToast()
   const [entries, setEntries] = useState<Entry[]>([])
   const [totalCount, setTotalCount] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [offset, setOffset] = useState(0)
+  const [page, setPage] = useState(() => Math.max(1, readStoredNumber(LIBRARY_PAGE_KEY, 1)))
   const [hasMore, setHasMore] = useState(false)
   const [showArchived, setShowArchived] = useState(false)
-  const [sortBy, setSortBy] = useState('date_desc')
-  const [query, setQuery] = useState('')
+  const [sortBy, setSortBy] = useState(() => readStoredString(LIBRARY_SORT_KEY, 'date_desc'))
+  const [query, setQuery] = useState(() => readStoredString(LIBRARY_SEARCH_KEY))
   const [searchResults, setSearchResults] = useState<{ entry: Entry; rank: number }[] | null>(null)
   const [searching, setSearching] = useState(false)
+  const firstLoad = useRef(true)
+  // Notes are a client-side facet of /entries (the server has no study_type
+  // filter), so the first visit loads the matching rows once and paginates
+  // them locally. Without this, a page of 100 studies hid every note.
+  const notesCache = useRef<{ key: string; notes: Entry[] } | null>(null)
 
-  const load = async (nextOffset = 0, archived = showArchived) => {
+  const load = async (nextPage = page, archived = showArchived, force = false) => {
     setLoading(true)
     setError('')
     try {
-      const { items, total } = await api.entries.listPage({ limit: 100, offset: nextOffset, archived, sort: sortBy })
-      if (nextOffset === 0) setEntries(items)
-      else setEntries(prev => [...prev, ...items])
+      const offset = (nextPage - 1) * PAGE_SIZE
+      if (mode === 'notes') {
+        const key = `${archived ? 1 : 0}|${sortBy}`
+        if (force) notesCache.current = null
+        let notes = notesCache.current?.key === key ? notesCache.current.notes : null
+        if (!notes) {
+          const all: Entry[] = []
+          let loaded = 0
+          while (true) {
+            const chunk = await api.entries.listPage({
+              limit: 500,
+              offset: loaded,
+              archived,
+              sort: sortBy,
+            })
+            all.push(...chunk.items)
+            if (chunk.items.length === 0 || all.length >= chunk.total) break
+            loaded += chunk.items.length
+          }
+          notes = all.filter(e => !e.study_type)
+          notesCache.current = { key, notes }
+        }
+        setEntries(notes.slice(offset, offset + PAGE_SIZE))
+        setTotalCount(notes.length)
+        setHasMore(offset + PAGE_SIZE < notes.length)
+        setPage(nextPage)
+        return
+      }
+      const { items, total } = await api.entries.listPage({
+        limit: PAGE_SIZE,
+        offset,
+        archived,
+        sort: sortBy,
+      })
+      setEntries(items)
       setTotalCount(total)
-      setHasMore(nextOffset + items.length < total)
-      setOffset(nextOffset)
+      setHasMore(offset + items.length < total)
+      setPage(nextPage)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Intrările nu s-au putut încărca')
     } finally {
@@ -36,18 +89,28 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
   }
 
   useEffect(() => {
-    setQuery('')
+    if (firstLoad.current) {
+      // Restore the page the user left on when they opened an entry.
+      firstLoad.current = false
+      void load(page, showArchived)
+      return
+    }
+    setPage(1)
     setSearchResults(null)
-    setEntries([])
-    load(0, showArchived)
-  }, [showArchived, sortBy])
+    void load(1, showArchived)
+  }, [showArchived, sortBy, mode])
+
+  useEffect(() => { writeStored(LIBRARY_PAGE_KEY, page) }, [page])
+  useEffect(() => { writeStored(LIBRARY_SORT_KEY, sortBy) }, [sortBy])
+  useEffect(() => { writeStored(LIBRARY_SEARCH_KEY, query) }, [query])
 
   const runSearch = async () => {
     const q = query.trim()
     if (!q) { setSearchResults(null); return }
     setSearching(true)
     try {
-      setSearchResults(await api.search(q))
+      const results = await api.search(q)
+      setSearchResults(mode === 'notes' ? results.filter(r => !r.entry.study_type) : results)
     } catch (err) {
       toast.error('Căutarea a eșuat: ' + (err instanceof Error ? err.message : 'eroare necunoscută'))
       setSearchResults([])
@@ -55,6 +118,26 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       setSearching(false)
     }
   }
+
+  // Restore the search the user had typed before opening an entry.
+  useEffect(() => {
+    if (query.trim()) void runSearch()
+    // Only on mount: later edits are submitted explicitly.
+  }, [])
+
+  // Entries imported/downloaded by chat or another tab must appear without a
+  // manual browser refresh; refresh the current page when the tab is focused.
+  const loadRef = useRef(load)
+  loadRef.current = load
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') void loadRef.current(undefined, undefined, true) }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [])
 
   const exportData = async () => {
     try {
@@ -104,11 +187,24 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       }
 
       // Pre-fetch tags and existing entries so we do not attempt inserts that
-      // are guaranteed to fail. The DB has UNIQUE(title) on entries.
-      const [existingTags, existingEntries] = await Promise.all([
-        api.tags.list().catch(() => [] as Tag[]),
-        api.entries.list({ limit: 500 }).catch(() => [] as Entry[]),
-      ])
+      // are guaranteed to fail. The DB has UNIQUE(title) on entries. The
+      // import must see the whole library, not just the first page: page
+      // through every entry so a paper beyond offset 500 still counts as a
+      // duplicate instead of silently re-importing.
+      const existingTags = await api.tags.list().catch(() => [] as Tag[])
+      const existingEntries: Entry[] = []
+      {
+        const IMPORT_PAGE = 500
+        let offset = 0
+        let total = Infinity
+        while (existingEntries.length < total) {
+          const page = await api.entries.listPage({ limit: IMPORT_PAGE, offset }).catch(() => null)
+          if (!page || page.items.length === 0) break
+          existingEntries.push(...page.items)
+          total = page.total
+          offset += page.items.length
+        }
+      }
       const existingTagNames = new Set<string>(existingTags.map(t => String(t.name).toLowerCase()))
       const existingTitles = new Set<string>(existingEntries.map(e => e.title.trim().toLowerCase().replace(/\s+/g, ' ')))
 
@@ -185,11 +281,15 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       }
       toast.success(`Importate ${created} intrări, omise ${skipped} duplicate, ${failed} eșuate`)
       setSearchResults(null)
-      load(0, showArchived)
+      notesCache.current = null
+      load(1, showArchived)
     } catch (err: any) {
       toast.error('Importul a eșuat: ' + (err?.message || 'eroare necunoscută'))
     }
   }
+
+  const pageCount = totalCount != null ? Math.max(1, Math.ceil(totalCount / PAGE_SIZE)) : null
+  const showPager = (pageCount != null && pageCount > 1) || (mode === 'notes' && (page > 1 || hasMore))
 
   if (loading && entries.length === 0) return <div className="text-center py-8 text-gray-500">Se încarcă…</div>
 
@@ -253,7 +353,7 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
           <p className="text-sm text-madder flex items-center justify-center gap-2">
             <AlertTriangle className="w-4 h-4" /> {error}
           </p>
-          <button onClick={() => load(0, showArchived)} className="btn-secondary text-sm">
+          <button onClick={() => load(1, showArchived)} className="btn-secondary text-sm">
             <RefreshCw className="w-4 h-4" /> Reîncearcă
           </button>
         </div>
@@ -277,9 +377,13 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
       ) : (
         <>
           <p className="text-sm text-gray-500">
-            {totalCount != null && totalCount > entries.length
-              ? `${entries.length} din ${totalCount} intrări`
-              : `${entries.length} intrări`}{' '}
+            {mode === 'notes'
+              ? totalCount != null && totalCount > entries.length
+                ? `Pagina ${page}: ${entries.length} din ${totalCount} notițe`
+                : `${entries.length} notițe`
+              : totalCount != null && totalCount > entries.length
+                ? `Pagina ${page}: ${entries.length} din ${totalCount} intrări`
+                : `${entries.length} intrări`}{' '}
             {showArchived ? '(arhivate)' : ''}
           </p>
           {error && (
@@ -287,7 +391,7 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
               <span className="flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4" /> {error}
               </span>
-              <button onClick={() => load(0, showArchived)} className="btn-ghost text-sm">
+              <button onClick={() => load(page, showArchived)} className="btn-ghost text-sm">
                 <RefreshCw className="w-4 h-4" /> Reîncearcă
               </button>
             </div>
@@ -310,10 +414,16 @@ export function EntryList({ onSelect }: { onSelect: (e: Entry) => void }) {
               </button>
             ))}
           </div>
-          {hasMore && (
-            <div className="text-center pt-2">
-              <button onClick={() => load(offset + 100)} disabled={loading} className="btn-secondary">
-                {loading ? 'Se încarcă…' : 'Încarcă mai multe'}
+          {showPager && (
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+              <button onClick={() => load(page - 1)} disabled={page <= 1 || loading} className="btn-secondary text-sm">
+                ← Pagina anterioară
+              </button>
+              <span className="text-sm text-gray-500">
+                Pagina {page}{pageCount != null ? ` din ${pageCount}` : ''}
+              </span>
+              <button onClick={() => load(page + 1)} disabled={!hasMore || loading} className="btn-secondary text-sm">
+                Pagina următoare →
               </button>
             </div>
           )}

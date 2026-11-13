@@ -4,7 +4,7 @@ These tests pin the three things that were missing before: a closed label
 vocabulary in the prompt, ISO dates for anything the model writes, and a
 theory status that the tree can actually render.
 """
-from app.routers.chat import _build_system_prompt, _iso_entry_date
+from app.chat import _build_system_prompt, _iso_entry_date
 from app.routers.relationships import RELATION_KINDS
 
 

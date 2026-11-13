@@ -5,12 +5,14 @@ A theory is a node in a tree (a theory can derive into several sub-theories).
 Studies (entries) are attached to theories as PRO or CONTRA evidence, which
 drives the tree visualization and the evidence panels.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.db import get_db
 from app.models import Theory, TheoryCreate, TheoryNode, TheoryUpdate, TheoryEvidence, TheoryEvidenceIn
 
 router = APIRouter()
+
+VALID_NODE_TYPES = ("theory", "subtheory", "claim")
 
 
 def _status_from_evidence(pro: int, contra: int) -> str:
@@ -69,11 +71,28 @@ def list_theories():
 
 
 @router.get("/theories/tree", response_model=list[TheoryNode])
-def get_theory_tree():
-    """Nested theory tree with pro/contra evidence counts."""
+def get_theory_tree(
+    node_type: str | None = Query(None),
+    include_claims: bool = Query(False),
+):
+    """Nested theory tree with pro/contra evidence counts.
+
+    Claims (``node_type='claim'``) are excluded by default so TheoriesView
+    keeps working unchanged; ``include_claims=true`` returns them, and
+    ``node_type`` filters the tree down to one node kind.
+    """
+    if node_type is not None and node_type not in VALID_NODE_TYPES:
+        raise HTTPException(422, "Tip de nod invalid: theory, subtheory sau claim.")
     conn = get_db()
     try:
-        rows = conn.execute(
+        return build_theory_tree(conn, node_type=node_type, include_claims=include_claims)
+    finally:
+        conn.close()
+
+
+def build_theory_tree(conn, node_type: str | None = None, include_claims: bool = False) -> list[TheoryNode]:
+    """Build the nested tree; single implementation shared by the endpoint above."""
+    rows = conn.execute(
             """SELECT t.*,
                       (SELECT COUNT(*) FROM theory_evidence te WHERE te.theory_id = t.id AND te.stance = 'pro'
                          AND te.entry_id IN (SELECT id FROM entries WHERE archived = 0)) AS pro_count,
@@ -86,16 +105,25 @@ def get_theory_tree():
                FROM theories t
                ORDER BY t.name"""
         ).fetchall()
-        nodes = {r["id"]: TheoryNode(**dict(r)) for r in rows}
-        roots = []
-        for node in nodes.values():
-            if node.parent_id and node.parent_id in nodes and node.parent_id != node.id:
-                nodes[node.parent_id].children.append(node)
-            else:
-                roots.append(node)
-        return roots
-    finally:
-        conn.close()
+    items: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        # Rows written before the slice-5 migration have no node_type;
+        # they are theories, which the migration backfill also guarantees.
+        nt = d.get("node_type") or "theory"
+        if nt == "claim" and not include_claims and node_type != "claim":
+            continue
+        if node_type is not None and nt != node_type:
+            continue
+        items.append(d)
+    nodes = {d["id"]: TheoryNode(**d) for d in items}
+    roots = []
+    for node in nodes.values():
+        if node.parent_id and node.parent_id in nodes and node.parent_id != node.id:
+            nodes[node.parent_id].children.append(node)
+        else:
+            roots.append(node)
+    return roots
 
 
 @router.post("/theories", response_model=Theory, status_code=201)

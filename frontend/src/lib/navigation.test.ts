@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  LIBRARY_FILTERS,
   MOBILE_QUICK_VIEW_IDS,
+  filterForLibraryTab,
+  isLibraryFilter,
   parseViewHash,
+  tabForLibraryFilter,
   VIEW_NAV_ITEMS,
 } from './navigation'
 
@@ -34,5 +38,18 @@ describe('library unification', () => {
     // The deep links keep working as tab presets.
     expect(parseViewHash('#studies')).toBe('studies')
     expect(parseViewHash('#entries')).toBe('entries')
+  })
+
+  it('maps the unified filter pills onto those tabs', () => {
+    expect(LIBRARY_FILTERS).toEqual(['all', 'studies', 'notes', 'pdf', 'nopdf'])
+    expect(tabForLibraryFilter('all')).toBe('entries')
+    expect(tabForLibraryFilter('notes')).toBe('entries')
+    expect(tabForLibraryFilter('studies')).toBe('studies')
+    expect(tabForLibraryFilter('pdf')).toBe('studies')
+    expect(tabForLibraryFilter('nopdf')).toBe('studies')
+    expect(filterForLibraryTab('entries')).toBe('notes')
+    expect(filterForLibraryTab('studies')).toBe('studies')
+    expect(isLibraryFilter('nopdf')).toBe(true)
+    expect(isLibraryFilter('bogus')).toBe(false)
   })
 })

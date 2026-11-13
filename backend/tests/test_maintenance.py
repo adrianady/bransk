@@ -72,9 +72,9 @@ def test_maintenance_rereads_downloaded_pdf():
         studies_dir.mkdir(parents=True, exist_ok=True)
         pdf = studies_dir / f"{study['id']}-sleep-study.pdf"
         try:
-            import fitz
+            import pymupdf
 
-            doc = fitz.open()
+            doc = pymupdf.open()
             page = doc.new_page()
             page.insert_text((72, 72), "Sleep consolidation memory N=100 positive effect")
             doc.save(str(pdf))

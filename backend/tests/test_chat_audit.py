@@ -6,7 +6,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.routers import chat as chat_mod
+import app.chat as chat_mod
 from app import llm as llm_mod
 
 
@@ -146,7 +146,8 @@ def test_archive_entry_requires_confirmation(monkeypatch):
 
 
 def test_archive_confirmation_can_be_rejected():
-    from app.routers.chat import _parse_actions, _PENDING_ACTIONS
+    from app.chat import _parse_actions
+    from app.chat.task_manager import _PENDING_ACTIONS
 
     with TestClient(app) as client:
         entry = client.post("/api/entries", json={"title": "Keep 2", "content": "x"}).json()

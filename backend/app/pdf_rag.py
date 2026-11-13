@@ -39,9 +39,9 @@ def extract_pdf_pages(path, max_chars: int = MAX_PDF_CHARS) -> list[tuple[int, s
     if remaining == 0:
         return pages
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
 
-        doc = fitz.open(str(path))
+        doc = pymupdf.open(str(path))
         try:
             for page_number, page in enumerate(doc, start=1):
                 if remaining <= 0:
@@ -146,6 +146,17 @@ async def index_pdf(entry_id: int, path) -> int:
         return 0
 
     def _run() -> int:
+        # Canonical page texts for highlight anchoring — must never break RAG.
+        try:
+            from app.page_text import ensure_page_texts
+
+            _pt_conn = get_db()
+            try:
+                ensure_page_texts(_pt_conn, entry_id, path)
+            finally:
+                _pt_conn.close()
+        except Exception as exc:
+            logger.warning("Canonical page-text indexing failed for entry %s: %s", entry_id, exc)
         chunks, page_numbers = chunk_pdf_pages(extract_pdf_pages(path))
         if not chunks:
             return 0

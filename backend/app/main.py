@@ -26,11 +26,14 @@ from app.auth import (
 from app.db import init_db
 from app.routers import (
     entries, search, timeline, relationships,
-    chat, tags, spaced_repetition, todos, reminders, thoughts,
+    tags, spaced_repetition, todos, reminders, thoughts,
     research, theory, maintenance, ai, study_qa, project, sources,
-    citations, highlights
+    citations, highlights, questionnaires, studies, ai_concepts,
+    studies_parse, claims, analysis, note_check
 )
 from app.routers import auth as auth_router
+from app.routers import zotero
+from app.chat import router as chat_router
 from app.routers.reminders import advance_overdue_recurring
 
 # Structured Python Logging Configuration
@@ -167,13 +170,15 @@ app.include_router(search.router, prefix="/api", tags=["search"])
 app.include_router(timeline.router, prefix="/api", tags=["timeline"])
 app.include_router(relationships.router, prefix="/api", tags=["relationships"])
 app.include_router(tags.router, prefix="/api", tags=["tags"])
-app.include_router(chat.router, prefix="/api", tags=["chat"])
+app.include_router(chat_router, prefix="/api", tags=["chat"])
 app.include_router(spaced_repetition.router, prefix="/api", tags=["spaced-repetition"])
 app.include_router(todos.router, prefix="/api", tags=["todos"])
 app.include_router(reminders.router, prefix="/api", tags=["reminders"])
 app.include_router(thoughts.router, prefix="/api", tags=["thoughts"])
 app.include_router(research.router, prefix="/api", tags=["research"])
 app.include_router(theory.router, prefix="/api", tags=["theory"])
+app.include_router(claims.router, prefix="/api", tags=["claims"])
+app.include_router(analysis.router, prefix="/api", tags=["analysis"])
 app.include_router(maintenance.router, prefix="/api", tags=["maintenance"])
 app.include_router(ai.router, prefix="/api", tags=["ai"])
 app.include_router(study_qa.router, prefix="/api", tags=["study_qa"])
@@ -181,6 +186,12 @@ app.include_router(project.router, prefix="/api", tags=["project"])
 app.include_router(citations.router, prefix="/api", tags=["citations"])
 app.include_router(highlights.router, prefix="/api", tags=["highlights"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
+app.include_router(questionnaires.router, prefix="/api", tags=["questionnaires"])
+app.include_router(zotero.router, prefix="/api", tags=["zotero"])
+app.include_router(studies.router, prefix="/api", tags=["studies"])
+app.include_router(studies_parse.router, prefix="/api", tags=["studies_parse"])
+app.include_router(ai_concepts.router, prefix="/api", tags=["ai_concepts"])
+app.include_router(note_check.router, prefix="/api", tags=["note_check"])
 app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
 
 

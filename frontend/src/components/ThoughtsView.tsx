@@ -169,7 +169,7 @@ export function ThoughtsView({ onSelectEntry }: Props) {
                 </div>
                 <div className="flex gap-1 shrink-0">
                   <button onClick={(e) => { e.stopPropagation(); openEdit(thought) }}
-                    className="btn-ghost px-2 py-1 min-w-[28px] text-xs"
+                    className="btn-ghost px-2 py-1 touch-40 text-xs"
                     aria-label={`Editează gândul ${thought.name}`}
                     title="Editează gândul"
                   >✏️</button>
@@ -183,7 +183,7 @@ export function ThoughtsView({ onSelectEntry }: Props) {
                         toast.error('Gândul nu s-a putut șterge: ' + (err?.message || 'eroare necunoscută'))
                       }
                     }
-                  }} className="btn-ghost px-2 py-1 min-w-[28px] text-madder text-xs"
+                  }} className="btn-ghost px-2 py-1 touch-40 text-madder text-xs"
                     aria-label={`Șterge gândul ${thought.name}`}
                     title="Șterge gândul"
                   >✕</button>

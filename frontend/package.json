@@ -13,6 +13,7 @@
   "dependencies": {
     "@tailwindcss/typography": "^0.5.20",
     "clsx": "^2.1.1",
+    "idb": "^8.0.4",
     "lucide-react": "^0.460.0",
     "pdfjs-dist": "^6.4.299",
     "react": "^19.0.0",
@@ -21,11 +22,13 @@
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^2.6.0",
     "vis-network": "^9.1.0",
-    "vis-timeline": "^7.7.0"
+    "vis-timeline": "^7.7.0",
+    "vite-plugin-pwa": "^2.0.0"
   },
   "devDependencies": {
     "@fontsource-variable/source-sans-3": "^5.3.1",
     "@fontsource-variable/source-serif-4": "^5.3.1",
+    "@playwright/test": "^1.65.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.3",
     "@types/react": "^19.0.0",

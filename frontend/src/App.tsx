@@ -1,22 +1,26 @@
 import { useCallback, useState, useEffect, lazy, Suspense } from 'react'
 import {
   CalendarDays, Network, BookOpenText, Dna, FileText, RotateCcw, ListChecks, Lightbulb,
-  Bot, Sun, Moon, Plus, Settings2,
-  GraduationCap, Menu, X, LogOut,
+  Bot, Sun, Moon, Settings2,
+  GraduationCap, Menu, X, LogOut, KeyRound,
 } from 'lucide-react'
 import { ProjectView } from './components/ProjectView'
 import { CommandPalette } from './components/CommandPalette'
 import { useAuthStatus } from './components/AuthGate'
 import { isLibraryView } from './lib/navigation'
+import { suspendLibraryScroll } from './lib/libraryState'
 import { api, ApiError } from './lib/api'
 import { useToast } from './components/Toast'
 import type { Entry, TimelineEntry, Tag, StudySource, StudyQASource } from './lib/types'
 import {
   MOBILE_QUICK_VIEW_IDS,
+  PRIMARY_NAV_PILLARS,
+  pillarForView,
   parseViewHash,
   VIEW_LABELS,
   VIEW_NAV_ITEMS,
   type View,
+  type PrimaryPillarId,
 } from './lib/navigation'
 
 // Every view but the project page is split into its own chunk and fetched when
@@ -29,11 +33,9 @@ const GraphView = lazy(() => import('./components/GraphView').then(m => ({ defau
 const ChatPanel = lazy(() => import('./components/ChatPanel').then(m => ({ default: m.ChatPanel })))
 const EntryForm = lazy(() => import('./components/EntryForm').then(m => ({ default: m.EntryForm })))
 const EntryDetail = lazy(() => import('./components/EntryDetail').then(m => ({ default: m.EntryDetail })))
-const EntryList = lazy(() => import('./components/EntryList').then(m => ({ default: m.EntryList })))
 const ReviewPanel = lazy(() => import('./components/ReviewPanel').then(m => ({ default: m.ReviewPanel })))
 const TodoList = lazy(() => import('./components/TodoList').then(m => ({ default: m.TodoList })))
 const ThoughtsView = lazy(() => import('./components/ThoughtsView').then(m => ({ default: m.ThoughtsView })))
-const StudiesView = lazy(() => import('./components/StudiesView').then(m => ({ default: m.StudiesView })))
 const TheoriesView = lazy(() => import('./components/TheoriesView').then(m => ({ default: m.TheoriesView })))
 const AiStatusModal = lazy(() => import('./components/AiStatusModal').then(m => ({ default: m.AiStatusModal })))
 
@@ -70,6 +72,13 @@ const VIEW_ICONS: Record<View, React.ComponentType<{ className?: string }>> = {
   thoughts: Lightbulb,
 }
 
+const PILLAR_ICONS: Record<PrimaryPillarId, React.ComponentType<{ className?: string }>> = {
+  project: GraduationCap,
+  studies: BookOpenText,
+  graph: Network,
+  theories: Dna,
+}
+
 /** Mobile-only: logout lives in the drawer, so the session button can't
  *  cover the header controls the way the old fixed one did. */
 function LogoutDrawerItem({ onNavigate }: { onNavigate: () => void }) {
@@ -95,15 +104,57 @@ function LogoutDrawerItem({ onNavigate }: { onNavigate: () => void }) {
   )
 }
 
+/** Desktop sidebar counterpart of the drawer's „Parolă & acces”. */
+function PasswordSidebarItem() {
+  const auth = useAuthStatus()
+  if (!auth.canManagePassword) return null
+  return (
+    <button
+      type="button"
+      onClick={() => auth.openPasswordManager()}
+      title="Parolă și acces"
+      aria-label="Parolă și acces"
+      className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-muted hover:bg-surface-2 hover:text-ink transition-colors"
+    >
+      <KeyRound className="w-5 h-5 shrink-0" />
+      <span className="hidden lg:block">Parolă &amp; acces</span>
+    </button>
+  )
+}
+
+/** Password entry for the mobile drawer — the floating button is desktop-only so
+ *  it never covers page content or the bottom navigation on a phone. */
+function PasswordDrawerItem({ onNavigate }: { onNavigate: () => void }) {
+  const auth = useAuthStatus()
+  if (!auth.canManagePassword) return null
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        auth.openPasswordManager()
+        onNavigate()
+      }}
+      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-muted hover:bg-surface-2 hover:text-ink transition-colors border-t border-line mt-2 pt-3"
+      aria-label="Parolă și acces"
+    >
+      <KeyRound className="w-5 h-5 shrink-0" />
+      <span>Parolă &amp; acces</span>
+    </button>
+  )
+}
+
 export default function App() {
   const toast = useToast()
   const [view, setView] = useState<View>(() => parseViewHash(window.location.hash) ?? 'project')
   const [previousView, setPreviousView] = useState<View | null>(null)
 
   const changeView = useCallback((next: View) => {
+    // Leaving the library resets <main>'s scrollTop before the unmount
+    // cleanup runs; save the real offset first and ignore the reset.
+    if (isLibraryView(view) && !isLibraryView(next)) suspendLibraryScroll()
     setView(next)
     window.location.hash = next
-  }, [])
+  }, [view])
 
   useEffect(() => {
     const handleHash = () => {
@@ -164,73 +215,127 @@ export default function App() {
       .catch(() => { /* sidebar simply stays without a title */ })
   }, [])
 
+  const clearDetailHistoryState = useCallback(() => {
+    const state = window.history.state as Record<string, unknown> | null
+    if (!state || !('chronokgDetail' in state)) return
+    const next = { ...state }
+    delete next.chronokgDetail
+    window.history.replaceState(next, '')
+  }, [])
+
+  /**
+   * Opening an entry pushes a history entry with the id, keeping the hash of
+   * the library (or any other view) in the URL. Browser Back therefore closes
+   * the detail and lands back on the list instead of leaving the app.
+   */
+  const openEntry = useCallback((entry: Entry) => {
+    // The detail replaces the list before the scroll listener unmounts, which
+    // would overwrite the saved offset with 0. Capture the list's real offset
+    // and ignore the reset so Back can restore it.
+    if (isLibraryView(view)) suspendLibraryScroll()
+    setPreviousView(prev => prev ?? view)
+    setSelectedEntry(entry)
+    window.history.pushState(
+      { ...(window.history.state ?? {}), chronokgDetail: entry.id },
+      '',
+      window.location.href,
+    )
+  }, [view])
+
   // Async handler to fetch full Entry from Timeline/Graph selection
   const handleSelectTimelineEntry = useCallback(async (item: TimelineEntry) => {
-    setPreviousView(view)
     setLoadingDetail(true)
-    changeView('entries')
     try {
-      const fullEntry = await api.entries.get(item.id)
-      setSelectedEntry(fullEntry)
+      openEntry(await api.entries.get(item.id))
     } catch (err) {
       toast.error('Detaliile intrării nu s-au putut încărca: ' + (err instanceof Error ? err.message : 'eroare necunoscută'))
     } finally {
       setLoadingDetail(false)
     }
-  }, [view, changeView, toast])
+  }, [openEntry, toast])
 
   const handleSelectStudy = useCallback((entry: Entry) => {
-    setPreviousView(view)
-    setSelectedEntry(entry)
-    changeView('entries')
-  }, [view, changeView])
+    openEntry(entry)
+  }, [openEntry])
 
   // Open a study by id (the thesis project links to studies by id only).
   const handleSelectStudyById = useCallback(async (entryId: number) => {
-    setPreviousView(view)
     setLoadingDetail(true)
-    changeView('entries')
     try {
-      setSelectedEntry(await api.entries.get(entryId))
+      openEntry(await api.entries.get(entryId))
     } catch (err) {
       toast.error('Studiul nu s-a putut deschide: ' + (err instanceof Error ? err.message : 'eroare necunoscută'))
     } finally {
       setLoadingDetail(false)
     }
-  }, [view, changeView, toast])
+  }, [openEntry, toast])
 
   const handleOpenStudySource = useCallback(async (entryId: number, source: StudySource) => {
-    setPreviousView(view)
     setLoadingDetail(true)
-    changeView('entries')
     try {
+      const entry = await api.entries.get(entryId)
       setPendingPdfSource({ ...source, score: 0 })
-      setSelectedEntry(await api.entries.get(entryId))
+      openEntry(entry)
     } catch (err) {
       setPendingPdfSource(null)
       toast.error('Studiul nu s-a putut deschide: ' + (err instanceof Error ? err.message : 'eroare necunoscută'))
     } finally {
       setLoadingDetail(false)
     }
-  }, [view, changeView, toast])
+  }, [openEntry, toast])
 
   const handleOpenProjectClaim = useCallback((sectionId: string, claimId: number) => {
     setSelectedEntry(null)
+    setPendingPdfSource(null)
     setPreviousView(null)
+    clearDetailHistoryState()
     setProjectFocus({ sectionId, claimId, token: Date.now() })
     changeView('project')
-  }, [changeView])
+  }, [changeView, clearDetailHistoryState])
 
   const handleBackFromDetail = useCallback(() => {
+    // The detail was pushed as a history entry, so Back is the only action
+    // that also keeps the browser's own Back button and the two in sync.
+    if (typeof (window.history.state as { chronokgDetail?: unknown } | null)?.chronokgDetail === 'number') {
+      window.history.back()
+      return
+    }
     setSelectedEntry(null)
-    if (previousView) {
-      setView(previousView)
+    setPendingPdfSource(null)
+    setPreviousView(null)
+  }, [])
+
+  // Browser Back/Forward: restore the view hash and either reopen the entry
+  // recorded in the history state or close the detail.
+  useEffect(() => {
+    const onPopState = (event: PopStateEvent) => {
+      const next = parseViewHash(window.location.hash)
+      if (next) setView(next)
+      const detailId = (event.state as { chronokgDetail?: unknown } | null)?.chronokgDetail
+      if (typeof detailId === 'number') {
+        setLoadingDetail(true)
+        api.entries.get(detailId)
+          .then(setSelectedEntry)
+          .catch((err) => {
+            setSelectedEntry(null)
+            toast.error('Detaliile intrării nu s-au putut încărca: ' + (err instanceof Error ? err.message : 'eroare necunoscută'))
+          })
+          .finally(() => setLoadingDetail(false))
+        return
+      }
+      setSelectedEntry(null)
+      setPendingPdfSource(null)
       setPreviousView(null)
     }
-  }, [previousView])
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [toast])
 
   const selectNavView = (next: View) => {
-    if (next === 'entries') setSelectedEntry(null)
+    setSelectedEntry(null)
+    setPendingPdfSource(null)
+    setPreviousView(null)
+    clearDetailHistoryState()
     changeView(next)
   }
 
@@ -334,6 +439,7 @@ export default function App() {
               <Settings2 className="w-5 h-5 shrink-0" />
               <span className="hidden lg:block">Stare AI</span>
             </button>
+            <PasswordSidebarItem />
           </div>
         </nav>
 
@@ -393,6 +499,7 @@ export default function App() {
                     </button>
                   )
                 })}
+                <PasswordDrawerItem onNavigate={() => setMobileMenuOpen(false)} />
                 <LogoutDrawerItem onNavigate={() => setMobileMenuOpen(false)} />
               </div>
             </nav>
@@ -440,9 +547,30 @@ export default function App() {
           </header>
 
           {/* Main content scroll area */}
-          <main className="flex-1 min-w-0 overflow-auto relative bg-canvas pb-16 md:pb-0">
+          <main data-scroll-root className="flex-1 min-w-0 overflow-auto relative bg-canvas pb-[calc(4rem+env(safe-area-inset-bottom,0px))] md:pb-0">
             <div className="mx-auto w-full max-w-[1500px] p-3 sm:p-5 lg:p-7">
               <Suspense fallback={<ViewLoading />}>
+              {loadingDetail && !selectedEntry ? (
+                <div className="text-center py-12 text-gray-500">Se încarcă detaliile intrării…</div>
+              ) : selectedEntry ? (
+                <EntryDetail
+                  entry={selectedEntry}
+                  onBack={handleBackFromDetail}
+                  backLabel={
+                    previousView && isLibraryView(previousView)
+                      ? '← Înapoi la Bibliotecă'
+                      : previousView
+                        ? `← Înapoi la ${VIEW_LABELS[previousView] || 'vederea anterioară'}`
+                        : '← Înapoi la listă'
+                  }
+                  onUpdate={(e) => setSelectedEntry(e)}
+                  onSelectEntry={handleSelectStudy}
+                  onOpenProjectClaim={handleOpenProjectClaim}
+                  initialPdfSource={pendingPdfSource}
+                  onPdfSourceConsumed={() => setPendingPdfSource(null)}
+                />
+              ) : (
+                <>
               {view === 'project' && (
                 <ProjectView
                   onSelectEntry={handleSelectStudyById}
@@ -451,64 +579,104 @@ export default function App() {
                   focusClaim={projectFocus}
                 />
               )}
-              {view === 'timeline' && (
-                <TimelineView
-                  onSelectEntry={handleSelectTimelineEntry}
-                  onCreateEntry={() => setShowEntryForm(true)}
-                />
+              {(view === 'graph' || view === 'timeline') && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-line pb-2">
+                    <div className="inline-flex rounded-xl p-1 bg-surface-2 border border-line gap-1">
+                      <button
+                        onClick={() => changeView('graph')}
+                        className={`px-3 py-1.5 min-h-[40px] rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                          view === 'graph' ? 'bg-surface text-accent-strong shadow-sm' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        <Network className="w-3.5 h-3.5" />
+                        <span>Graf de Cunoștințe</span>
+                      </button>
+                      <button
+                        onClick={() => changeView('timeline')}
+                        className={`px-3 py-1.5 min-h-[40px] rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                          view === 'timeline' ? 'bg-surface text-accent-strong shadow-sm' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        <CalendarDays className="w-3.5 h-3.5" />
+                        <span>Cronologie</span>
+                      </button>
+                    </div>
+                  </div>
+                  {view === 'graph' ? (
+                    <GraphView onSelectEntry={handleSelectTimelineEntry} />
+                  ) : (
+                    <TimelineView
+                      onSelectEntry={handleSelectTimelineEntry}
+                      onCreateEntry={() => setShowEntryForm(true)}
+                    />
+                  )}
+                </div>
               )}
-              {view === 'graph' && (
-                <GraphView
-                  onSelectEntry={handleSelectTimelineEntry}
-                />
-              )}
-              {view === 'theories' && (
-                <TheoriesView onSelectEntry={handleSelectStudy} />
+              {(view === 'theories' || view === 'thoughts' || view === 'todos' || view === 'review') && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-line pb-2">
+                    <div className="inline-flex rounded-xl p-1 bg-surface-2 border border-line gap-1 overflow-x-auto">
+                      <button
+                        onClick={() => changeView('theories')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                          view === 'theories' ? 'bg-surface text-accent-strong shadow-sm' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        <Dna className="w-3.5 h-3.5" />
+                        <span>Cadrul Teoretic</span>
+                      </button>
+                      <button
+                        onClick={() => changeView('thoughts')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                          view === 'thoughts' ? 'bg-surface text-accent-strong shadow-sm' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        <Lightbulb className="w-3.5 h-3.5" />
+                        <span>Gânduri & Idei</span>
+                      </button>
+                      <button
+                        onClick={() => changeView('todos')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                          view === 'todos' ? 'bg-surface text-accent-strong shadow-sm' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        <ListChecks className="w-3.5 h-3.5" />
+                        <span>Sarcini</span>
+                      </button>
+                      <button
+                        onClick={() => changeView('review')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                          view === 'review' ? 'bg-surface text-accent-strong shadow-sm' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Recapitulare</span>
+                      </button>
+                    </div>
+                  </div>
+                  {view === 'theories' && <TheoriesView onSelectEntry={handleSelectStudy} />}
+                  {view === 'thoughts' && <ThoughtsView onSelectEntry={handleSelectStudy} />}
+                  {view === 'todos' && <TodoList onSelectEntry={handleSelectStudy} />}
+                  {view === 'review' && <ReviewPanel />}
+                </div>
               )}
               {isLibraryView(view) && (
                 <LibraryView
                   activeTab={view}
                   onTabChange={changeView}
-                  studiesPane={<StudiesView onSelectEntry={handleSelectStudy} />}
-                  entriesPane={
-                    <div className="space-y-4">
-                  {!selectedEntry && (
-                    <div className="flex items-center justify-between">
-                      <h2 className="text-xl font-bold">Intrări</h2>
-                      <button onClick={() => setShowEntryForm(true)} className="btn-primary">
-                        <Plus className="w-4 h-4" /> Intrare nouă
-                      </button>
-                    </div>
-                  )}
-                  {loadingDetail ? (
-                    <div className="text-center py-12 text-gray-500">Se încarcă detaliile intrării…</div>
-                  ) : selectedEntry ? (
-                    <EntryDetail
-                      entry={selectedEntry}
-                      onBack={handleBackFromDetail}
-                      backLabel={previousView ? `← Înapoi la ${VIEW_LABELS[previousView] || 'vederea anterioară'}` : '← Înapoi la listă'}
-                      onUpdate={(e) => setSelectedEntry(e)}
-                      onSelectEntry={handleSelectStudy}
-                      onOpenProjectClaim={handleOpenProjectClaim}
-                      initialPdfSource={pendingPdfSource}
-                      onPdfSourceConsumed={() => setPendingPdfSource(null)}
-                    />
-                  ) : (
-                    <EntryList onSelect={setSelectedEntry} />
-                  )}
-                    </div>
-                  }
+                  onSelectEntry={handleSelectStudy}
+                  onCreateEntry={() => setShowEntryForm(true)}
                 />
               )}
-              {view === 'review' && <ReviewPanel />}
-              {view === 'todos' && <TodoList onSelectEntry={handleSelectStudy} />}
-              {view === 'thoughts' && <ThoughtsView onSelectEntry={handleSelectStudy} />}
+                </>
+              )}
               </Suspense>
             </div>
           </main>
 
           {/* Mobile Bottom Navigation Bar */}
-          <nav aria-label="Navigare rapidă" className="md:hidden fixed bottom-0 left-0 right-0 z-20 h-14 bg-surface/95 backdrop-blur border-t border-line flex items-center justify-around px-1">
+          <nav aria-label="Navigare rapidă" className="md:hidden fixed bottom-0 left-0 right-0 z-20 min-h-14 pb-safe bg-surface/95 backdrop-blur border-t border-line flex items-center justify-around px-1">
             {MOBILE_QUICK_VIEW_IDS.map(id => {
               const item = VIEW_NAV_ITEMS.find(navItem => navItem.id === id)!
               const Icon = VIEW_ICONS[id]
@@ -566,8 +734,9 @@ export default function App() {
             onClose={() => setShowEntryForm(false)}
             onSaved={(entry) => {
               setShowEntryForm(false)
-              setSelectedEntry(entry)
-              setView('entries')
+              setPreviousView('entries')
+              changeView('entries')
+              openEntry(entry)
             }}
           />
         )}

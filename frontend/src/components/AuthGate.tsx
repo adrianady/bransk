@@ -25,7 +25,16 @@ function messageOf(error: unknown, fallback: string): string {
 export const AuthContext = createContext<{
   sessionAuthenticated: boolean
   logout: () => Promise<void>
-}>({ sessionAuthenticated: false, logout: async () => {} })
+  /** True in network mode when a password can be configured/managed. */
+  canManagePassword: boolean
+  /** Opens the setup or manage-password dialog (used by the mobile drawer). */
+  openPasswordManager: () => void
+}>({
+  sessionAuthenticated: false,
+  logout: async () => {},
+  canManagePassword: false,
+  openPasswordManager: () => {},
+})
 
 export function useAuthStatus() {
   return useContext(AuthContext)
@@ -398,7 +407,21 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ sessionAuthenticated: Boolean(authStatus.session_authenticated) && !authStatus.token_authenticated, logout }}>
+    <AuthContext.Provider value={{
+      sessionAuthenticated: Boolean(authStatus.session_authenticated) && !authStatus.token_authenticated,
+      logout,
+      canManagePassword: Boolean(authStatus.required && authStatus.token_authenticated),
+      openPasswordManager: () => {
+        setError('')
+        if (authStatus.password_configured === false) {
+          setMode('setup')
+        } else {
+          setManagePassword(true)
+          setPassword('')
+          setConfirmation('')
+        }
+      },
+    }}>
       {children}
       {authStatus.session_authenticated && !authStatus.token_authenticated && (
         <button
@@ -417,26 +440,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           {error}
         </div>
       )}
-      {authStatus.required && authStatus.token_authenticated && (
-        <button
-          type="button"
-          onClick={() => {
-            setError('')
-            if (authStatus.password_configured === false) {
-              setMode('setup')
-            } else {
-              setManagePassword(true)
-              setPassword('')
-              setConfirmation('')
-            }
-          }}
-          className="fixed z-40 bottom-3 right-3 btn-secondary shadow-lg text-xs"
-        >
-          {authStatus.password_configured === false ? 'Configurează user/parolă' : 'Gestionează parola'}
-        </button>
-      )}
       {notice && (
-        <div role="status" className="fixed z-40 bottom-14 right-3 max-w-sm rounded-lg bg-green-50 dark:bg-green-950 text-green-800 dark:text-green-200 px-3 py-2 text-sm shadow-lg">
+        <div role="status" className="fixed z-40 right-3 bottom-[calc(8rem+env(safe-area-inset-bottom,0px))] md:bottom-14 max-w-sm rounded-lg bg-green-50 dark:bg-green-950 text-green-800 dark:text-green-200 px-3 py-2 text-sm shadow-lg">
           {notice}
         </div>
       )}

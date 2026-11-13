@@ -550,6 +550,51 @@ async def _screen_sources(topic: str, protocol: dict, depth: str) -> tuple[list[
 
 # ── Pipeline ────────────────────────────────────────────────────────────────
 
+async def _acquire_result_pdfs(result: ResearchResult, web_available: bool) -> dict:
+    """Download + index open-access full text for the studies of a research run.
+
+    Shared by the blocking and streaming pipelines. `web_available` only
+    short-circuits title-only rows; a study with a DOI/URL is always attempted.
+    """
+    stats = {"pdf": 0, "text_only": 0, "failed": 0}
+    for study in result.studies:
+        if not study.entry_id or not (web_available or study.url or study.doi):
+            continue
+        fname = await download_study_pdf(study.entry_id, study.url, study.title) if study.url else None
+        indexed_by_fulltext = False
+        if not fname:
+            try:
+                from app.fulltext import fetch_fulltext
+
+                ft_res = await fetch_fulltext(study.entry_id, index=True)
+                if ft_res.get("status") == "pdf":
+                    conn = get_db()
+                    try:
+                        row = conn.execute(
+                            "SELECT pdf_path FROM entries WHERE id = ?", [study.entry_id]
+                        ).fetchone()
+                        fname = row["pdf_path"] if row else None
+                    finally:
+                        conn.close()
+                    indexed_by_fulltext = True
+                elif ft_res.get("status") == "html":
+                    stats["text_only"] += 1
+                    continue
+            except Exception as ft_exc:  # noqa: BLE001 - the study row is still saved
+                logger.info("Fulltext fallback for study #%s skipped: %s", study.entry_id, ft_exc)
+        if not fname:
+            stats["failed"] += 1
+            continue
+        await anyio.to_thread.run_sync(_set_pdf_path, study.entry_id, fname)
+        if not indexed_by_fulltext:
+            try:
+                await index_pdf(study.entry_id, pdf_path_for(study.entry_id))
+            except Exception as idx_exc:  # noqa: BLE001 - the PDF itself is usable
+                logger.info("Indexing research PDF #%s failed: %s", study.entry_id, idx_exc)
+        stats["pdf"] += 1
+    return stats
+
+
 async def run_research(topic: str, depth: str = "deep", save: bool = True) -> ResearchResult:
     topic = topic.strip()
     if not topic:
@@ -686,26 +731,17 @@ async def run_research(topic: str, depth: str = "deep", save: bool = True) -> Re
             logger.error("Saving theories failed: %s", save_exc)
             await anyio.to_thread.run_sync(_delete_created_entries, result.entries_created or [])
             raise save_exc
-        if web_available:
-            for s in result.studies:
-                if s.entry_id:
-                    fname = await download_study_pdf(s.entry_id, s.url, s.title) if s.url else None
-                    if not fname:
-                        try:
-                            from app.fulltext import fetch_fulltext
-                            ft_res = await fetch_fulltext(s.entry_id, index=True)
-                            if ft_res.get("status") == "pdf":
-                                conn = get_db()
-                                try:
-                                    r = conn.execute("SELECT pdf_path FROM entries WHERE id = ?", [s.entry_id]).fetchone()
-                                    fname = r["pdf_path"] if r else None
-                                finally:
-                                    conn.close()
-                        except Exception as ft_exc:
-                            logger.info("Fulltext fallback for study #%s skipped: %s", s.entry_id, ft_exc)
-                    if fname:
-                        await anyio.to_thread.run_sync(_set_pdf_path, s.entry_id, fname)
-                        await index_pdf(s.entry_id, pdf_path_for(s.entry_id))
+        # Acquire full text for every study that carries an identifier. The old
+        # `if web_available` gate meant an offline screening step (or a mock/
+        # provider run) silently skipped every download even though the studies
+        # had DOI/URL metadata; only title-only rows are skipped to avoid a
+        # long discovery search per study on a slow link.
+        if web_available or any((s.url or s.doi) for s in result.studies):
+            pdf_stats = await _acquire_result_pdfs(result, web_available)
+            logger.info(
+                "Research PDFs: %d downloaded, %d text-only, %d failed",
+                pdf_stats["pdf"], pdf_stats["text_only"], pdf_stats["failed"],
+            )
 
     logger.info("Research complete: %d studies, %d theories", len(result.studies), len(result.theories))
     return result
@@ -1035,13 +1071,17 @@ async def research_stream(data: ResearchRequest):
                     logger.error("Saving theories failed: %s", save_exc)
                     await anyio.to_thread.run_sync(_delete_created_entries, result.entries_created or [])
                     raise save_exc
-                if web_available:
-                    for s in result.studies:
-                        if s.entry_id and s.url:
-                            fname = await download_study_pdf(s.entry_id, s.url, s.title)
-                            if fname:
-                                await anyio.to_thread.run_sync(_set_pdf_path, s.entry_id, fname)
-                                await index_pdf(s.entry_id, pdf_path_for(s.entry_id))
+                if web_available or any((s.url or s.doi) for s in result.studies):
+                    yield _sse({"type": "progress", "phase": "save", "message": "Acquiring and indexing open-access full texts..."})
+                    pdf_stats = await _acquire_result_pdfs(result, web_available)
+                    yield _sse({
+                        "type": "progress",
+                        "phase": "save",
+                        "message": (
+                            f"Full text: {pdf_stats['pdf']} PDFs downloaded, "
+                            f"{pdf_stats['text_only']} HTML-only, {pdf_stats['failed']} unavailable."
+                        ),
+                    })
                 yield _sse({"type": "progress", "phase": "save", "message": f"Saved {len(result.studies)} studies + report + {len(result.theories)} theories."})
 
             yield _sse({"type": "done", "result": result.model_dump()})
@@ -1058,6 +1098,7 @@ def _sse(payload: dict) -> str:
 
 
 _STUDY_WHERE = """archived = 0
+                 AND study_type != 'concept'
                  AND (study_type != ''
                       OR tags LIKE '%study%'
                       OR tags LIKE '%pdf%'
@@ -1213,7 +1254,16 @@ async def download_all_study_pdfs():
     indexed = 0
     for entry in studies:
         if entry.get("pdf_path"):
-            continue
+            existing = pdf_path_for(entry["id"])
+            if existing and is_valid_pdf_file(existing):
+                continue
+        if entry.get("pdf_path"):
+            conn_d = get_db()
+            try:
+                conn_d.execute("UPDATE entries SET pdf_path = '' WHERE id = ?", [entry["id"]])
+                conn_d.commit()
+            finally:
+                conn_d.close()
         url = extract_pdf_url(entry)
         fname = await download_study_pdf(entry["id"], url, entry["title"]) if url else None
         if not fname:
@@ -1246,6 +1296,12 @@ def _set_pdf_path(entry_id: int, fname: str) -> None:
             "UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
             [fname, entry_id],
         )
+        try:
+            from app.studies_store import store_entry_pdf_hash
+
+            store_entry_pdf_hash(conn, entry_id)
+        except Exception:  # noqa: BLE001 - hashing is best-effort
+            pass
         conn.commit()
     finally:
         conn.close()

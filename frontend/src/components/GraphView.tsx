@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Filter, ChevronDown, ChevronUp } from 'lucide-react'
 import { api } from '../lib/api'
 import { collectSubjectTags, subjectTags } from '../lib/tags'
+import { useToast } from './Toast'
 import type { GraphData, GraphEdge, GraphNode, RelationLabel, TimelineEntry } from '../lib/types'
 
 interface Props {
   onSelectEntry: (entry: TimelineEntry) => void
+  projectId?: number
 }
 
 // Colours by importance stay the node's own signal; relationship TYPE is what
@@ -25,6 +27,32 @@ const tagPalette = [
   '#7a5a8a', '#3d8477', '#8c6d4f', '#4f79c8', '#677385',
 ]
 
+// Culori calme, preluate din paleta temei (chrono/lapis, brass, verdigris, madder),
+// consolidatează o schemă conceptuală: factor = accent principal, subfactor =
+// nuanță mai deschisă, mecanism/outcome/rezultat = ton distinct.
+const conceptTypeColors: Record<string, string> = {
+  factor: '#2f5fa8',      // chrono-600 / lapis — accent principal
+  subfactor: '#7398d8',   // chrono-400 — nuanță mai deschisă
+  construct: '#a8843c',   // brass
+  mechanism: '#3d8477',   // verdigris
+  outcome: '#a2403f',     // madder
+}
+
+const conceptTypeLabels: Record<string, string> = {
+  factor: 'Factori',
+  subfactor: 'Subfactori',
+  construct: 'Construcți',
+  mechanism: 'Mecanisme',
+  outcome: 'Rezultate',
+}
+
+const sourceStudyColor = (isDark: boolean) =>
+  isDark ? '#233040' : '#d4dbe5'
+const sourceStudyBorder = (isDark: boolean) =>
+  isDark ? '#3a4554' : '#b7c1ce'
+const sourceStudyFont = (isDark: boolean) =>
+  isDark ? '#9fb0c4' : '#5c6b7e'
+
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -37,7 +65,7 @@ const fold = (s: string) =>
 
 type Period = 'all' | 'year' | 'decade'
 
-export function GraphView({ onSelectEntry }: Props) {
+export function GraphView({ onSelectEntry, projectId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const networkRef = useRef<any>(null)
   const requestSeq = useRef(0)
@@ -68,6 +96,11 @@ export function GraphView({ onSelectEntry }: Props) {
   // covers the empty 68vh box instead of showing a blank white area.
   const [layoutReady, setLayoutReady] = useState(false)
   const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'))
+  const [onlyRead, setOnlyRead] = useState(false)
+  const [onlyProjectEvidence, setOnlyProjectEvidence] = useState(false)
+  const [studyTypeFilter, setStudyTypeFilter] = useState('')
+  const [activeProjectId, setActiveProjectId] = useState<number | null>(projectId ?? null)
+  const toast = useToast()
 
   useEffect(() => {
     import('vis-network/standalone').then(() => setVisLoaded(true))
@@ -87,8 +120,14 @@ export function GraphView({ onSelectEntry }: Props) {
     setLoading(true)
     setError('')
     try {
+      const filterParams: { project_id?: number; only_read?: boolean; only_project_evidence?: boolean; study_type?: string } = {}
+      const pid = projectId ?? activeProjectId
+      if (onlyProjectEvidence && pid != null) filterParams.project_id = pid
+      if (onlyRead) filterParams.only_read = true
+      if (onlyProjectEvidence) filterParams.only_project_evidence = true
+      if (studyTypeFilter) filterParams.study_type = studyTypeFilter
       const [graph, timeline, labels] = await Promise.all([
-        api.relationships.graph(),
+        api.relationships.graph(Object.keys(filterParams).length ? filterParams : undefined),
         api.timeline.get(),
         api.relationships.labels().catch(() => ({ total: 0, labels: [] as RelationLabel[] })),
       ])
@@ -107,7 +146,21 @@ export function GraphView({ onSelectEntry }: Props) {
   useEffect(() => {
     loadData()
     return () => { requestSeq.current++ }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onlyRead, onlyProjectEvidence, studyTypeFilter, activeProjectId, projectId])
+
+  // Rezolvă proiectul activ pentru filtrul „doar proiectul curent”.
+  useEffect(() => {
+    if (projectId != null) {
+      setActiveProjectId(projectId)
+      return
+    }
+    let cancelled = false
+    api.projects.list()
+      .then(res => { if (!cancelled) setActiveProjectId(res.active_id ?? null) })
+      .catch(() => { /* filtrul de proiect rămâne indisponibil, graful merge fără el */ })
+    return () => { cancelled = true }
+  }, [projectId])
 
   const allTags = useMemo(() => {
     if (!graphData) return []
@@ -244,6 +297,7 @@ export function GraphView({ onSelectEntry }: Props) {
         })
       }
       const maxDegree = Math.max(1, ...visible.nodes.map(n => n.degree))
+      const isConceptMode = studyTypeFilter === 'concept'
 
       // Which nodes get a label. Measured with vis-network itself: with all 43
       // labels on, the mandatory zoom-to-fit leaves the font at 0.6px and the
@@ -271,38 +325,73 @@ export function GraphView({ onSelectEntry }: Props) {
 
       const graphNodes = visible.nodes.filter(n => !n.isolated)
       const nodes = new vis.DataSet(graphNodes.map(n => {
-        // Colour by the first real subject, not by a stray year in the tag list.
-        const firstTag = subjectTags(n.tags)[0]
+        // În modul „Concepte” vrem o schemă, nu o listă amestecată:
+        //   • nodurile cu study_type === 'concept' se colorează după concept_type,
+        //     primesc o formă distinctă (elipță) și etichetă albă pe fond colorat;
+        //   • nodurile sursă (study_type non-concept, aduse prin derives_from) rămân
+        //     neutre, mai mici, sub grau.
+        const isConcept = n.study_type === 'concept'
+        const isSource = isConceptMode && !isConcept
+        const conceptColor = n.concept_type ? conceptTypeColors[n.concept_type] : undefined
+
+        let shape: string = 'box'
+        let shapeProperties = { borderRadius: 7 }
+        let margin = { top: 7, right: 11, bottom: 7, left: 11 }
+        let fontSize = 12.5
+        let bgColor: string
+        let borderColor: string
+        let fontColor: string
+
+        if (isConceptMode && isConcept) {
+          shape = 'ellipse'
+          shapeProperties = { borderRadius: 0 }
+          margin = { top: 6, right: 10, bottom: 6, left: 10 }
+          fontSize = 13
+          bgColor = conceptColor || '#2f5fa8'
+          borderColor = conceptColor || '#2f5fa8'
+          fontColor = '#ffffff'
+        } else if (isSource) {
+          bgColor = sourceStudyColor(isDark)
+          borderColor = sourceStudyBorder(isDark)
+          fontColor = sourceStudyFont(isDark)
+        } else {
+          // Comportament neschimbat în celelalte moduri: fond de canvas, contur
+          // după prima etichetă / importanță, text ink.
+          const firstTag = subjectTags(n.tags)[0]
+          const fillColor = firstTag ? tagColors[firstTag] || n.color : n.color
+          bgColor = isDark ? '#141b25' : '#ffffff'
+          borderColor = fillColor
+          fontColor = isDark ? '#e8edf4' : '#141c28'
+        }
+
         const date = n.entry_date ? `<br/><b>${escapeHtml(n.entry_date)}</b>` : ''
         const links = n.isolated ? '<br/><i>fără legături</i>' : `<br/>${n.degree} legături`
         const dimmed = focusId !== null && n.id !== focusId && !neighbourIds.has(n.id)
-        const fillColor = firstTag ? tagColors[firstTag] || n.color : n.color
-        const borderColor = fillColor
         const accent = isDark ? '#8fb3ff' : '#2f5fa8'
         return {
           ...n,
           label: cutLabel(n.title),
-          shape: 'box',
-          shapeProperties: { borderRadius: 7 },
-          margin: { top: 7, right: 11, bottom: 7, left: 11 },
+          shape,
+          shapeProperties,
+          margin,
           color: {
-            background: isDark ? '#141b25' : '#ffffff',
+            background: bgColor,
             border: borderColor,
             highlight: {
-              background: isDark ? '#1a2a44' : '#e2ebf8',
+              background: isConcept ? bgColor : (isDark ? '#1a2a44' : '#e2ebf8'),
               border: accent,
             },
             hover: {
-              background: isDark ? '#1b2430' : '#f1f4f8',
+              background: isConcept ? bgColor : (isDark ? '#1b2430' : '#f1f4f8'),
               border: borderColor,
             },
           },
           borderColor,
           borderWidth: 1.5,
           font: {
-            size: 12.5,
+            size: fontSize,
             face: '"Source Sans 3 Variable", "Source Sans 3", sans-serif',
-            color: isDark ? '#e8edf4' : '#141c28',
+            color: fontColor,
           },
           shadow: {
             enabled: true,
@@ -319,11 +408,25 @@ export function GraphView({ onSelectEntry }: Props) {
       const edges = new vis.DataSet(visible.edges.map(e => {
         const isFocusEdge = focusId !== null && (e.from === focusId || e.to === focusId)
         const isGeneric = e.label === 'relates_to' || !e.label
+        const isDerivesFrom = e.label === 'derives_from'
         const accent = isDark ? '#8fb3ff' : '#2f5fa8'
+
+        // În modul „Concepte” legătura derives_from (studiu → concept) devine
+        // punctată și mai discreta, ca să se citească ca o sursă, nu ca o
+        // relație teoretică de même rang.
+        let dashes: boolean | number[] = isGeneric ? [4, 4] : false
+        let edgeColor: string = isGeneric ? (isDark ? '#3a4554' : '#b7c1ce') : (e.color || '#2f5fa8')
+        let edgeOpacity: number = focusId !== null && !isFocusEdge ? 0.08 : (isGeneric ? 0.35 : 0.8)
+        if (isConceptMode && isDerivesFrom) {
+          dashes = [4, 4]
+          edgeColor = isDark ? '#3a4554' : '#8d99a9'
+          edgeOpacity = 0.5
+        }
+
         return {
           ...e,
           width: isFocusEdge ? 2.4 : (isGeneric ? 1 : 1.6),
-          dashes: isGeneric ? [4, 4] : false,
+          dashes,
           // Gentle continuous arcs: straight lines maximise crossings through
           // the graph centre, while low-roundness curves arc around nodes and
           // distribute the intersections where they are less noticeable.
@@ -333,8 +436,8 @@ export function GraphView({ onSelectEntry }: Props) {
             roundness: 0.1,
           },
           color: {
-            color: isGeneric ? (isDark ? '#3a4554' : '#b7c1ce') : (e.color || '#2f5fa8'),
-            opacity: focusId !== null && !isFocusEdge ? 0.08 : (isGeneric ? 0.35 : 0.8),
+            color: edgeColor,
+            opacity: edgeOpacity,
             highlight: accent,
             hover: accent,
           },
@@ -423,7 +526,7 @@ export function GraphView({ onSelectEntry }: Props) {
         networkRef.current = null
       }
     }
-  }, [graphData, visLoaded, entries, visible, tagColors, physics, isDark, focusId])
+  }, [graphData, visLoaded, entries, visible, tagColors, physics, isDark, focusId, studyTypeFilter])
 
   const openEntry = (id: number) => {
     const entry = entries.find(e => e.id === id)
@@ -497,13 +600,22 @@ export function GraphView({ onSelectEntry }: Props) {
         </div>
         <div className="flex gap-2 flex-wrap items-center">
           <button onClick={() => {
-            if (networkRef.current) networkRef.current.fit({ animation: true })
-          }} className="btn-secondary text-xs sm:text-sm" aria-label="Încadrează tot graful în ecran">⛶ Încadrează</button>
+              if (networkRef.current) {
+                networkRef.current.fit({ animation: true })
+                toast.info('Graf încadrat')
+              }
+            }} className="btn-secondary text-xs sm:text-sm" aria-label="Încadrează tot graful în ecran">⛶ Încadrează</button>
           <button onClick={() => setPhysics(!physics)} className={`btn-ghost text-xs sm:text-sm ${physics ? 'text-chrono-600' : ''}`}>
             {physics ? '⚛️ Fizică on' : '⚛️ Fizică off'}
           </button>
           <button
-            onClick={() => setShowMobileFilters(v => !v)}
+            onClick={() => {
+              setShowMobileFilters(v => {
+                const next = !v
+                toast.info(next ? 'Filtre afișate' : 'Filtre ascunse')
+                return next
+              })
+            }}
             className="sm:hidden btn-secondary text-xs flex items-center gap-1.5 font-medium px-2.5 py-1.5"
             aria-expanded={showMobileFilters}
           >
@@ -527,7 +639,14 @@ export function GraphView({ onSelectEntry }: Props) {
             aria-label="Caută un nod în graf după titlu sau etichetă"
           />
           <button
-            onClick={() => searchMatch && focusOn(searchMatch.id)}
+            onClick={() => {
+              if (searchMatch) {
+                focusOn(searchMatch.id)
+                toast.success(`Focus pe: ${searchMatch.title}`)
+              } else {
+                toast.warning('Niciun nod găsit pentru termenul căutat')
+              }
+            }}
             disabled={!searchMatch}
             className="btn-secondary text-sm disabled:opacity-40"
             aria-label="Mergi la nodul găsit"
@@ -572,6 +691,36 @@ export function GraphView({ onSelectEntry }: Props) {
             <option value="year">Ultimul an</option>
             <option value="decade">Ultimul deceniu</option>
           </select>
+          <select
+            value={studyTypeFilter}
+            onChange={e => setStudyTypeFilter(e.target.value)}
+            className="input w-auto text-sm"
+            aria-label="Filtrează după tipul intrării"
+            title="Filtrează nodurile după tip: studii, cărți sau concepte"
+          >
+            <option value="">Toate tipurile</option>
+            <option value="study">Studii</option>
+            <option value="book">Cărți</option>
+            <option value="concept">Concepte</option>
+          </select>
+          <label className="inline-flex items-center gap-1.5 text-sm cursor-pointer text-muted hover:text-ink" title="Arată doar intrările citite sau adnotate">
+            <input
+              type="checkbox"
+              checked={onlyRead}
+              onChange={e => setOnlyRead(e.target.checked)}
+              className="rounded border-gray-300 text-chrono-600"
+            />
+            <span>Doar citite / adnotate</span>
+          </label>
+          <label className="inline-flex items-center gap-1.5 text-sm cursor-pointer text-muted hover:text-ink" title="Arată doar dovezile legate de proiectul curent">
+            <input
+              type="checkbox"
+              checked={onlyProjectEvidence}
+              onChange={e => setOnlyProjectEvidence(e.target.checked)}
+              className="rounded border-gray-300 text-chrono-600"
+            />
+            <span>Doar proiectul curent</span>
+          </label>
           <button
             onClick={() => setShowIsolated(v => !v)}
             className={`btn-ghost text-sm ${showIsolated ? 'text-chrono-600' : ''}`}
@@ -580,9 +729,9 @@ export function GraphView({ onSelectEntry }: Props) {
           >
             {showIsolated ? '✓ Fără legături' : `Fără legături (${isolatedTotal})`}
           </button>
-          {(tagFilter || minImportance > 0 || period !== 'all' || relationFilter || relationCategory !== 'all') && (
+          {(tagFilter || minImportance > 0 || period !== 'all' || relationFilter || relationCategory !== 'all' || onlyRead || onlyProjectEvidence || studyTypeFilter) && (
             <button
-              onClick={() => { setTagFilter(''); setMinImportance(0); setPeriod('all'); setRelationFilter(''); setRelationCategory('all') }}
+              onClick={() => { setTagFilter(''); setMinImportance(0); setPeriod('all'); setRelationFilter(''); setRelationCategory('all'); setOnlyRead(false); setOnlyProjectEvidence(false); setStudyTypeFilter('') }}
               className="btn-ghost text-sm"
             >Golește</button>
           )}
@@ -609,19 +758,40 @@ export function GraphView({ onSelectEntry }: Props) {
               etichetă: {tagFilter}
             </span>
           )}
+          {studyTypeFilter === 'concept' && (
+            <>
+              <span className="w-px h-3 bg-line" aria-hidden />
+              <span className="font-semibold text-[10px] uppercase tracking-wider text-muted">Concepte</span>
+              {Object.entries(conceptTypeColors).map(([key, color]) => (
+                <span key={key} className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full inline-block" style={{ background: color }} />
+                  {conceptTypeLabels[key]}
+                </span>
+              ))}
+              <span className="flex items-center gap-1.5">
+                <span className="w-3 h-3 rounded-full inline-block" style={{ background: sourceStudyColor(isDark) }} />
+                Studii sursă
+              </span>
+            </>
+          )}
         </div>
       </div>
 
       <div className="flex flex-col lg:flex-row gap-3">
         <div className="relative flex-1 min-w-0">
+          {studyTypeFilter === 'concept' && (
+            <p className="text-xs text-muted mb-2 max-w-none">
+              Nodurile colorate sunt concepte extrase din evidențierile și notele tale; cele gri sunt studiile care le susțin.
+            </p>
+          )}
           {/* Interactive Knowledge Graph Canvas — renders across desktop and mobile */}
           <div className="card graph-canvas block w-full relative overflow-hidden p-0" style={{ height: '65vh', minHeight: '380px' }} ref={containerRef} />
 
           {/* Floating Zoom & Fit Controls */}
           <div className="flex absolute bottom-4 right-4 z-10 flex-col gap-0.5 bg-surface/90 backdrop-blur-sm p-1 rounded-lg border border-line shadow-card">
-            <button onClick={handleZoomIn} className="w-7 h-7 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink font-bold text-base transition-colors" title="Mărește (Zoom in)">+</button>
-            <button onClick={handleZoomOut} className="w-7 h-7 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink font-bold text-base transition-colors" title="Micșorează (Zoom out)">−</button>
-            <button onClick={handleFit} className="w-7 h-7 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink text-xs font-semibold transition-colors" title="Încadrează tot graful (Fit)">⛶</button>
+            <button onClick={() => { handleZoomIn(); toast.info('Zoom in') }} className="touch-40 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink font-bold text-base transition-colors" title="Mărește (Zoom in)">+</button>
+            <button onClick={() => { handleZoomOut(); toast.info('Zoom out') }} className="touch-40 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink font-bold text-base transition-colors" title="Micșorează (Zoom out)">−</button>
+            <button onClick={() => { handleFit(); toast.info('Graf încadrat') }} className="touch-40 flex items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink text-xs font-semibold transition-colors" title="Încadrează tot graful (Fit)">⛶</button>
           </div>
           {!layoutReady && (
             <div

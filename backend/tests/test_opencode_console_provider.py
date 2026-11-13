@@ -509,7 +509,7 @@ def test_model_redirect_is_not_followed_or_exposed(clean_settings, monkeypatch):
 
 def _enable_console_chat(model_id: str, monkeypatch):
     from app import llm
-    from app.routers import chat as chat_router
+    import app.chat as chat_router
 
     console.save_config(console.DEFAULT_API_URL, API_KEY)
     llm.set_active_model(model_id, provider="opencode_console")

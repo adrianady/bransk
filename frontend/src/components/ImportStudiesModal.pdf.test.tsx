@@ -28,7 +28,7 @@ describe('ImportStudiesModal PDF outcome feedback', () => {
     apiMock.studies.importBulk.mockReturnValue(pending.promise)
     render(<ImportStudiesModal isOpen onClose={vi.fn()} onImportComplete={vi.fn()} />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Import Listă DOI \/ URL/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Identificator rapid/ }))
     fireEvent.change(screen.getByPlaceholderText(/Exemplu:/), { target: { value: '10.1234/example' } })
     fireEvent.click(screen.getByRole('button', { name: 'Analizează și importă lista' }))
 

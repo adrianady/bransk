@@ -34,7 +34,7 @@ def entry(client):
 
 def test_fenced_and_inline_code_never_executes(client):
     """A code sample in the reply is documentation, not a tool call."""
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     reply = (
         "Here is how the tag looks:\n\n"
@@ -46,14 +46,14 @@ def test_fenced_and_inline_code_never_executes(client):
 
 
 def test_tag_echoed_inside_prose_does_not_run(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     actions = _parse_actions("You asked: [ARCHIVE_ENTRY: 1] so I will not do it.")
     assert actions == []
 
 
 def test_line_tag_payload_may_contain_brackets(client):
-    from app.routers.chat import _extract_line_tags
+    from app.chat.parser import _extract_line_tags
 
     assert _extract_line_tags("[SEARCH_KB: brain [regions] and memory]", "SEARCH_KB") == [
         "brain [regions] and memory"
@@ -63,7 +63,7 @@ def test_line_tag_payload_may_contain_brackets(client):
 
 
 def test_create_entry_runs_and_stores_the_row(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     actions = _parse_actions("[CREATE_ENTRY: Learned thing | the body | 2026-02-02 | alpha,beta | 4]")
     assert [a["type"] for a in actions] == ["entry_created"]
@@ -76,7 +76,7 @@ def test_create_entry_runs_and_stores_the_row(client):
 
 
 def test_create_entry_importance_is_clamped(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     _parse_actions("[CREATE_ENTRY: Nine | body | | | 9]")
     _parse_actions("[CREATE_ENTRY: Zero | body | | | 0]")
@@ -85,14 +85,14 @@ def test_create_entry_importance_is_clamped(client):
 
 
 def test_create_entry_with_blank_date_stores_no_date(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     _parse_actions("[CREATE_ENTRY: No date | body | | | 3]")
     assert client.get("/api/entries").json()[0]["entry_date"] is None
 
 
 def test_identical_create_entry_runs_only_once(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     tag = "[CREATE_ENTRY: Twice | body | | | 3]"
     actions = _parse_actions(f"{tag}\n{tag}")
@@ -101,7 +101,7 @@ def test_identical_create_entry_runs_only_once(client):
 
 
 def test_near_miss_create_entry_returns_a_corrective_error(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     actions = _parse_actions("[CREATE_ENTRY: Bad | body | | | five stars]")
     assert actions[0]["type"] == "error"
@@ -110,7 +110,7 @@ def test_near_miss_create_entry_returns_a_corrective_error(client):
 
 
 def test_search_kb_is_read_only_and_limited(client, entry):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     actions = _parse_actions("[SEARCH_KB: Entry]")
     assert actions[0]["type"] == "search_results"
@@ -119,7 +119,7 @@ def test_search_kb_is_read_only_and_limited(client, entry):
 
 
 def test_relationship_tag_needs_two_numeric_ids(client, entry):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     other = client.post("/api/entries", json={"title": "B"}).json()
     ok = _parse_actions(f"[CREATE_RELATIONSHIP: {entry['id']} | {other['id']} | supports]")
@@ -131,7 +131,7 @@ def test_relationship_tag_needs_two_numeric_ids(client, entry):
 
 
 def test_theory_tags_create_and_link(client, entry):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     created = _parse_actions("[CREATE_THEORY: Theory X | describes | | emerging]")
     assert created[0]["type"] == "theory_created"
@@ -147,7 +147,7 @@ def test_theory_tags_create_and_link(client, entry):
 
 
 def test_list_theories_tag(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     client.post("/api/theories", json={"name": "Attachment theory"})
     client.post("/api/theories", json={"name": "Resilience"})
@@ -160,7 +160,7 @@ def test_list_theories_tag(client):
 
 
 def test_research_and_download_tags_become_requests_not_writes(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     actions = _parse_actions("[RESEARCH: adverse childhood experiences]\n[DOWNLOAD_STUDY: 7]")
     assert actions[0] == {"type": "research_request", "topic": "adverse childhood experiences"}
@@ -168,14 +168,25 @@ def test_research_and_download_tags_become_requests_not_writes(client):
     assert client.get("/api/entries").json() == []
 
 
-def test_download_tag_without_a_number_is_an_error(client):
-    from app.routers.chat import _parse_actions
+def test_download_tag_accepts_entry_id_doi_url_and_title(client):
+    from app.chat.parser import _parse_actions
 
-    assert _parse_actions("[DOWNLOAD_STUDY: the third one]")[0]["type"] == "error"
+    # Numeric ids keep their historical shape (entry_id, no extra keys).
+    assert _parse_actions("[DOWNLOAD_STUDY: 7]")[0] == {
+        "type": "download_study_request", "entry_id": 7,
+    }
+    # A DOI/URL/title is a valid reference now; the endpoint resolves it.
+    assert _parse_actions("[DOWNLOAD_STUDY: 10.1038/nrn.2016.44]")[0]["ref"] == "10.1038/nrn.2016.44"
+    assert _parse_actions("[DOWNLOAD_STUDY: https://example.org/a.pdf]")[0]["ref"] == "https://example.org/a.pdf"
+    assert _parse_actions("[DOWNLOAD_STUDY: the third one]")[0]["ref"] == "the third one"
+    # `missing` is the batch action for every study without a PDF.
+    assert _parse_actions("[DOWNLOAD_STUDY: missing]")[0]["type"] == "download_missing_request"
+    # An empty payload is still an error the model can retry from.
+    assert _parse_actions("[DOWNLOAD_STUDY: ]")[0]["type"] == "error"
 
 
 def test_archive_and_append_write_the_entry(client, entry):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     appended = _parse_actions(f"[APPEND_ENTRY: {entry['id']} | more text]")
     assert appended[0]["type"] == "entry_appended"
@@ -199,7 +210,7 @@ def test_archive_and_append_write_the_entry(client, entry):
 
 
 def test_unparseable_reply_yields_no_actions(client):
-    from app.routers.chat import _parse_actions
+    from app.chat.parser import _parse_actions
 
     assert _parse_actions("") == []
     assert _parse_actions("Just a normal sentence, no tags.") == []
@@ -207,7 +218,7 @@ def test_unparseable_reply_yields_no_actions(client):
 
 
 def test_pending_action_round_trip_and_expiry(client, entry):
-    from app.routers import chat as chat_mod
+    import app.chat as chat_mod
 
     chat_mod._PENDING_ACTIONS.clear()
     nonce = chat_mod._store_pending_action({"type": "archive_entry", "entry_id": entry["id"]})
@@ -223,7 +234,7 @@ def test_pending_action_round_trip_and_expiry(client, entry):
 
 
 def test_confirm_rejects_unknown_and_malformed_ids(client):
-    from app.routers import chat as chat_mod
+    import app.chat as chat_mod
 
     chat_mod._PENDING_ACTIONS.clear()
     assert client.post("/api/chat/confirm", json={"confirm_id": "deadbeef"}).status_code == 404
@@ -303,7 +314,7 @@ def test_research_intent_detection():
     nothing while the awkward "run a research on X" worked. The politeness strip
     also left "you to" behind because it matched "i want" before "i want you to".
     """
-    from app.routers.chat import _detect_research_intent
+    from app.chat.task_manager import _detect_research_intent
 
     assert _detect_research_intent("please research on theory of mind") == "theory of mind"
     assert _detect_research_intent("can you research on theory of mind") == "theory of mind"
@@ -321,7 +332,7 @@ def test_research_intent_detection():
 
 
 def test_mock_reply_picks_the_right_action_shape():
-    from app.routers.chat import _mock_reply
+    from app.chat import _mock_reply
 
     assert "[RESEARCH:" in _mock_reply("research on memory")
     assert "[CREATE_ENTRY:" in _mock_reply("save this fact")
@@ -333,7 +344,7 @@ def test_mock_reply_picks_the_right_action_shape():
 
 
 def test_mock_stream_chunks_reassemble_to_the_reply():
-    from app.routers.chat import _mock_reply, _mock_stream_chunks
+    from app.chat import _mock_reply, _mock_stream_chunks
 
     message = "hello there, how are you today"
     streamed = "".join(_mock_stream_chunks(message))
@@ -341,7 +352,7 @@ def test_mock_stream_chunks_reassemble_to_the_reply():
 
 
 def test_history_item_extraction_clips_and_tolerates_shapes():
-    from app.routers.chat import _extract_history_item
+    from app.chat import _extract_history_item
 
     assert _extract_history_item({"role": "user", "content": "abc"}) == {"role": "user", "content": "abc"}
     clipped = _extract_history_item({"role": "user", "content": "x" * 20000})
@@ -356,7 +367,7 @@ def test_history_item_extraction_clips_and_tolerates_shapes():
 
 
 def test_tool_results_text_covers_every_action_type():
-    from app.routers.chat import _tool_results_text
+    from app.chat import _tool_results_text
 
     actions = [
         {"type": "entry_fetched", "entry": {"id": 1, "title": "T", "entry_date": None, "tags": "a", "content": "c"}},
@@ -383,7 +394,7 @@ def test_tool_results_text_covers_every_action_type():
 
 
 def test_context_builder_finds_the_matching_entry(client, entry):
-    from app.routers.chat import _build_context
+    from app.chat.context import _build_context
 
     ctx = _build_context("Entry")
     assert any(c["id"] == entry["id"] for c in ctx)
@@ -391,7 +402,7 @@ def test_context_builder_finds_the_matching_entry(client, entry):
 
 
 def test_system_prompt_lists_context_and_forbids_echo(client, entry):
-    from app.routers.chat import _build_context, _build_system_prompt
+    from app.chat import _build_context, _build_system_prompt
 
     prompt = _build_system_prompt(_build_context("Entry"), "mock", "mock-model")
     assert "Bransk AI" in prompt
@@ -399,7 +410,7 @@ def test_system_prompt_lists_context_and_forbids_echo(client, entry):
 
 
 def test_summarize_old_history_clips_a_long_conversation():
-    from app.routers.chat import _summarize_old_history
+    from app.chat import _summarize_old_history
 
     assert _summarize_old_history([]) == ""
     history = [{"role": "user", "content": f"message {i}"} for i in range(30)]
@@ -408,14 +419,14 @@ def test_summarize_old_history_clips_a_long_conversation():
 
 
 def test_answer_with_tools_offline_never_calls_a_provider(client):
-    from app.routers.chat import _answer_with_tools
+    from app.chat import _answer_with_tools
 
     answer = asyncio.run(_answer_with_tools("q", [], [], "first", [{"type": "entries_listed", "results": []}]))
     assert "knowledge base" in answer
 
 
 def test_chunk_text_helper_splits_on_huge_words():
-    from app.routers.chat import _chunk_text
+    from app.chat import _chunk_text
 
     assert list(_chunk_text("a b c", size=2)) == ["a b ", "c "]
 

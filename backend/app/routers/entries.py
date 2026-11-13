@@ -2,9 +2,20 @@
 Entries CRUD router.
 """
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, Response
+
+import anyio
+from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
+from pydantic import BaseModel
+
 from app.db import get_db
 from app.models import EntryCreate, EntryUpdate, EntryResponse
+from app.studies_store import (
+    MAX_SIZE,
+    compute_pdf_hash,
+    find_entry_by_pdf_hash,
+    pdf_path_for,
+    write_study_pdf_bytes,
+)
 from app.tagging import normalize_tags, sync_tags
 
 router = APIRouter()
@@ -15,7 +26,8 @@ router = APIRouter()
 # returns the complete content.
 _LIST_COLUMNS = """id, title, entry_date, tags, importance, archived,
                    study_type, authors, quality, url_validated, design,
-                   effect_direction, pdf_path, doi, doi_source, doi_checked_at,
+                   effect_direction, pdf_path, pdf_hash, read_status, isbn,
+                   doi, doi_source, doi_checked_at,
                    bib_title, bib_authors, bib_year, source,
                    created_at, updated_at,
                    substr(content, 1, 300) AS content_preview"""
@@ -107,8 +119,8 @@ def create_entry(data: EntryCreate):
         tags = normalize_tags(data.tags)
         cur = conn.execute(
             """INSERT INTO entries (title, content, entry_date, tags, source, importance,
-                                    study_type, authors, quality, url_validated, design, effect_direction, pdf_path, doi)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    study_type, authors, quality, url_validated, design, effect_direction, pdf_path, doi, read_status, isbn)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 data.title,
                 data.content,
@@ -124,6 +136,8 @@ def create_entry(data: EntryCreate):
                 data.effect_direction,
                 data.pdf_path,
                 data.doi,
+                (data.read_status or "unread"),
+                (data.isbn or ""),
             ]
         )
         sync_tags(conn, tags)
@@ -147,7 +161,7 @@ def update_entry(entry_id: int, data: EntryUpdate):
         raw_updates: list[str] = []
         for field in ("title", "content", "entry_date", "tags", "source", "importance",
                       "study_type", "authors", "quality", "url_validated", "design",
-                      "effect_direction", "pdf_path", "doi"):
+                      "effect_direction", "pdf_path", "doi", "read_status", "isbn"):
             val = getattr(data, field, None)
             if val is not None:
                 if field == "url_validated":
@@ -177,6 +191,132 @@ def update_entry(entry_id: int, data: EntryUpdate):
             sync_tags(conn, updates["tags"])
         conn.commit()
 
+        row = conn.execute("SELECT * FROM entries WHERE id = ?", [entry_id]).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@router.post("/entries/{entry_id}/pdf")
+async def upload_entry_pdf(entry_id: int, file: UploadFile = File(...)):
+    """Accept a PDF downloaded in the user's browser and index it.
+
+    The counterpart of the bot-check fallback: Sci-Hub and publisher pages
+    answer automated clients with Cloudflare/CAPTCHA walls, which cannot be
+    solved from the app. The user opens the returned ``browser_download_url``,
+    downloads the paper, and posts the file here. The stored file uses exactly
+    the same name/validation as an automatic download, then its text is
+    chunked into the RAG index.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, title FROM entries WHERE id = ?", [entry_id]
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(404, "Entry not found")
+
+    data = await file.read(MAX_SIZE + 1)
+    if len(data) > MAX_SIZE:
+        raise HTTPException(413, "PDF-ul depășește limita de 150 MB.")
+    if not data:
+        raise HTTPException(400, "Fișierul încărcat este gol.")
+
+    fname = await anyio.to_thread.run_sync(
+        write_study_pdf_bytes, entry_id, row["title"], data
+    )
+    if not fname:
+        raise HTTPException(
+            400,
+            "Fișierul nu este un PDF valid (poate fi o pagină HTML salvată cu extensia .pdf).",
+        )
+
+    conn = get_db()
+    try:
+        digest = compute_pdf_hash(data)
+        conn.execute(
+            "UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
+            [fname, entry_id],
+        )
+        try:
+            conn.execute(
+                "UPDATE entries SET pdf_hash = ? WHERE id = ?",
+                [digest, entry_id],
+            )
+        except Exception:  # noqa: BLE001 - pre-migration DBs lack pdf_hash
+            digest = digest
+        conn.commit()
+        duplicate = find_entry_by_pdf_hash(conn, digest, exclude_id=entry_id)
+    finally:
+        conn.close()
+
+    from app.pdf_rag import extract_pdf_text, index_pdf
+
+    path = pdf_path_for(entry_id)
+    chunks = await index_pdf(entry_id, path)
+    text_chars = 0
+    try:
+        from app import studytext
+
+        text = await anyio.to_thread.run_sync(extract_pdf_text, path)
+        if text.strip():
+            await anyio.to_thread.run_sync(
+                studytext.save_text, entry_id, row["title"], text
+            )
+            text_chars = len(text)
+    except Exception:  # noqa: BLE001 - the PDF and its chunks are already stored
+        pass
+
+    # The frontend's upload helper is typed as an Entry, so return the updated
+    # row itself; the indexing counters are additive metadata.
+    conn = get_db()
+    try:
+        updated = conn.execute(
+            "SELECT * FROM entries WHERE id = ?", [entry_id]
+        ).fetchone()
+    finally:
+        conn.close()
+    payload = dict(updated) if updated else {"id": entry_id, "pdf_path": fname}
+    payload.update({
+        "entry_id": entry_id,
+        "pdf_path": fname,
+        "indexed_chunks": chunks,
+        "text_chars": text_chars,
+    })
+    if duplicate:
+        payload["duplicate_entry_id"] = duplicate["id"]
+        payload["duplicate_warning"] = (
+            f"Același PDF există deja la intrarea #{duplicate['id']} "
+            f"„{duplicate.get('title', '')}”."
+        )
+    return payload
+
+
+class _StatusUpdate(BaseModel):
+    read_status: str
+
+
+@router.patch("/entries/{entry_id}/status", response_model=EntryResponse)
+def patch_entry_status(entry_id: int, data: _StatusUpdate):
+    """Fast reading-progress update without a full entry PUT."""
+    allowed = {"unread", "reading", "read", "annotated"}
+    text = (data.read_status or "").strip().lower()
+    if text not in allowed:
+        raise HTTPException(400, f"read_status must be one of {sorted(allowed)}")
+    conn = get_db()
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+        existing = conn.execute("SELECT * FROM entries WHERE id = ?", [entry_id]).fetchone()
+        if not existing:
+            raise HTTPException(404, "Entry not found")
+        if "read_status" in cols:
+            conn.execute(
+                "UPDATE entries SET read_status = ?, updated_at = datetime('now') WHERE id = ?",
+                [text, entry_id],
+            )
+            conn.commit()
         row = conn.execute("SELECT * FROM entries WHERE id = ?", [entry_id]).fetchone()
         return dict(row)
     finally:

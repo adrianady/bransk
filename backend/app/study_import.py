@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import html as html_mod
+import inspect
 import logging
 import re
 from datetime import date
@@ -37,6 +38,32 @@ _HEADERS = {
     "User-Agent": "Bransk/1.0 (local academic research knowledge graph; mailto:research@chronokg.local)",
     "Accept": "application/json, text/xml, */*",
 }
+
+
+def _accepts_details(fn) -> bool:
+    """Whether a download implementation takes the optional ``details`` dict.
+
+    Kept as a runtime check because tests and scripts monkeypatch
+    ``download_study_pdf`` with a three-argument callable.
+    """
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.name == "details" or param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in params
+    )
+
+
+async def _download_pdf(entry_id: int, url: str, title: str) -> tuple[str | None, dict]:
+    """Download a PDF and report bot challenges when the implementation can."""
+    details: dict = {}
+    if _accepts_details(download_study_pdf):
+        fname = await download_study_pdf(entry_id, url, title, details=details)
+    else:
+        fname = await download_study_pdf(entry_id, url, title)
+    return fname, details
 
 
 def extract_identifiers(raw_text: str) -> list[str]:
@@ -325,6 +352,7 @@ def find_duplicate_study(conn, title: str, doi: str = "", source_url: str = "") 
     studies = conn.execute(
         """SELECT id, title, source FROM entries
            WHERE archived = 0
+             AND study_type != 'concept'
              AND (study_type != '' OR tags LIKE '%study%' OR tags LIKE '%pdf%' OR (doi IS NOT NULL AND doi != ''))"""
     ).fetchall()
 
@@ -533,6 +561,9 @@ async def bulk_import_studies(
                     "source": item.get("source", "") or url,
                     "pdf_downloaded": False,
                     "pdf_index_failed": False,
+                    "bot_challenge": False,
+                    "browser_download_url": "",
+                    "manual_upload_needed": False,
                 })
             except Exception as ins_exc:
                 logger.error("Failed inserting study '%s': %s", title, ins_exc)
@@ -555,11 +586,14 @@ async def bulk_import_studies(
             eid = rec["id"]
             pdf_url = rec.get("pdf_url")
             fname = None
+            challenged: dict | None = None
 
             # Attempt direct download first if explicit PDF URL
             if pdf_url:
                 try:
-                    fname = await download_study_pdf(eid, pdf_url, rec["title"])
+                    fname, direct_details = await _download_pdf(eid, pdf_url, rec["title"])
+                    if not fname and direct_details.get("bot_challenge"):
+                        challenged = direct_details
                 except Exception as dl_err:
                     logger.info("Direct PDF download failed for #%d: %s", eid, dl_err)
 
@@ -567,6 +601,12 @@ async def bulk_import_studies(
                 conn_u = get_db()
                 try:
                     conn_u.execute("UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?", [fname, eid])
+                    try:
+                        from app.studies_store import store_entry_pdf_hash
+
+                        store_entry_pdf_hash(conn_u, eid)
+                    except Exception:  # noqa: BLE001 - hashing is best-effort
+                        pass
                     conn_u.commit()
                 finally:
                     conn_u.close()
@@ -593,8 +633,22 @@ async def bulk_import_studies(
                     if ft_res.get("index_error"):
                         rec["pdf_index_failed"] = True
                         pdfs_index_failed += 1
+                elif ft_res.get("bot_challenge"):
+                    challenged = ft_res
             except Exception as ft_exc:
                 logger.info("Fulltext acquisition fallback failed for #%d: %s", eid, ft_exc)
+
+            if challenged and not rec["pdf_downloaded"]:
+                from app.fulltext import browser_fallback_urls
+
+                primary, alt = browser_fallback_urls({
+                    "doi": rec.get("doi") or "",
+                    "source": rec.get("source") or "",
+                })
+                rec["bot_challenge"] = True
+                rec["manual_upload_needed"] = True
+                rec["browser_download_url"] = challenged.get("browser_download_url") or primary
+                rec["browser_download_url_alt"] = challenged.get("browser_download_url_alt") or alt
 
         # Download up to 3 concurrently to be polite
         sem_dl = asyncio.Semaphore(3)
@@ -613,13 +667,17 @@ async def bulk_import_studies(
         "pdfs_downloaded": pdfs_downloaded,
         "pdfs_failed": sum(not rec["pdf_downloaded"] for rec in imported_records) if auto_download_pdfs else 0,
         "pdfs_index_failed": pdfs_index_failed,
+        "manual_upload_needed": sum(1 for rec in imported_records if rec.get("bot_challenge")),
     }
 
 
 async def bulk_download_studies(entry_ids: list[int]) -> dict[str, Any]:
     """Batch-download and index PDFs for a specified list of study entry IDs."""
     if not entry_ids:
-        return {"downloaded": [], "failed": [], "indexed_chunks": 0}
+        return {
+            "downloaded": [], "failed": [], "text_only": [],
+            "browser_fallback": [], "manual_upload_needed": 0, "indexed_chunks": 0,
+        }
 
     from app.fulltext import fetch_fulltext
 
@@ -636,16 +694,46 @@ async def bulk_download_studies(entry_ids: list[int]) -> dict[str, Any]:
 
     downloaded = []
     failed = []
+    text_only = []
+    browser_fallback: list[dict] = []
     total_indexed = 0
 
     for entry in entries:
         eid = entry["id"]
-        if entry.get("pdf_path"):
+        # Trust the studies folder, not just the row: a file may exist after a
+        # DB restore while pdf_path stayed empty (and vice versa).
+        existing = pdf_path_for(eid)
+        if existing:
+            if not entry.get("pdf_path"):
+                conn_d = get_db()
+                try:
+                    conn_d.execute(
+                        "UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
+                        [existing.name, eid],
+                    )
+                    conn_d.commit()
+                finally:
+                    conn_d.close()
             downloaded.append(eid)
             continue
+        if entry.get("pdf_path"):
+            conn_d = get_db()
+            try:
+                conn_d.execute(
+                    "UPDATE entries SET pdf_path = '' WHERE id = ?", [eid]
+                )
+                conn_d.commit()
+            finally:
+                conn_d.close()
 
         url = extract_pdf_url(entry)
-        fname = await download_study_pdf(eid, url, entry["title"]) if url else None
+        challenged = None
+        if url:
+            fname, direct_details = await _download_pdf(eid, url, entry["title"])
+            if not fname and direct_details.get("bot_challenge"):
+                challenged = direct_details
+        else:
+            fname = None
         if not fname:
             try:
                 ft_res = await fetch_fulltext(eid, index=True)
@@ -656,6 +744,14 @@ async def bulk_download_studies(entry_ids: list[int]) -> dict[str, Any]:
                         fname = r["pdf_path"] if r else None
                     finally:
                         conn_r.close()
+                elif ft_res.get("status") == "html":
+                    # The paper is only open as HTML, but its text is saved and
+                    # indexed; reporting it as "failed" hid that success.
+                    text_only.append(eid)
+                    total_indexed += ft_res.get("chunks") or 0
+                    continue
+                elif ft_res.get("bot_challenge"):
+                    challenged = ft_res
             except Exception as ft_exc:
                 logger.info("Fulltext fallback in bulk-download failed for #%s: %s", eid, ft_exc)
 
@@ -663,6 +759,12 @@ async def bulk_download_studies(entry_ids: list[int]) -> dict[str, Any]:
             conn_u = get_db()
             try:
                 conn_u.execute("UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?", [fname, eid])
+                try:
+                    from app.studies_store import store_entry_pdf_hash
+
+                    store_entry_pdf_hash(conn_u, eid)
+                except Exception:  # noqa: BLE001 - hashing is best-effort
+                    pass
                 conn_u.commit()
             finally:
                 conn_u.close()
@@ -670,8 +772,27 @@ async def bulk_download_studies(entry_ids: list[int]) -> dict[str, Any]:
             total_indexed += await index_pdf(eid, pdf_path_for(eid))
         else:
             failed.append({"id": eid, "title": entry["title"][:80]})
+            if challenged:
+                from app.fulltext import browser_fallback_urls
 
-    return {"downloaded": downloaded, "failed": failed, "indexed_chunks": total_indexed}
+                primary, alt = browser_fallback_urls(entry)
+                browser_fallback.append({
+                    "id": eid,
+                    "title": entry["title"][:120],
+                    "browser_download_url": challenged.get("browser_download_url") or primary,
+                    "browser_download_url_alt": challenged.get("browser_download_url_alt") or alt,
+                    "manual_upload_needed": True,
+                    "upload_endpoint": f"/api/entries/{eid}/pdf",
+                })
+
+    return {
+        "downloaded": downloaded,
+        "failed": failed,
+        "text_only": text_only,
+        "browser_fallback": browser_fallback,
+        "manual_upload_needed": len(browser_fallback),
+        "indexed_chunks": total_indexed,
+    }
 
 
 def bulk_delete_studies(entry_ids: list[int]) -> dict[str, int]:

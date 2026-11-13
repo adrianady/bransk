@@ -8,6 +8,7 @@ callers keep their own mock *content* and branch on LLM_PROVIDER where needed.
 """
 import logging
 import asyncio
+import base64
 import os
 import time
 from pathlib import Path
@@ -27,6 +28,18 @@ class LLMProviderError(RuntimeError):
         self.public_message = public_message
 
 
+class VisionUnsupportedError(Exception):
+    """The chosen model cannot take image input (HTTP 400 mentioning images).
+
+    Raised instead of a raw provider 400 so routers can translate it into an
+    actionable message. Carries `public_message` like LLMProviderError.
+    """
+
+    def __init__(self, public_message: str):
+        super().__init__(public_message)
+        self.public_message = public_message
+
+
 _env_path = Path(__file__).parent.parent / ".env"
 if _env_path.exists():
     load_dotenv(_env_path)
@@ -40,6 +53,14 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_API_URL = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions")
 
 SETTING_MODEL = "deepseek_model"
+
+# NVIDIA's NIM catalogue is OpenAI-compatible but its endpoint is not a plain
+# constant: the key lives in .env now and may move to app_settings later, and
+# NVIDIA_BASE_URL lets a private/proxied endpoint replace the public one.
+# The default model is the one measured to actually work (vision + text); the
+# retired meta/llama-3.1-8b-instruct now answers HTTP 410 and must not be used.
+NVIDIA_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+NVIDIA_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 
 # Two distinct services behind opencode.ai: Console (pay-as-you-go) and Go
 # (subscription). Same Bearer protocol, separate endpoint, key and model.
@@ -468,10 +489,12 @@ async def model_catalogue(for_provider: str | None = None) -> dict:
         return {"models": [], "active": current, "provider": provider, "from_provider": False,
                 "note": f"Fără {_OPENAI_COMPATIBLE.get(provider, {}).get('key_env', 'DEEPSEEK_API_KEY')} nu pot citi lista de modele."}
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(_provider_url(provider, models=True), headers=_provider_headers(provider))
-            resp.raise_for_status()
-            raw = resp.json().get("data", [])
+        resp = await _request_openai(
+            "GET", _provider_url(provider, models=True),
+            headers=_provider_headers(provider), timeout=15.0,
+        )
+        resp.raise_for_status()
+        raw = resp.json().get("data", [])
     except Exception as exc:  # noqa: BLE001 - network errors are heterogeneous here
         logger.info("Model catalogue unavailable (%s)", type(exc).__name__)
         return {"models": [], "active": current, "provider": provider, "from_provider": False,
@@ -578,6 +601,16 @@ _OPENAI_COMPATIBLE = {
         "key_env": "TOGETHER_API_KEY",
         "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     },
+    # Base URL and key are resolved at call time in _provider_url()/provider_key()
+    # so NVIDIA_BASE_URL (env) and the llm_nvidia app_settings row both work; the
+    # values here are only the documented defaults.
+    "nvidia": {
+        "label": "NVIDIA",
+        "base_url": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "models_url": "https://integrate.api.nvidia.com/v1/models",
+        "key_env": "NVIDIA_API_KEY",
+        "default_model": NVIDIA_DEFAULT_MODEL,
+    },
 }
 
 # Recommendation for OpenRouter: their terms ask for an identifying referer.
@@ -592,6 +625,10 @@ SETTING_PROVIDER = "llm_provider"
 # stored in app_settings, not .env: .env is for secrets a restart may reload,
 # this is a setting the app must be able to change without one.
 SETTING_CUSTOM = "llm_custom_provider"
+
+# NVIDIA ships with a real key already in .env, but the screen must be able to
+# save/replace it later: same JSON shape as llm_custom_provider, env as fallback.
+SETTING_NVIDIA = "llm_nvidia"
 
 
 def _setting(key: str, default: str = "") -> str:
@@ -666,10 +703,39 @@ def _custom_chat_url(base_url: str) -> str:
     return base_url if base_url.endswith("/chat/completions") else base_url.rstrip("/") + "/chat/completions"
 
 
+def nvidia_config() -> dict:
+    """The NVIDIA settings saved from the screen, or {} when only .env is set."""
+    import json
+
+    raw = _setting(SETTING_NVIDIA)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _nvidia_key() -> str:
+    """Saved key first, then NVIDIA_API_KEY from the environment/.env."""
+    saved = str(nvidia_config().get("api_key") or "").strip()
+    return saved or os.getenv("NVIDIA_API_KEY", "").strip()
+
+
+def _nvidia_base_url() -> str:
+    """NVIDIA_BASE_URL wins over the built-in endpoint (proxy/private NIM)."""
+    saved = str(nvidia_config().get("base_url") or "").strip()
+    return (saved or os.getenv("NVIDIA_BASE_URL", "").strip()
+            or NVIDIA_DEFAULT_BASE_URL).rstrip("/")
+
+
 def provider_key(provider: str) -> str:
     """The API key for a provider, read at call time (tests and .env edits)."""
     if provider == "deepseek":
         return os.getenv("DEEPSEEK_API_KEY", "") or DEEPSEEK_API_KEY
+    if provider == "nvidia":
+        return _nvidia_key()
     if provider == "custom":
         data = custom_provider()
         return (data or {}).get("api_key", "")
@@ -782,6 +848,11 @@ def provider_order() -> list[str]:
     order = ["deepseek"]
     if custom_provider():
         order.append("custom")
+    # NVIDIA is a cloud reserve like the providers named in LLM_PROVIDERS: it
+    # joins the failover chain only when its key exists, and it never displaces
+    # DeepSeek (which stays first) or a custom endpoint.
+    if provider_key("nvidia"):
+        order.append("nvidia")
     return order
 
 
@@ -851,8 +922,121 @@ def _provider_url(provider: str, *, models: bool = False) -> str:
                 else chat_url(service=service))
     if provider == "deepseek":
         return DEEPSEEK_API_URL.replace("/chat/completions", "/models") if models else DEEPSEEK_API_URL
+    if provider == "nvidia":
+        base = _nvidia_base_url()
+        if base.endswith("/chat/completions"):
+            return base[: -len("/chat/completions")] + "/models" if models else base
+        return f"{base}/models" if models else f"{base}/chat/completions"
     spec = _OPENAI_COMPATIBLE.get(provider, {})
     return spec.get("models_url" if models else "base_url", "")
+
+
+# ── OpenAI-compatible transport, response parsing, provider errors ───────────
+# IPv4 is mandatory on this machine: NVIDIA resolves to AAAA first, never
+# answers over IPv6, and httpx reports http=000 after ~9.8 s. anyio resolves the
+# target with the same address family as local_address, so binding the source
+# socket to 0.0.0.0 (AF_INET) makes the connection use A records only. The
+# request is still retried once on a connection error that produced no
+# response, and the retry is logged, because a lost first connection on a
+# dual-stack host must not look like a provider outage.
+OPENAI_IPV4_LOCAL_ADDRESS = "0.0.0.0"
+
+# Appended when the provider truncated the answer (finish_reason=length).
+# Without a marker a half page looks like a complete one.
+TRUNCATION_NOTE = (
+    "\n\n[Notă: răspunsul este trunchiat — modelul a atins limita de tokeni "
+    "(finish_reason=length), deci textul de mai sus este incomplet.]"
+)
+
+
+def _openai_transport() -> httpx.AsyncHTTPTransport:
+    """HTTP transport pinned to IPv4 (see OPENAI_IPV4_LOCAL_ADDRESS)."""
+    return httpx.AsyncHTTPTransport(retries=0, local_address=OPENAI_IPV4_LOCAL_ADDRESS)
+
+
+async def _request_openai(method: str, url: str, *, headers: dict | None = None,
+                          json: dict | None = None, timeout: float = 120.0) -> httpx.Response:
+    """One provider request over IPv4, retried once when the connection dies.
+
+    The retry only happens for a connection error (no HTTP response at all):
+    a 4xx/5xx is a provider answer and is returned to the caller unchanged.
+    """
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        transport=_openai_transport(),
+        follow_redirects=False,
+    ) as client:
+        try:
+            return await client.request(method, url, headers=headers, json=json)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            logger.warning(
+                "Conexiune %s eșuată către %s (%s); reîncerc o dată pe IPv4.",
+                method.upper(), url, type(exc).__name__,
+            )
+            return await client.request(method, url, headers=headers, json=json)
+
+
+def raise_if_model_retired(resp: httpx.Response, provider: str, model_id: str) -> None:
+    """HTTP 410 means the provider retired the model: say that, in Romanian.
+
+    A generic "providerul nu a răspuns" hides the one action that fixes it
+    (choose another model), so this is raised as a public error and the
+    failover chain stops instead of masking it behind the next provider.
+    """
+    if resp.status_code != 410:
+        return
+    message = (
+        f"Modelul {model_id} nu mai este disponibil la {provider}: a fost retras "
+        "(retired, HTTP 410). Alege un alt model din lista providerului."
+    )
+    err = LLMProviderError(message)
+    err.no_fallback = True  # type: ignore[attr-defined]
+    raise err
+
+
+def _openai_message_text(data: dict, provider: str, model_id: str,
+                         purpose: str = "complete") -> tuple[str, dict, str]:
+    """Extract (text, usage, finish_reason) from an OpenAI-compatible reply.
+
+    Reasoning models such as nvidia/nemotron-3.5-super-vl-120b-a12b can return
+    `content: null` with the answer in `reasoning_content`: with max_tokens 1200
+    the measured reply carried ~4.6k chars of reasoning and no content, while
+    4096 produced 2291 chars of correct content. When content is empty the
+    reasoning text is returned as the answer (no marker prefix) and a warning is
+    logged, so the caller knows the model only produced reasoning. Nothing is
+    invented: both empty yields "".
+    """
+    choices = data.get("choices") if isinstance(data, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    if not isinstance(choice, dict):
+        choice = {}
+    msg = choice.get("message") or {}
+    if not isinstance(msg, dict):
+        msg = {}
+
+    content = msg.get("content")
+    if isinstance(content, list):
+        content = "\n".join(_extract_text_parts(content))
+    text = str(content).strip() if content else ""
+
+    if not text:
+        reasoning = msg.get("reasoning_content")
+        if reasoning:
+            logger.warning(
+                "Providerul %s a returnat doar reasoning_content pentru modelul %s (%s); "
+                "folosesc raționamentul ca text.", provider, model_id, purpose,
+            )
+            text = str(reasoning).strip()
+
+    finish = str(choice.get("finish_reason") or "")
+    if finish == "length":
+        logger.warning("Răspuns trunchiat: providerul %s, modelul %s (%s), finish_reason=length",
+                       provider, model_id, purpose)
+        if text:
+            text = text + TRUNCATION_NOTE
+
+    usage = data.get("usage") if isinstance(data, dict) else None
+    return text, (usage if isinstance(usage, dict) else {}), finish
 
 
 async def _call_openai_compatible(provider: str, messages: list, temperature: float,
@@ -880,18 +1064,24 @@ async def _call_openai_compatible(provider: str, messages: list, temperature: fl
         url, headers = request_details(service=service)
     else:
         url, headers = _provider_url(provider), _provider_headers(provider)
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
-        resp = await client.post(url, headers=headers, json=body)
-        if service:
-            from app.opencode_console_provider import validate_response
+    if service:
+        # OpenCode Console/Go has its own transport contract (tests assert it
+        # directly) and is not the cloud NVIDIA-style endpoint: keep the plain
+        # client there, use the IPv4-pinned one everywhere else.
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
+            resp = await client.post(url, headers=headers, json=body)
+    else:
+        resp = await _request_openai("POST", url, headers=headers, json=body)
+    if service:
+        from app.opencode_console_provider import validate_response
 
-            validate_response(resp, model_id=model_id, service=service)
-        else:
-            resp.raise_for_status()
-        data = resp.json()
-        msg = data.get("choices", [{}])[0].get("message", {}) if isinstance(data, dict) else {}
-        content = msg.get("content") or msg.get("reasoning_content") or ""
-        return str(content or ""), data.get("usage") or {}
+        validate_response(resp, model_id=model_id, service=service)
+    else:
+        raise_if_model_retired(resp, provider, model_id)
+        resp.raise_for_status()
+    data = resp.json()
+    text, usage, _finish = _openai_message_text(data, provider, model_id)
+    return text, usage
 
 
 async def _stream_openai_compatible(provider: str, messages: list, temperature: float, max_tokens: int):
@@ -911,25 +1101,33 @@ async def _stream_openai_compatible(provider: str, messages: list, temperature: 
         url, headers = request_details(service=service)
     else:
         url, headers = _provider_url(provider), _provider_headers(provider)
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
-        async with client.stream(
-            "POST",
-            url,
-            headers=headers,
-            json={
-                "model": model_id,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "stream": True,
-            },
-        ) as resp:
-            if service:
+    request_body = {
+        "model": model_id,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    if service:
+        # Console/Go keeps its own client contract; the IPv4-pinned transport is
+        # for the cloud OpenAI-compatible endpoints (NVIDIA et al.).
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
+            async with client.stream("POST", url, headers=headers, json=request_body) as resp:
                 from app.opencode_console_provider import validate_response
 
                 validate_response(resp, model_id=model_id, service=service)
-            else:
-                resp.raise_for_status()
+                async for chunk in _iter_sse_content(resp):
+                    yield chunk
+        return
+
+    async with httpx.AsyncClient(
+        timeout=120.0,
+        transport=_openai_transport(),
+        follow_redirects=False,
+    ) as client:
+        async with client.stream("POST", url, headers=headers, json=request_body) as resp:
+            raise_if_model_retired(resp, provider, model_id)
+            resp.raise_for_status()
             async for chunk in _iter_sse_content(resp):
                 yield chunk
 
@@ -1037,3 +1235,395 @@ async def _iter_sse_content(resp: httpx.Response):
             continue
         if delta:
             yield delta
+
+
+# ── Vision (image input, per model not per provider) ─────────────────────────
+# llm.py was text-only: no code path sent an image. D0 requires image input to
+# work for ANY selectable provider whose chosen model exposes image input, and
+# a text-only model must fail with a clear message instead of a raw 400.
+#
+# Design notes:
+# - Capability is detected per model via model_catalogue()'s `input_modalities`
+#   (the hook D0 names); there is no hardcoded model allowlist anywhere below.
+# - Ollama uses its native /api/chat `messages[].images` shape (base64 list, no
+#   data: prefix); every other chat provider speaks the OpenAI-compatible
+#   `image_url` data-URL shape. Branching mirrors _call_provider's own
+#   Ollama-vs-rest split instead of duplicating the provider registry.
+# - Vision calls reuse _with_retry and log_ai_event (endpoint "vision") exactly
+#   like complete(); complete()/stream_complete() are untouched.
+
+_vision_support_cache: dict = {}
+
+
+def _body_mentions_vision(body: str) -> bool:
+    s = (body or "").lower()
+    return ("image" in s or "vision" in s or "modalit" in s or "multimodal" in s)
+
+
+def _vision_error_text(provider: str, model_id: str, detail: str = "") -> str:
+    base = (
+        f"Modelul {model_id} al providerului {provider} nu acceptă imagini. "
+        "Alege un model cu suport pentru imagini (modalitate de intrare 'image') "
+        "sau un alt provider."
+    )
+    if detail:
+        return base + f" Detaliu provider: {detail[:200]}"
+    return base
+
+
+def _maybe_vision_error(exc: Exception, provider: str, model_id: str) -> VisionUnsupportedError | None:
+    """Return a VisionUnsupportedError when `exc` is a vision 400, else None."""
+    body = ""
+    status: int | None = None
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        try:
+            status = exc.response.status_code
+        except Exception:  # noqa: BLE001 - defensive: status must never break mapping
+            status = None
+        try:
+            body = exc.response.text or ""
+        except Exception:  # noqa: BLE001 - a body read failure is not a vision signal
+            body = ""
+        if status == 400 and _body_mentions_vision(body):
+            return VisionUnsupportedError(_vision_error_text(provider, model_id, body.strip()))
+        return None
+    # OpenCode Console/Go surface errors as OpenCodeConsoleError (no status on
+    # the exception); only translate messages that actually talk about images.
+    name = type(exc).__name__
+    if name in ("OpenCodeConsoleError", "OpenCodeError") and _body_mentions_vision(str(exc)):
+        return VisionUnsupportedError(_vision_error_text(provider, model_id, str(exc).strip()))
+    return None
+
+
+def _extract_text_parts(content) -> list[str]:
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [content] if content else []
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+                parts.append(str(part.get("text")))
+            elif isinstance(part, str) and part:
+                parts.append(part)
+        return parts
+    text = str(content)
+    return [text] if text else []
+
+
+def _encode_images(images: list[dict]) -> list[tuple[str, str]]:
+    encoded: list[tuple[str, str]] = []
+    for item in images or []:
+        if not isinstance(item, dict):
+            continue
+        data = item.get("data")
+        mime = str(item.get("mime") or "image/png")
+        if isinstance(data, (bytearray, memoryview)):
+            data = bytes(data)
+        if not isinstance(data, bytes) or not data:
+            continue
+        encoded.append((mime, base64.b64encode(data).decode("ascii")))
+    return encoded
+
+
+def _split_vision_history(messages: list) -> tuple[list, list[str], list]:
+    """Split into (before, text_parts, after) around the last user message."""
+    items = list(messages or [])
+    last_user = -1
+    for i, msg in enumerate(items):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            last_user = i
+    if last_user < 0:
+        return items, [], []
+    text_parts = _extract_text_parts(items[last_user].get("content"))
+    return items[:last_user], text_parts, items[last_user + 1:]
+
+
+def _build_openai_vision_messages(messages: list, encoded: list[tuple[str, str]]) -> list:
+    before, text_parts, after = _split_vision_history(messages)
+    content: list[dict] = [{"type": "text", "text": t} for t in text_parts if t]
+    for mime, b64 in encoded:
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    return [*before, {"role": "user", "content": content}, *after]
+
+
+def _ollama_text_message(msg) -> dict:
+    if not isinstance(msg, dict):
+        return {"role": "user", "content": str(msg)}
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        content = "\n\n".join(_extract_text_parts(content))
+    return {"role": msg.get("role") or "user", "content": str(content or "")}
+
+
+def _build_ollama_vision_messages(messages: list, encoded: list[tuple[str, str]]) -> list:
+    before, text_parts, after = _split_vision_history(messages)
+    text = "\n\n".join(t for t in text_parts if t)
+    converted = [_ollama_text_message(m) for m in [*before, *after]]
+    # Keep history order: messages before stay before, trailing ones stay after.
+    head = [_ollama_text_message(m) for m in before]
+    tail = [_ollama_text_message(m) for m in after]
+    _ = converted  # history is head + tail; kept explicit for readability
+    return [*head, {"role": "user", "content": text, "images": [b64 for _, b64 in encoded]}, *tail]
+
+
+async def _call_openai_compatible_vision(provider: str, messages: list, temperature: float,
+                                         json_mode: bool, max_tokens: int,
+                                         model_override: str | None = None) -> tuple[str, dict]:
+    model_id = (model_override or "").strip() or provider_model(provider)
+    service = ""
+    if provider in OPENCODE_DIRECT_PROVIDERS:
+        from app.opencode_console_provider import OpenCodeConsoleError, free_model_message, is_free_tier_model
+
+        service = _console_service(provider)
+        if service == "zen" and is_free_tier_model(model_id):
+            raise OpenCodeConsoleError(free_model_message(model_id), no_fallback=True)
+    # NVIDIA's vision models are reasoning models: measured on
+    # nvidia/nemotron-3.5-super-vl-120b-a12b, a dense page returned
+    # content=null and ~4.6k chars of reasoning_content with max_tokens=1200,
+    # but finish_reason=stop and 2291 chars of correct content with 4096.
+    # A caller that forgot to set a budget therefore gets 4096 here instead of
+    # an empty page.
+    if provider == "nvidia" and not max_tokens:
+        max_tokens = 4096
+    body = {
+        "model": model_id,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    if service:
+        from app.opencode_console_provider import request_details
+
+        url, headers = request_details(service=service)
+    else:
+        url, headers = _provider_url(provider), _provider_headers(provider)
+    if service:
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
+            resp = await client.post(url, headers=headers, json=body)
+    else:
+        resp = await _request_openai("POST", url, headers=headers, json=body)
+    if service:
+        from app.opencode_console_provider import validate_response
+
+        validate_response(resp, model_id=model_id, service=service)
+    else:
+        raise_if_model_retired(resp, provider, model_id)
+        resp.raise_for_status()
+    data = resp.json()
+    text, usage, _finish = _openai_message_text(data, provider, model_id, purpose="vision")
+    return text, usage
+
+
+async def _call_deepseek_vision(messages: list, temperature: float, json_mode: bool,
+                                max_tokens: int, model_override: str | None = None) -> tuple[str, dict]:
+    body = {
+        "model": (model_override or "").strip() or active_model(),
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(
+            DEEPSEEK_API_URL,
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+            json=body,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        msg = data.get("choices", [{}])[0].get("message", {}) if isinstance(data, dict) else {}
+        content = msg.get("content") or msg.get("reasoning_content") or ""
+        return str(content or ""), data.get("usage") or {}
+
+
+async def _call_ollama_vision(messages: list, temperature: float, max_tokens: int,
+                              json_mode: bool = False,
+                              model_override: str | None = None) -> tuple[str, dict]:
+    model_id = (model_override or "").strip() or provider_model("ollama")
+    body: dict = {
+        "model": model_id,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
+    if max_tokens is not None:
+        body["options"]["num_predict"] = max_tokens
+    if json_mode:
+        body["format"] = "json"
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(f"{OLLAMA_BASE_URL}/api/chat", json=body)
+        resp.raise_for_status()
+        data = resp.json()
+        msg = data.get("message", {}) if isinstance(data, dict) else {}
+        content = msg.get("content", "") if isinstance(msg, dict) else ""
+        return str(content or ""), data if isinstance(data, dict) else {}
+
+
+async def _call_vision_provider(provider: str, openai_messages: list, ollama_messages: list,
+                                temperature: float, json_mode: bool, max_tokens: int,
+                                model_override: str | None = None) -> tuple[str, dict]:
+    if provider == "mock":
+        return "[mock]", {}
+    if provider == "ollama":
+        return await _call_ollama_vision(ollama_messages, temperature, max_tokens, json_mode, model_override)
+    if provider == "deepseek":
+        return await _call_deepseek_vision(openai_messages, temperature, json_mode, max_tokens, model_override)
+    if provider == "opencode":
+        raise VisionUnsupportedError(
+            _vision_error_text(provider, (model_override or "").strip() or provider_model(provider),
+                               "providerul OpenCode nativ nu expune intrare de imagine")
+        )
+    return await _call_openai_compatible_vision(provider, openai_messages, temperature,
+                                                json_mode, max_tokens, model_override)
+
+
+async def complete_with_images(
+    messages: list,
+    images: list[dict],
+    *,
+    temperature: float = 0.0,
+    json_mode: bool = False,
+    max_tokens: int | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> tuple[str, str, str]:
+    """Single vision completion. Returns (provider, model, text) like complete().
+
+    `images` is a list of {"data": bytes, "mime": "image/png"}. Images travel
+    only in one user message (built from the last user message's text blocks
+    plus the image blocks); system messages stay text-only, as OpenAI-compatible
+    APIs reject images there. Ollama takes the native /api/chat `images` shape,
+    every other chat provider the OpenAI `image_url` data-URL shape.
+    """
+    t0 = time.monotonic()
+    chars = _prompt_chars(messages if isinstance(messages, list) else [])
+    effective_max_tokens = DEFAULT_MAX_OUTPUT if max_tokens is None else max_tokens
+    encoded = _encode_images(images)
+    openai_messages = _build_openai_vision_messages(messages if isinstance(messages, list) else [], encoded)
+    ollama_messages = _build_ollama_vision_messages(messages if isinstance(messages, list) else [], encoded)
+    model_override = (model or "").strip() or None
+
+    if LLM_PROVIDER == "mock" and (provider is None or (provider or "").strip().lower() == "mock"):
+        log_ai_event("mock", "mock-model", "vision", True,
+                     latency_ms=int((time.monotonic() - t0) * 1000),
+                     prompt_chars=chars, reply_chars=6)
+        return ("mock", "mock-model", "[mock]")
+    if (provider or "").strip().lower() == "mock":
+        log_ai_event("mock", "mock-model", "vision", True,
+                     latency_ms=int((time.monotonic() - t0) * 1000),
+                     prompt_chars=chars, reply_chars=6)
+        return ("mock", "mock-model", "[mock]")
+
+    candidates = [(provider or "").strip().lower()] if (provider or "").strip() else _candidate_chain()
+    errors: list[str] = []
+    public_error: str | None = None
+    vision_error: VisionUnsupportedError | None = None
+    for candidate in candidates:
+        model_used = model_override or _model_for(candidate)
+        if candidate not in ("ollama", "mock") and not _provider_is_configured(candidate):
+            log_ai_event(candidate, model_used, "vision", False, error="no_api_key",
+                         latency_ms=0, prompt_chars=chars)
+            errors.append(f"{candidate}: no_api_key")
+            continue
+        try:
+            text, usage = await _with_retry(
+                lambda c=candidate: _call_vision_provider(
+                    c, openai_messages, ollama_messages, temperature, json_mode,
+                    effective_max_tokens, model_override)
+            )
+            pt, ct = _usage_tokens(usage)
+            log_ai_event(candidate, model_used, "vision", True,
+                         latency_ms=int((time.monotonic() - t0) * 1000),
+                         prompt_chars=chars, reply_chars=len(text or ""),
+                         prompt_tokens=pt, completion_tokens=ct)
+            return (candidate, model_used, text)
+        except VisionUnsupportedError as exc:
+            vision_error = vision_error or exc
+            if isinstance(getattr(exc, "public_message", None), str):
+                public_error = exc.public_message
+            log_ai_event(candidate, model_used, "vision", False, error=str(exc),
+                         latency_ms=int((time.monotonic() - t0) * 1000), prompt_chars=chars)
+            errors.append(f"{candidate}: VisionUnsupportedError")
+            logger.info("Vision unsupported by %s (%s), trying the next one", candidate, exc)
+        except Exception as exc:  # noqa: BLE001 - each provider may fail differently
+            wrapped = _maybe_vision_error(exc, candidate, model_used)
+            if wrapped is not None:
+                vision_error = vision_error or wrapped
+                public_error = wrapped.public_message
+                log_ai_event(candidate, model_used, "vision", False, error=str(wrapped),
+                             latency_ms=int((time.monotonic() - t0) * 1000), prompt_chars=chars)
+                errors.append(f"{candidate}: VisionUnsupportedError")
+                logger.info("Vision unsupported by %s (%s), trying the next one", candidate, exc)
+                continue
+            if isinstance(getattr(exc, "public_message", None), str):
+                public_error = exc.public_message
+            log_ai_event(candidate, model_used, "vision", False, error=str(exc),
+                         latency_ms=int((time.monotonic() - t0) * 1000), prompt_chars=chars)
+            errors.append(f"{candidate}: {type(exc).__name__}")
+            if getattr(exc, "no_fallback", False):
+                raise LLMProviderError(public_error or str(exc)) from exc
+            logger.info("Vision provider %s unavailable (%s), trying the next one", candidate, exc)
+    if vision_error is not None:
+        raise vision_error
+    logger.error("All vision providers failed: %s", "; ".join(errors))
+    if public_error:
+        raise LLMProviderError(public_error)
+    raise RuntimeError("No LLM provider answered (" + "; ".join(errors) + ")")
+
+
+async def _probe_vision_support(provider_name: str, model_id: str) -> bool | None:
+    try:
+        catalogue = await model_catalogue(for_provider=(provider_name or "").strip().lower() or None)
+    except Exception:  # noqa: BLE001 - an unreachable provider is "unknown", not False
+        return None
+    if not isinstance(catalogue, dict):
+        return None
+    models = catalogue.get("models") or []
+    if not models:
+        return None
+    target = (model_id or "").strip()
+    if not target:
+        return None
+    info = None
+    for entry in models:
+        if isinstance(entry, dict) and str(entry.get("id")) == target:
+            info = entry
+            break
+    if info is None:
+        return None
+    modalities = info.get("input_modalities")
+    if not isinstance(modalities, (list, tuple)) or not modalities:
+        return None
+    for modality in modalities:
+        normalized = str(modality or "").strip().lower()
+        if not normalized:
+            continue
+        if normalized in ("image", "vision") or "image" in normalized or "vision" in normalized:
+            return True
+    return False
+
+
+async def model_supports_images(provider_name: str, model_id: str) -> bool | None:
+    """Per-model image-input capability: True/False, None when unknown.
+
+    True/False only when the provider's catalogue reports `input_modalities`
+    for that model (case-insensitive membership of image/vision). None when the
+    provider is unreachable, the model is unlisted, or the catalogue entry
+    carries no modality information. Results are cached like the catalogue TTL
+    cache; there is no hardcoded model allowlist.
+    """
+    key = ((provider_name or "").strip().lower(), (model_id or "").strip())
+    now = time.monotonic()
+    cached = _vision_support_cache.get(key)
+    if cached is not None and now - cached[0] < _CATALOGUE_TTL:
+        return cached[1]
+    result = await _probe_vision_support(provider_name, model_id)
+    _vision_support_cache[key] = (now, result)
+    return result

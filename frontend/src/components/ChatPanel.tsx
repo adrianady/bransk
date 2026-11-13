@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect, memo } from 'react'
-import { X, Trash2, Square, Loader2 } from 'lucide-react'
+import { useState, useRef, useEffect, memo, useCallback } from 'react'
+import { X, Trash2, Square, Loader2, Zap, BookOpen } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
 import { useToast } from './Toast'
-import type { ProviderHealth, ChatAction } from '../lib/types'
-
+import { StudyPdfModal } from './StudyPdfModal'
+import type { ProviderHealth, ChatAction, ChatTask, Entry } from '../lib/types'
 interface Props {
   onClose: () => void
 }
@@ -34,6 +34,12 @@ const ACTION_LABELS: Record<string, string> = {
   reminder_deleted: 'Reamintire ștearsă',
   pdf_indexed: 'PDF de studiu indexat',
   data_reanalyzed: 'Verificare de integritate reluată',
+  study_pdf_downloaded: 'PDF descărcat',
+  studies_results: 'Studii găsite',
+  screening_decision_recorded: 'Decizie PRISMA salvată',
+  task_started: 'Task activ pornit',
+  task_updated: 'Progres task',
+  task_completed: 'Task finalizat',
 }
 
 interface Message {
@@ -41,19 +47,28 @@ interface Message {
   content: string
   provider?: string
   model?: string
+  action?: ChatAction
 }
 
-const friendlyError = (err: any): string => {
-  const raw = err?.detail ?? err?.message ?? err
-  if (typeof raw === 'string') return raw
-  // FastAPI validation errors arrive as a list of { type, loc, msg, input }.
-  if (Array.isArray(raw)) {
-    const msgs = raw
-      .map((d: any) => (typeof d === 'string' ? d : d?.msg))
-      .filter(Boolean)
-    if (msgs.length > 0) return msgs.join('; ')
+const friendlyError = (err: unknown): string => {
+  if (!err) return ''
+  if (typeof err === 'string') return err
+  if (typeof err === 'object') {
+    const raw = ('detail' in err && err.detail) || ('message' in err && err.message)
+    if (typeof raw === 'string') return raw
+    if (Array.isArray(raw)) {
+      const msgs = raw
+        .map((d: unknown) => {
+          if (typeof d === 'string') return d
+          if (d && typeof d === 'object' && 'msg' in d && typeof d.msg === 'string') return d.msg
+          return ''
+        })
+        .filter(Boolean)
+      if (msgs.length > 0) return msgs.join('; ')
+    }
+    try { return JSON.stringify(raw || err) } catch { return String(err) }
   }
-  try { return JSON.stringify(raw) } catch { return String(raw) }
+  return String(err)
 }
 
 // Long AI replies (e.g. research pipeline plans) must not blow past the
@@ -94,6 +109,7 @@ export const stripActionTags = (text: string): string =>
     .split('\n')
     .filter(line => !/^\s*\[[A-Z][A-Z0-9_]*\s*:[^\]]*\]\s*$/.test(line))
     .join('\n')
+    .replace(/\[[A-Z][A-Z0-9_]{2,}\s*:[^\]]*\]/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 
@@ -105,15 +121,19 @@ const MessageBubble = memo(function MessageBubble({
   content,
   provider,
   model,
+  action,
+  onOpenStudyPdf,
 }: {
   role: 'user' | 'assistant'
   content: string
   provider?: string
   model?: string
+  action?: ChatAction
+  onOpenStudyPdf?: (entryId: number) => void
 }) {
   const shown = role === 'assistant' ? stripActionTags(content) : content
   // A reply that was nothing but protocol tags has no prose to show.
-  if (!shown) return null
+  if (!shown && !action) return null
   return (
     <div className={`flex ${role === 'user' ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-[88%] rounded-2xl px-4 py-2.5 text-sm ${
@@ -128,9 +148,22 @@ const MessageBubble = memo(function MessageBubble({
             {model && <span className="text-[10px] text-gray-400">· {model.split(':')[0]}</span>}
           </div>
         )}
-        <div className={`prose prose-sm max-w-none ${role === 'user' ? 'prose-invert' : 'dark:prose-invert'} prose-headings:text-sm prose-headings:font-semibold prose-a:text-chrono-600`}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{shown}</ReactMarkdown>
-        </div>
+        {shown && (
+          <div className={`prose prose-sm max-w-none ${role === 'user' ? 'prose-invert' : 'dark:prose-invert'} prose-headings:text-sm prose-headings:font-semibold prose-a:text-chrono-600`}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{shown}</ReactMarkdown>
+          </div>
+        )}
+        {action?.type === 'study_pdf_downloaded' && action.entry_id && (
+          <div className="mt-2.5 pt-2 border-t border-gray-100 dark:border-gray-700/60 flex items-center gap-2">
+            <button
+              onClick={() => onOpenStudyPdf?.(action.entry_id)}
+              className="btn-primary text-xs px-2.5 py-1 flex items-center gap-1.5"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              Deschide PDF-ul
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -147,6 +180,10 @@ export function ChatPanel({ onClose }: Props) {
   const [health, setHealth] = useState<ProviderHealth | null>(null)
   const [researching, setResearching] = useState(false)
   const [pendingConfirm, setPendingConfirm] = useState<{ confirm_id: string; message: string } | null>(null)
+  const [activeTask, setActiveTask] = useState<ChatTask | null>(null)
+  const [cancellingTask, setCancellingTask] = useState(false)
+  const [progressMessage, setProgressMessage] = useState<string | null>(null)
+  const [pdfModalStudy, setPdfModalStudy] = useState<Entry | null>(null)
   // Question whose stream died mid-answer; shown as a one-click resend.
   const [retryText, setRetryText] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -191,6 +228,41 @@ export function ChatPanel({ onClose }: Props) {
     return () => clearInterval(interval)
   }, [])
 
+  const refreshActiveTask = useCallback(() => {
+    api.chat.getTask().then(res => {
+      setActiveTask(res?.task && res.task.status === 'active' ? res.task : null)
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    refreshActiveTask()
+    const taskInterval = setInterval(refreshActiveTask, 8000)
+    return () => clearInterval(taskInterval)
+  }, [refreshActiveTask])
+
+  const handleCancelTask = async () => {
+    setCancellingTask(true)
+    try {
+      await api.chat.cancelTask()
+      setActiveTask(null)
+      toast.info('Taskul activ a fost anulat')
+      setMessages(prev => [...prev, { role: 'assistant', content: '🛑 Taskul activ a fost anulat.' }])
+    } catch (err: any) {
+      toast.error('Anularea a eșuat: ' + (err?.message || 'eroare necunoscută'))
+    } finally {
+      setCancellingTask(false)
+    }
+  }
+
+  const handleOpenStudyPdf = async (entryId: number) => {
+    try {
+      const entry = await api.entries.get(entryId)
+      setPdfModalStudy(entry)
+    } catch (err: any) {
+      toast.error('Nu am putut deschide PDF-ul studiului: ' + (err?.message || 'eroare'))
+    }
+  }
+
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, streamingContent])
   useEffect(() => { inputRef.current?.focus() }, [])
 
@@ -216,9 +288,9 @@ export function ChatPanel({ onClose }: Props) {
     setInput('')
     setLoading(true)
     setStreamingContent('')
+    setProgressMessage(null)
     fullContentRef.current = ''
     setProvider(null)
-
     try {
       const history = messages
         .slice(-MAX_HISTORY_MESSAGES)
@@ -278,21 +350,43 @@ export function ChatPanel({ onClose }: Props) {
                 currentModel = parsed.model
                 setProvider(currentProvider)
                 setModel(currentModel)
-              } else if (parsed.type === 'progress' && parsed.phase === 'research') {
-                setResearching(true)
+              } else if (parsed.type === 'progress') {
+                if (parsed.phase === 'research') {
+                  setResearching(true)
+                }
+                const phaseLabels: Record<string, string> = {
+                  search: 'Căutare studii',
+                  download: 'Descărcare PDF',
+                  protocol: 'Protocol cercetare',
+                  dive: 'Analiză dovezi',
+                  synthesis: 'Sinteză academică',
+                  save: 'Salvare date',
+                  pdf: 'Indexare PDF',
+                  maintenance: 'Verificare integritate',
+                }
+                const phaseStr = typeof parsed.phase === 'string' ? parsed.phase : ''
+                const label = phaseStr && phaseLabels[phaseStr] ? phaseLabels[phaseStr] : ''
+                const rawMsg = typeof parsed.message === 'string' ? parsed.message : ''
+                const msg = rawMsg || (label ? `Fază: ${label}` : 'Se procesează...')
+                setProgressMessage(label && !msg.startsWith(label) ? `[${label}] ${msg}` : msg)
               } else if (parsed.type === 'research' && parsed.result) {
                 setResearching(false)
+                setProgressMessage(null)
                 const result = parsed.result
-                const studyLines = (result.studies || [])
-                  .map((s: any, i: number) => `${i + 1}. **${s.title}**${s.year ? ` (${s.year})` : ''} — ${s.study_type || 'studiu'} — calitate ${s.quality}/5`)
+                const studiesArr = Array.isArray(result.studies) ? result.studies : []
+                const studyLines = studiesArr
+                  .map((s: { title?: string; year?: number | null; study_type?: string; quality?: number }, i: number) =>
+                    `${i + 1}. **${s.title || 'Studiu'}**${s.year ? ` (${s.year})` : ''} — ${s.study_type || 'studiu'} — calitate ${s.quality ?? 3}/5`)
                   .join('\n')
+                const entriesCreated = Array.isArray(result.entries_created) ? result.entries_created : []
+                const theoriesArr = Array.isArray(result.theories) ? result.theories : []
                 const researchMsg =
-                  `📚 **Cercetare finalizată: "${result.topic}"**\n\n` +
+                  `📚 **Cercetare finalizată: "${result.topic || 'Temă'}"**\n\n` +
                   `${result.summary || ''}\n\n` +
-                  `**Studii salvate (${(result.studies || []).length}):**\n${studyLines}\n\n` +
+                  `**Studii salvate (${studiesArr.length}):**\n${studyLines}\n\n` +
                   (result.confidence ? `**Încredere:** ${result.confidence}\n\n` : '') +
-                  `✅ ${(result.entries_created || []).length} intrări create · ${result.relationships_created || 0} legături în graf` +
-                  ((result.theories || []).length ? ` · 🧬 ${result.theories.length} teorii în agregator` : '') +
+                  `✅ ${entriesCreated.length} intrări create · ${result.relationships_created || 0} legături în graf` +
+                  (theoriesArr.length ? ` · 🧬 ${theoriesArr.length} teorii în agregator` : '') +
                   `. Deschide vizualizarea **Studii** sau **Teorii** pentru a explora.`
                 setMessages(prev => [...prev, { role: 'assistant', content: researchMsg }])
               } else if (parsed.type === 'tool') {
@@ -315,103 +409,138 @@ export function ChatPanel({ onClose }: Props) {
 
       if (fullContent) {
         setMessages(prev => [...prev, { role: 'assistant', content: fullContent, provider: currentProvider, model: currentModel }])
-        // Show action results as assistant messages
-        for (const action of actions) {
-          let actionMsg = ''
-          if (action.type === 'entry_created') actionMsg = `📝 **Intrare salvată:** "${action.title}" (ID: ${action.id})`
-          else if (action.type === 'relationship_created') actionMsg = `🔗 **Legătură creată:** Intrarea ${action.from} → ${action.to} (${action.label})`
-          else if (action.type === 'todo_added') actionMsg = `✅ **Sarcină adăugată** la intrarea ${action.entry_id}`
-          else if (action.type === 'sr_scheduled') actionMsg = `🔄 **Adăugată în programul de recapitulare:** intrarea ${action.entry_id}`
-          else if (action.type === 'web_search_request') actionMsg = `🔍 **Interogare de cercetare:** "${action.query}"`
-          else if (action.type === 'research_request') actionMsg = `🔬 **Cercetare solicitată:** "${action.topic}"`
-          else if (action.type === 'entry_fetched' && action.entry) {
-            const e = action.entry
-            actionMsg = `📄 **Intrarea #${e.id}: ${e.title}** (${e.entry_date || 'fără dată'})\n\n${(e.content || 'Fără conținut').slice(0, 1500)}`
-          }
-          else if (action.type === 'entries_listed') {
-            const results = action.results || []
-            actionMsg = `🗂️ **Intrări${action.tag ? ` etichetate "${action.tag}"` : ''} (${results.length}):**\n` + (
-              results.length
-                ? results.map((r: any, i: number) => `${i + 1}. **${r.title}** (ID ${r.id}${r.entry_date ? `, ${r.entry_date}` : ''})`).join('\n')
-                : 'Nimic găsit.'
-            )
-          }
-          else if (action.type === 'relationships_listed') {
-            const results = action.results || []
-            actionMsg = `🔗 **Legături pentru intrarea #${action.entry_id} (${results.length}):**\n` + (
-              results.length
-                ? results.map((r: any) => `- #${r.from_id} --${r.label || 'related_to'}--> #${r.to_id}`).join('\n')
-                : 'Nicio legătură încă.'
-            )
-          }
-          else if (action.type === 'theories_listed') {
-            const results = action.results || []
-            actionMsg = `🧬 **Teorii${action.query ? ` care corespund "${action.query}"` : ''} (${results.length}):**\n` + (
-              results.length
-                ? results.map((r: any) => `- #${r.id} **${r.name}** [${r.status}] — pro ${r.pro_count} / contra ${r.contra_count}`).join('\n')
-                : 'Nimic găsit.'
-            )
-          }
-          else if (action.type === 'entry_appended') actionMsg = `✏️ **Intrarea #${action.entry_id} actualizată** (conținut adăugat)`
-          else if (action.type === 'entry_archived') actionMsg = `🗄️ **Intrarea #${action.entry_id} arhivată**`
-          else if (action.type === 'thought_created') actionMsg = `💭 **Gând creat:** "${action.name}"`
-          else if (action.type === 'tag_created') actionMsg = `🏷️ **Etichetă creată:** "${action.name}"`
-          else if (action.type === 'reminder_added') actionMsg = `⏰ **Reamintire setată** pentru intrarea #${action.entry_id}`
-          else if (action.type === 'theory_created') actionMsg = `🧬 **Teorie creată:** "${action.name}" (ID ${action.id})`
-          else if (action.type === 'study_linked') actionMsg = `🔗 **Dovadă legată:** intrarea #${action.entry_id} → teoria #${action.theory_id} (${action.stance})`
-          else if (action.type === 'web_results') {
-            const results = action.results || []
-            actionMsg = `🌐 **Rezultate web pentru "${action.query}" (${results.length}):**\n` + (
-              results.length
-                ? results.map((r: any, i: number) => `${i + 1}. [${r.title}](${r.url})${r.snippet ? ` — ${r.snippet.slice(0, 150)}` : ''}`).join('\n')
-                : 'Niciun rezultat (offline sau blocat).'
-            )
-          }
-          else if (action.type === 'documents_results') {
-            const results = action.results || []
-            actionMsg = `📄 **Potriviri PDF de studiu pentru "${action.query}" (${results.length}):**\n` + (
-              results.length
-                ? results.map((r: any, i: number) => `${i + 1}. **${r.entry_title}** — ${(r.content || '').slice(0, 220)}`).join('\n')
-                : 'Nicio potrivire PDF încă. Descarcă PDF-urile de studiu, apoi rulează Verificare → Integritatea datelor pentru a le indexa.'
-            )
-          }
-          else if (action.type === 'search_results') {
-            const results = action.results || []
-            actionMsg = `🔎 **Rezultate căutare pentru "${action.query}":**\n` + (
-              results.length
-                ? results.map((r: any, i: number) => `${i + 1}. **${r.title}** (ID ${r.id}${r.entry_date ? `, ${r.entry_date}` : ''})`).join('\n')
-                : 'Nicio intrare găsită.'
-            )
-          }
-          else if (action.type === 'timeline_results') {
-            const results = action.results || []
-            actionMsg = `📅 **Rezultate cronologie** (${action.from || 'început'} → ${action.to || 'acum'}):\n` + (
-              results.length
-                ? results.map((r: any, i: number) => `${i + 1}. **${r.title}** (ID ${r.id}${r.entry_date ? `, ${r.entry_date}` : ''})`).join('\n')
-                : 'Nicio intrare în acest interval.'
-            )
-          }
-          else if (action.type === 'error') actionMsg = `⚠️ ${action.detail}`
-          else if (action.type === 'pending_confirm') {
-            setPendingConfirm({ confirm_id: action.confirm_id, message: action.message || 'Acțiunea necesită confirmarea ta.' })
-          }
-          else {
-            // Generic renderer: prefer the human text the server sent, else a
-            // readable label from the action type. Keeps new actions visible.
-            const detail = action.detail || action.message || action.title || action.name
-              || action.section_title || action.label || ''
-            const label = ACTION_LABELS[action.type] || action.type.replace(/_/g, ' ')
-            const ref = action.id ?? action.entry_id ?? action.theory_id ?? action.keep_id
-            actionMsg = `⚙️ **${label}**${detail ? ` — ${detail}` : ref !== undefined ? ` (#${ref})` : ''}`
-          }
-          if (actionMsg) setMessages(prev => [...prev, { role: 'assistant', content: actionMsg }])
+      }
+      // Show action results as assistant messages
+      for (const action of actions) {
+        let actionMsg = ''
+        if (action.type === 'entry_created') actionMsg = `📝 **Intrare salvată:** "${action.title}" (ID: ${action.id})`
+        else if (action.type === 'relationship_created') actionMsg = `🔗 **Legătură creată:** Intrarea ${action.from} → ${action.to} (${action.label})`
+        else if (action.type === 'todo_added') actionMsg = `✅ **Sarcină adăugată** la intrarea ${action.entry_id}`
+        else if (action.type === 'sr_scheduled') actionMsg = `🔄 **Adăugată în programul de recapitulare:** intrarea ${action.entry_id}`
+        else if (action.type === 'web_search_request') actionMsg = `🔍 **Interogare de cercetare:** "${action.query}"`
+        else if (action.type === 'research_request') actionMsg = `🔬 **Cercetare solicitată:** "${action.topic}"`
+        else if (action.type === 'entry_fetched' && action.entry) {
+          const e = action.entry
+          actionMsg = `📄 **Intrarea #${e.id}: ${e.title}** (${e.entry_date || 'fără dată'})\n\n${(e.content || 'Fără conținut').slice(0, 1500)}`
         }
+        else if (action.type === 'entries_listed') {
+          const results = Array.isArray(action.results) ? action.results : []
+          actionMsg = `🗂️ **Intrări${action.tag ? ` etichetate "${action.tag}"` : ''} (${results.length}):**\n` + (
+            results.length
+              ? results.map((r: { id: number; title: string; entry_date?: string }, i: number) => `${i + 1}. **${r.title}** (ID ${r.id}${r.entry_date ? `, ${r.entry_date}` : ''})`).join('\n')
+              : 'Nimic găsit.'
+          )
+        }
+        else if (action.type === 'relationships_listed') {
+          const results = Array.isArray(action.results) ? action.results : []
+          actionMsg = `🔗 **Legături pentru intrarea #${action.entry_id} (${results.length}):**\n` + (
+            results.length
+              ? results.map((r: { from_id: number; to_id: number; label?: string }) => `- #${r.from_id} --${r.label || 'related_to'}--> #${r.to_id}`).join('\n')
+              : 'Nicio legătură încă.'
+          )
+        }
+        else if (action.type === 'theories_listed') {
+          const results = Array.isArray(action.results) ? action.results : []
+          actionMsg = `🧬 **Teorii${action.query ? ` care corespund "${action.query}"` : ''} (${results.length}):**\n` + (
+            results.length
+              ? results.map((r: { id: number; name: string; status: string; pro_count: number; contra_count: number }) => `- #${r.id} **${r.name}** [${r.status}] — pro ${r.pro_count} / contra ${r.contra_count}`).join('\n')
+              : 'Nimic găsit.'
+          )
+        }
+        else if (action.type === 'entry_appended') actionMsg = `✏️ **Intrarea #${action.entry_id} actualizată** (conținut adăugat)`
+        else if (action.type === 'entry_archived') actionMsg = `🗄️ **Intrarea #${action.entry_id} arhivată**`
+        else if (action.type === 'thought_created') actionMsg = `💭 **Gând creat:** "${action.name}"`
+        else if (action.type === 'tag_created') actionMsg = `🏷️ **Etichetă creată:** "${action.name}"`
+        else if (action.type === 'reminder_added') actionMsg = `⏰ **Reamintire setată** pentru intrarea #${action.entry_id}`
+        else if (action.type === 'theory_created') actionMsg = `🧬 **Teorie creată:** "${action.name}" (ID ${action.id})`
+        else if (action.type === 'study_linked') actionMsg = `🔗 **Dovadă legată:** intrarea #${action.entry_id} → teoria #${action.theory_id} (${action.stance})`
+        else if (action.type === 'web_results') {
+          const results = Array.isArray(action.results) ? action.results : []
+          actionMsg = `🌐 **Rezultate web pentru "${action.query}" (${results.length}):**\n` + (
+            results.length
+              ? results.map((r: { title: string; url: string; snippet?: string }, i: number) => `${i + 1}. [${r.title}](${r.url})${r.snippet ? ` — ${r.snippet.slice(0, 150)}` : ''}`).join('\n')
+              : 'Niciun rezultat (offline sau blocat).'
+          )
+        }
+        else if (action.type === 'studies_results') {
+          const results = Array.isArray(action.results) ? action.results : []
+          actionMsg = `📚 **Studii găsite pentru "${action.query || ''}" (${results.length}):**\n\n` + (
+            results.length
+              ? results.map((r: { title?: string; year?: number | null; authors?: string; doi?: string; is_oa?: boolean; source?: string; snippet?: string }, i: number) => {
+                  const title = r.title || 'Fără titlu'
+                  const year = r.year ? ` (${r.year})` : ''
+                  const authors = r.authors ? ` — *${r.authors}*` : ''
+                  const doiLink = r.doi ? ` [DOI: ${r.doi}](https://doi.org/${r.doi})` : ''
+                  const oa = r.is_oa ? ' `[Open Access]`' : ''
+                  const source = r.source ? ` · *${r.source}*` : ''
+                  const snippet = r.snippet ? `\n   > ${r.snippet.slice(0, 160).replace(/\n/g, ' ')}...` : ''
+                  return `${i + 1}. **${title}**${year}${authors}${oa}${source}${doiLink}${snippet}`
+                }).join('\n\n')
+              : 'Niciun studiu găsit pentru această căutare.'
+          )
+        }
+        else if (action.type === 'study_pdf_downloaded') {
+          const title = action.title ? ` "${action.title}"` : ` #${action.entry_id}`
+          actionMsg = `📥 **PDF descărcat cu succes pentru studiul${title}**\n` +
+            (action.pdf_path ? `- Fișier: \`${action.pdf_path}\`\n` : '') +
+            `- Intrarea #${action.entry_id} are textul complet indexat.\n\n` +
+            `*Apasă pe butonul de mai jos pentru a citi PDF-ul în aplicație.*`
+        }
+        else if (action.type === 'task_started') {
+          actionMsg = `⚡ **Task activ pornit:** ${action.goal || action.details || ''}`
+        }
+        else if (action.type === 'task_updated') {
+          actionMsg = `🔄 **Progres task:** ${action.details || ''}`
+        }
+        else if (action.type === 'task_completed') {
+          actionMsg = `✅ **Task finalizat:** ${action.goal || action.details || ''}`
+        }
+        else if (action.type === 'screening_decision_recorded') {
+          actionMsg = `⚖️ **Decizie PRISMA:** Studiul #${action.entry_id} → **${action.decision}** (${action.reason || 'fără motiv specificat'})`
+        }
+        else if (action.type === 'documents_results') {
+          const results = Array.isArray(action.results) ? action.results : []
+          actionMsg = `📄 **Potriviri PDF de studiu pentru "${action.query}" (${results.length}):**\n` + (
+            results.length
+              ? results.map((r: { entry_title: string; content?: string }, i: number) => `${i + 1}. **${r.entry_title}** — ${(r.content || '').slice(0, 220)}`).join('\n')
+              : 'Nicio potrivire PDF încă. Descarcă PDF-urile de studiu, apoi rulează Verificare → Integritatea datelor pentru a le indexa.'
+          )
+        }
+        else if (action.type === 'search_results') {
+          const results = Array.isArray(action.results) ? action.results : []
+          actionMsg = `🔎 **Rezultate căutare pentru "${action.query}":**\n` + (
+            results.length
+              ? results.map((r: { id: number; title: string; entry_date?: string }, i: number) => `${i + 1}. **${r.title}** (ID ${r.id}${r.entry_date ? `, ${r.entry_date}` : ''})`).join('\n')
+              : 'Nicio intrare găsită.'
+          )
+        }
+        else if (action.type === 'timeline_results') {
+          const results = Array.isArray(action.results) ? action.results : []
+          actionMsg = `📅 **Rezultate cronologie** (${action.from || 'început'} → ${action.to || 'acum'}):\n` + (
+            results.length
+              ? results.map((r: { id: number; title: string; entry_date?: string }, i: number) => `${i + 1}. **${r.title}** (ID ${r.id}${r.entry_date ? `, ${r.entry_date}` : ''})`).join('\n')
+              : 'Nicio intrare în acest interval.'
+          )
+        }
+        else if (action.type === 'error') actionMsg = `⚠️ ${action.detail}`
+        else if (action.type === 'pending_confirm') {
+          setPendingConfirm({ confirm_id: action.confirm_id, message: action.message || 'Acțiunea necesită confirmarea ta.' })
+        }
+        else {
+          const detail = action.detail || action.message || action.title || action.name
+            || action.section_title || action.label || ''
+          const label = ACTION_LABELS[action.type] || action.type.replace(/_/g, ' ')
+          const ref = action.id ?? action.entry_id ?? action.theory_id ?? action.keep_id
+          actionMsg = `⚙️ **${label}**${detail ? ` — ${detail}` : ref !== undefined ? ` (#${ref})` : ''}`
+        }
+        if (actionMsg) setMessages(prev => [...prev, { role: 'assistant', content: actionMsg, action }])
       }
       } finally {
         clearInterval(watchdog)
       }
-    } catch (err: any) {
-      if (err?.name === 'AbortError') {
+    } catch (err: unknown) {
+      const isAbort = err instanceof Error && err.name === 'AbortError'
+      if (isAbort) {
         if (stalledRef.current) {
           // The watchdog fired: the link went silent mid-answer.
           const partial = fullContentRef.current.trim()
@@ -427,9 +556,6 @@ export function ChatPanel({ onClose }: Props) {
           setMessages(prev => [...prev, { role: 'assistant', content: '⏹️ Generarea s-a oprit.' }])
         }
       } else {
-        // A dropped stream (phone network, Tailscale, tab throttling) arrives as
-        // "Error in input stream". Keep whatever text made it to the screen and
-        // offer a resend instead of showing a raw browser error.
         const partial = fullContentRef.current.trim()
         if (partial) {
           setMessages(prev => [...prev, {
@@ -454,6 +580,8 @@ export function ChatPanel({ onClose }: Props) {
       setLoading(false)
       setStreamingContent('')
       setResearching(false)
+      setProgressMessage(null)
+      refreshActiveTask()
     }
   }
 
@@ -470,8 +598,9 @@ export function ChatPanel({ onClose }: Props) {
       } else {
         setMessages(prev => [...prev, { role: 'assistant', content: '⛔ **Acțiune respinsă** — nu s-a schimbat nimic.' }])
       }
-    } catch (err: any) {
-      toast.error('Confirmarea a eșuat: ' + (err?.message || 'eroare necunoscută'))
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'eroare necunoscută'
+      toast.error('Confirmarea a eșuat: ' + msg)
       setMessages(prev => [...prev, { role: 'assistant', content: `⚠️ **Eroare:** ${friendlyError(err)}` }])
     }
   }
@@ -479,6 +608,13 @@ export function ChatPanel({ onClose }: Props) {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
   }
+
+  // Sync input state with textarea ref for programmatic changes (quick actions, retry)
+  useEffect(() => {
+    if (inputRef.current && inputRef.current.value !== input) {
+      inputRef.current.value = input
+    }
+  }, [input])
 
   const suggestedPrompts = [
     'Rezumă-mi intrările',
@@ -505,7 +641,7 @@ export function ChatPanel({ onClose }: Props) {
               {loading && (
                 <span className="flex items-center gap-1.5 text-xs font-medium text-chrono-700 dark:text-chrono-400">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  {researching ? 'Cercetare în curs…' : 'Se generează…'}
+                  {progressMessage ? (progressMessage.length > 25 ? progressMessage.slice(0, 23) + '…' : progressMessage) : (researching ? 'Cercetare în curs…' : 'Se generează…')}
                 </span>
               )}
               <button
@@ -513,7 +649,7 @@ export function ChatPanel({ onClose }: Props) {
                   setMessages([{ role: 'assistant', content: 'Istoric șters. Cu ce te pot ajuta?' }])
                   toast.success('Istoricul chatului a fost șters')
                 })}
-                className="icon-btn p-1 ml-1 text-madder"
+                className="icon-btn p-1 touch-40-neg ml-1 text-madder"
                 title="Șterge istoricul"
                 aria-label="Șterge istoricul chatului"
               >
@@ -532,6 +668,36 @@ export function ChatPanel({ onClose }: Props) {
         </button>
       </div>
 
+      {/* Active Task Banner */}
+      {activeTask && activeTask.status === 'active' && (
+        <div className="bg-amber-500/10 dark:bg-amber-500/20 border-b border-amber-500/30 px-3.5 py-2 flex items-center justify-between gap-2.5 text-xs shrink-0">
+          <div className="flex items-start gap-2 min-w-0">
+            <Zap className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-semibold text-amber-800 dark:text-amber-300">⚡ Task activ:</span>
+                <span className="font-medium text-gray-900 dark:text-gray-100 truncate max-w-[240px]" title={activeTask.goal}>
+                  {activeTask.goal}
+                </span>
+              </div>
+              {activeTask.details && (
+                <p className="text-[11px] text-gray-600 dark:text-gray-400 line-clamp-1 mt-0.5">
+                  {activeTask.details}
+                </p>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={handleCancelTask}
+            disabled={cancellingTask}
+            className="px-2 py-1 min-h-[40px] rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-800 dark:text-amber-200 font-medium transition-colors border border-amber-500/30 shrink-0"
+            title="Renunță la taskul activ"
+          >
+            {cancellingTask ? 'Se anulează…' : 'Anulează task'}
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gray-50 dark:bg-gray-950">
         {messages.map((msg, i) => (
@@ -541,6 +707,8 @@ export function ChatPanel({ onClose }: Props) {
             content={msg.content}
             provider={msg.provider}
             model={msg.model}
+            action={msg.action}
+            onOpenStudyPdf={handleOpenStudyPdf}
           />
         ))}
 
@@ -561,26 +729,23 @@ export function ChatPanel({ onClose }: Props) {
           </div>
         )}
 
-        {/* Loading dots */}
-        {researching && (
+        {/* Loading / Progress indicator */}
+        {loading && (
           <div className="flex justify-start">
-            <div className="rounded-2xl px-4 py-2.5 text-sm bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-bl-md shadow-sm text-gray-600 dark:text-gray-400 flex items-center gap-2.5">
+            <div className="rounded-2xl px-4 py-2.5 text-sm bg-white dark:bg-gray-800 border border-chrono-200 dark:border-chrono-800/40 rounded-bl-md shadow-sm text-gray-700 dark:text-gray-300 flex items-center gap-2.5">
               <Loader2 className="w-4 h-4 animate-spin text-chrono-600 dark:text-chrono-400 shrink-0" />
-              <span>🔬 Rulez cercetare calitativă (plan → analize aprofundate → sinteză)...</span>
-            </div>
-          </div>
-        )}
-
-        {loading && !streamingContent && !researching && (
-          <div className="flex justify-start">
-            <div className="rounded-2xl px-4 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm flex items-center gap-2.5">
-              <Loader2 className="w-4 h-4 animate-spin text-chrono-600 dark:text-chrono-400 shrink-0" />
-              <span className="text-sm text-gray-600 dark:text-gray-400">AI-ul lucrează</span>
-              <span className="flex gap-1">
-                <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-              </span>
+              <div className="flex flex-col">
+                <span className="font-medium text-xs text-chrono-600 dark:text-chrono-400">
+                  {progressMessage || (researching ? '🔬 Rulez cercetare calitativă (plan → analize → sinteză)...' : 'AI-ul lucrează')}
+                </span>
+                {!progressMessage && !streamingContent && (
+                  <span className="flex gap-1 mt-1">
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -664,6 +829,15 @@ export function ChatPanel({ onClose }: Props) {
           gestiona sarcini, cerceta teme și șterge sau uni cu confirmare.
         </p>
       </div>
+
+      {/* Study PDF Reader Modal */}
+      {pdfModalStudy && (
+        <StudyPdfModal
+          study={pdfModalStudy}
+          isOpen={Boolean(pdfModalStudy)}
+          onClose={() => setPdfModalStudy(null)}
+        />
+      )}
     </>
   )
 }

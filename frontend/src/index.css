@@ -201,6 +201,24 @@
            transition-colors duration-150 hover:bg-surface-2 hover:text-ink;
   }
 
+  /* ── Phone-safe utilities ── */
+  /* Bottom safe-area padding for the fixed bottom nav (applied by App.tsx). */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 1rem);
+  }
+
+  /* 40px minimum touch targets without inflating dense rows: pair with a
+     slightly negative margin so the layout footprint stays unchanged. */
+  .touch-40 {
+    min-width: 40px !important;
+    min-height: 40px !important;
+  }
+  .touch-40-neg {
+    min-width: 40px !important;
+    min-height: 40px !important;
+    margin: -0.25rem;
+  }
+
   .section-label {
     @apply text-[11px] font-semibold text-muted;
     letter-spacing: 0.01em;

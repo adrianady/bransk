@@ -40,6 +40,7 @@ from app.db import get_db
 from app.models import normalize_doi
 from app.studies_store import (
     assert_public_download_url,
+    detect_bot_challenge,
     download_study_pdf,
     is_valid_pdf_file,
     pdf_path_for,
@@ -77,6 +78,16 @@ class Candidate:
     note: str = ""
 
 
+class BotChallenge(Exception):
+    """A publisher/repository answered with a human-verification wall."""
+
+    def __init__(self, url: str, status_code: int = 0, reason: str = ""):
+        self.url = url
+        self.status_code = status_code
+        self.reason = reason
+        super().__init__(reason or f"bot challenge at {url}")
+
+
 @dataclass
 class FulltextResult:
     entry_id: int
@@ -87,6 +98,12 @@ class FulltextResult:
     chunks: int = 0
     index_error: bool = False
     text_save_error: bool = False
+    # A human-verification wall blocked the automated hunt. The app then offers
+    # the browser link and the upload endpoint instead of a dead end.
+    bot_challenge: bool = False
+    browser_download_url: str = ""
+    browser_download_url_alt: str = ""
+    manual_upload_needed: bool = False
     tried: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -99,8 +116,35 @@ class FulltextResult:
             "chunks": self.chunks,
             "index_error": self.index_error,
             "text_save_error": self.text_save_error,
+            "bot_challenge": self.bot_challenge,
+            "browser_download_url": self.browser_download_url,
+            "browser_download_url_alt": self.browser_download_url_alt,
+            "manual_upload_needed": self.manual_upload_needed,
             "tried": self.tried,
         }
+
+
+def browser_fallback_urls(entry: dict, blocked_urls: list[str] | None = None) -> tuple[str, str]:
+    """(primary, alternative) links for a human to open in a real browser.
+
+    The DOI resolver is the stable, publisher-neutral link; the Sci-Hub mirror
+    is offered as an explicit alternative for the cases the user is already
+    working around. Neither is ever fetched automatically — the bot check is
+    respected, the user decides.
+    """
+    doi = ""
+    try:
+        doi = normalize_doi(entry.get("doi") or "")
+    except ValueError:
+        doi = ""
+    if doi:
+        return f"https://doi.org/{doi}", f"https://sci-hub.se/{doi}"
+    source = (entry.get("source") or "").strip()
+    if source.startswith(("http://", "https://")):
+        return source, ""
+    if blocked_urls:
+        return blocked_urls[0], ""
+    return "", ""
 
 
 def clean_title(title: str) -> str:
@@ -414,6 +458,15 @@ async def _fetch_html_text(client: httpx.AsyncClient, url: str) -> str:
     await asyncio.to_thread(assert_public_download_url, url)
     resp = await client.get(url)
     ctype = (resp.headers.get("content-type") or "").lower()
+    reason = detect_bot_challenge(
+        resp.status_code,
+        ctype,
+        resp.text[:20000] if ("html" in ctype or "text" in ctype) else "",
+    )
+    if reason:
+        raise BotChallenge(url, resp.status_code, reason)
+    if resp.status_code >= 400:
+        resp.raise_for_status()
     if "html" not in ctype:
         return ""
     text = html_to_text(resp.text)
@@ -439,11 +492,20 @@ async def fetch_fulltext(entry_id: int, *, index: bool = True) -> dict:
             logger.warning("Full-text discovery failed for #%s: %s", entry_id, exc)
             candidates = []
 
+        blocked: list[dict] = []
         for cand in candidates:
             attempt = {"url": cand.url[:300], "source": cand.source, "kind": cand.kind}
             try:
                 if cand.kind == "html":
-                    text = await _fetch_html_text(client, cand.url)
+                    try:
+                        text = await _fetch_html_text(client, cand.url)
+                    except BotChallenge as exc:
+                        attempt["error"] = "bot_challenge"
+                        attempt["reason"] = exc.reason
+                        attempt["status_code"] = exc.status_code
+                        blocked.append({"url": cand.url, "source": cand.source, "reason": exc.reason})
+                        result.tried.append(attempt)
+                        continue
                     if not text:
                         attempt["error"] = "no article text (wall or too short)"
                         result.tried.append(attempt)
@@ -474,9 +536,20 @@ async def fetch_fulltext(entry_id: int, *, index: bool = True) -> dict:
                         result.chunks = await studytext.index_text(entry_id, text)
                     return result.as_dict()
 
-                fname = await download_study_pdf(entry_id, cand.url, entry["title"])
+                details: dict = {}
+                fname = await download_study_pdf(entry_id, cand.url, entry["title"], details=details)
                 if not fname or not is_valid_pdf_file(pdf_path_for(entry_id)):
-                    attempt["error"] = "download rejected (not a PDF)"
+                    if details.get("bot_challenge"):
+                        attempt["error"] = "bot_challenge"
+                        attempt["reason"] = details["bot_challenge"]
+                        attempt["status_code"] = details.get("status_code", 0)
+                        blocked.append({
+                            "url": cand.url,
+                            "source": cand.source,
+                            "reason": details["bot_challenge"],
+                        })
+                    else:
+                        attempt["error"] = "download rejected (not a PDF)"
                     result.tried.append(attempt)
                     continue
                 result.status, result.source, result.url = "pdf", cand.source, cand.url
@@ -492,6 +565,12 @@ async def fetch_fulltext(entry_id: int, *, index: bool = True) -> dict:
                             "UPDATE entries SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
                             [fname, entry_id],
                         )
+                        try:
+                            from app.studies_store import store_entry_pdf_hash
+
+                            store_entry_pdf_hash(conn, entry_id)
+                        except Exception:  # noqa: BLE001 - hashing is best-effort
+                            pass
                         conn.commit()
                     finally:
                         conn.close()
@@ -525,4 +604,15 @@ async def fetch_fulltext(entry_id: int, *, index: bool = True) -> dict:
             except Exception as exc:  # noqa: BLE001
                 attempt["error"] = type(exc).__name__
                 result.tried.append(attempt)
+        if blocked:
+            primary, alt = browser_fallback_urls(entry, [b["url"] for b in blocked])
+            result.bot_challenge = True
+            result.manual_upload_needed = True
+            result.browser_download_url = primary
+            result.browser_download_url_alt = alt
+            result.tried.append({
+                "error": "bot_challenge",
+                "manual_upload_needed": True,
+                "blocked": blocked[:10],
+            })
         return result.as_dict()

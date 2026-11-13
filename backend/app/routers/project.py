@@ -13,6 +13,7 @@ Everything degrades honestly: when no LLM is reachable the endpoints still
 return the real ranked study list and deterministic, rule-based advice, marked
 as such, instead of silently making things up.
 """
+from typing import Optional
 import hashlib
 import io
 import json
@@ -26,9 +27,13 @@ from fastapi import APIRouter, HTTPException, Response
 from app.db import get_db
 from app.llm import LLM_PROVIDER, complete as llm_complete
 from app.models import ProjectFeedback
+from app.nlp import RO_STOPWORDS, fold
 
 logger = logging.getLogger("chronokg.project")
 router = APIRouter()
+
+# Backward compatibility alias
+_fold = fold
 
 WORK_TYPES = {
     "licenta": "lucrare de licență",
@@ -38,14 +43,7 @@ WORK_TYPES = {
 }
 
 # Romanian stop words that would otherwise dominate the keyword match.
-_RO_STOP = {
-    "care", "ceea", "acest", "aceasta", "aceste", "acesti", "acestui", "acestor",
-    "sunt", "este", "fost", "fiind", "pentru", "despre", "din", "sau", "dar",
-    "iar", "daca", "cand", "unde", "cum", "mai", "foarte", "poate", "prin",
-    "intre", "asupra", "dintre", "lui", "unei", "unui", "unor", "este",
-    "the", "and", "for", "with", "from", "that", "this", "are", "was", "were",
-    "cat", "cel", "cea", "cei", "cele", "ale", "alor", "sale", "sai",
-}
+_RO_STOP = RO_STOPWORDS
 
 _PLACEHOLDER_STRUCTURE = [
     {
@@ -188,38 +186,50 @@ def _row_to_project(row) -> dict:
     return data
 
 
-def _ensure_project(conn) -> dict:
-    row = conn.execute("SELECT * FROM project WHERE id = 1").fetchone()
+def _get_active_project_id(conn) -> int:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = 'active_project_id'").fetchone()
+    if row and row["value"].isdigit():
+        pid = int(row["value"])
+        if conn.execute("SELECT id FROM project WHERE id = ?", (pid,)).fetchone():
+            return pid
+    first = conn.execute("SELECT id FROM project ORDER BY id ASC LIMIT 1").fetchone()
+    if first:
+        return first["id"]
+    return 1
+
+
+def _set_active_project_id(conn, pid: int) -> None:
+    conn.execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES ('active_project_id', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+        [str(pid), str(pid)]
+    )
+    conn.commit()
+
+
+def _ensure_project(conn, project_id: Optional[int] = None) -> dict:
+    pid = project_id if project_id is not None else _get_active_project_id(conn)
+    row = conn.execute("SELECT * FROM project WHERE id = ?", (pid,)).fetchone()
     if row is None:
-        conn.execute(
-            "INSERT INTO project (id, title, work_type, structure_json) VALUES (1, '', 'licenta', ?)",
-            [json.dumps(_PLACEHOLDER_STRUCTURE, ensure_ascii=False)],
-        )
-        conn.commit()
-        row = conn.execute("SELECT * FROM project WHERE id = 1").fetchone()
+        row = conn.execute("SELECT * FROM project ORDER BY id ASC LIMIT 1").fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO project (title, work_type, structure_json, plan_json) VALUES ('', 'licenta', ?, '{}')",
+                [json.dumps(_PLACEHOLDER_STRUCTURE, ensure_ascii=False)],
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM project ORDER BY id DESC LIMIT 1").fetchone()
+        if row:
+            pid = row["id"]
+            _set_active_project_id(conn, pid)
     return _row_to_project(row)
 
 
 # ── Keyword matching against the real study library ────────────────────────
 
-def _fold(text: str) -> str:
-    """Lowercase and strip Romanian diacritics, the way keywords are built."""
-    return (
-        (text or "")
-        .lower()
-        .replace("ă", "a").replace("â", "a").replace("î", "i")
-        .replace("ș", "s").replace("ş", "s").replace("ț", "t").replace("ţ", "t")
-    )
-
 
 def _keywords(text: str) -> list[str]:
     """Lowercase content words, accents folded, stop words removed."""
-    folded = (
-        (text or "")
-        .lower()
-        .replace("ă", "a").replace("â", "a").replace("î", "i")
-        .replace("ș", "s").replace("ş", "s").replace("ț", "t").replace("ţ", "t")
-    )
+    folded = fold(text)
     words = re.findall(r"[a-z0-9][a-z0-9\-]{2,}", folded)
     out: list[str] = []
     for w in words:
@@ -587,7 +597,8 @@ def export_thesis_docx():
 def update_project(body: ProjectUpdate):
     conn = get_db()
     try:
-        _ensure_project(conn)
+        project = _ensure_project(conn)
+        pid = project["id"]
         fields, params = [], []
         for key in ("title", "work_type", "field", "description", "research_q", "methodology", "deadline"):
             value = getattr(body, key)
@@ -607,10 +618,10 @@ def update_project(body: ProjectUpdate):
             # stale through analysis_key, with regeneration one click away.
             fields.append("updated_at = ?")
             params.append(_now())
-            params.append(1)
+            params.append(pid)
             conn.execute(f"UPDATE project SET {', '.join(fields)} WHERE id = ?", params)
             conn.commit()
-        row = conn.execute("SELECT * FROM project WHERE id = 1").fetchone()
+        row = conn.execute("SELECT * FROM project WHERE id = ?", (pid,)).fetchone()
         return _row_to_project(row)
     finally:
         conn.close()
@@ -942,13 +953,14 @@ def project_evidence_for_study(entry_id: int):
         conn.close()
 
 
-def _analysis_key(project: dict, ranked: list[dict], stats: dict) -> str:
+def _analysis_key(project: dict, ranked: list[dict], stats: dict, questionnaires: list = None) -> str:
     """Fingerprint of everything the analysis depends on.
 
     Two runs with the same title, question, outline and study set must produce
     the same key, so the stored text is reused instead of paying for another
     LLM call. Anything that would change the answer changes the key.
     """
+    q_sig = "~".join(str(q["id"]) for q in (questionnaires or []))
     material = "|".join([
         str(project.get("title") or ""),
         str(project.get("research_q") or ""),
@@ -957,6 +969,7 @@ def _analysis_key(project: dict, ranked: list[dict], stats: dict) -> str:
         "~".join(str(s.get("entry_id")) for s in ranked),
         str(stats.get("library_studies")),
         str(stats.get("studies_with_doi")),
+        q_sig,
     ])
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
@@ -983,7 +996,7 @@ def _analysis_stats(studies: list[dict], ranked: list[dict]) -> dict:
     }
 
 
-def _analysis_prompt(project: dict, ranked: list[dict]) -> str:
+def _analysis_prompt(project: dict, ranked: list[dict], questionnaires: list = None) -> str:
     corpus = "\n".join(
         f"- [{s['entry_id']}] {s['title']} ({s['year'] or 'n/d'}) · {s['design'] or 'design n/d'} · "
         f"efect: {s['effect_direction'] or 'n/d'} · calitate: {s['quality'] or 'n/d'}/5 — {s['reason']}"
@@ -994,22 +1007,36 @@ def _analysis_prompt(project: dict, ranked: list[dict]) -> str:
         f"{k}: {v}" for k, v in plan.items() if isinstance(v, str) and v.strip()
     )
     plan_line = f"\nPLANUL DE CERCETARE AL STUDENTULUI:\n{plan_bits}\n" if plan_bits else ""
+
+    q_lines = ""
+    if questionnaires:
+        q_list = []
+        for q in questionnaires:
+            items_count = 0
+            try:
+                items_count = len(json.loads(q["items_json"] or "[]"))
+            except Exception:
+                pass
+            q_list.append(f"- Chestionar: \"{q['title']}\" (Construct: {q['construct'] or 'n/d'}, Itemi: {items_count})")
+        q_lines = "\nCHESTIONARE ȘI INSTRUMENTE DE CERCETARE CONSTRUITE:\n" + "\n".join(q_list) + "\n"
+
     return f"""Ești un îndrumător academic exigent și membru în comisia de evaluare pentru o lucrare de {WORK_TYPES.get(project.get('work_type') or '', 'licență')}.
-Evaluează stadiul cercetării pe baza standardelor epistemologice moderne (paradigma IMRaD, distincția strictă între corelație și determinare cauzală, eșantionare și control metodologic).
+Evaluează stadiul cercetării pe baza standardelor epistemologice moderne (paradigma IMRaD, distincția strictă între corelație și determinare cauzală, eșantionare, control metodologic și rigoare statistică/analitică).
 
 {_project_brief(project)}
 {plan_line}
+{q_lines}
 STUDII RELEVANTE DIN BIBLIOTECĂ:
 {corpus}
 
 Scrie în română o sinteză critică de 250–400 de cuvinte, structurată strict cu aceste secțiuni:
 **Unde ești acum** — 2-3 propoziții despre maturitatea epistemologică a temei și acoperirea ei în literatura empirică existentă.
 **Ce sprijină tema** — ce studii din bibliotecă (citează titlul scurt și anul) aduc dovezi empirice solide sau mecanisme cauzale directe în favoarea ipotezei.
-**Ce lipsește** — lacune metodologice concrete: variabile independente/dependente neoperaționalizate, grupuri de control absente, moderatori neexplorați sau limitări de eșantion.
-**Riscuri** — 2 riscuri metodologice majore (ex. confuzie cauzală vs corelațională, bias de selecție, erori de măsurare) și protocolul precis de prevenire.
+**Ce lipsește** — lacune metodologice și **analitice** concrete: unde trebuie efectuate analize statistice sau calitative (ex. testarea ipotezelor pe variabile, consistența internă / Alpha Cronbach pentru chestionare, grupuri de control absente, moderatori neexplorați).
+**Riscuri** — 2 riscuri metodologice majore (ex. confuzie cauzală vs corelațională, erori de eșantionare sau măsurare) și protocolul precis de prevenire.
 **Următorul pas** — o singură acțiune imediată, concretă și măsurabilă pentru avansarea cercetării.
 
-Folosește DOAR studiile din listă. Nu inventa referințe, autori sau cifre fictive."""
+Folosește DOAR studiile din listă și chestionarele existente. Nu inventa referințe, autori sau cifre fictive."""
 
 
 def _no_llm_note(project: dict) -> str:
@@ -1033,13 +1060,13 @@ def _right_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
-async def _build_analysis(project: dict, ranked: list[dict], stats: dict) -> dict:
+async def _build_analysis(project: dict, ranked: list[dict], stats: dict, questionnaires: list = None) -> dict:
     """Generate the analysis with the model — the expensive path."""
     if LLM_PROVIDER == "mock" or not (project.get("title") or "").strip():
         return {"analysis": _no_llm_note(project), "stats": stats, "from_llm": False,
                 "top_studies": ranked[:6], "cached": False, "stale": False,
                 "generated_at": "", "needs_generation": True}
-    text = await _llm([{"role": "system", "content": _analysis_prompt(project, ranked)}],
+    text = await _llm([{"role": "system", "content": _analysis_prompt(project, ranked, questionnaires)}],
                       temperature=0.35, max_tokens=3000)
     return {
         "analysis": text or "Analiza nu a putut fi generată (LLM indisponibil).",
@@ -1066,6 +1093,7 @@ def project_analysis():
         project = _ensure_project(conn)
         ranked = _rank_studies(conn, project, limit=20)
         studies = _study_rows(conn)
+        questionnaires = conn.execute("SELECT id, title, construct, target_population, items_json FROM questionnaires").fetchall()
     finally:
         conn.close()
 
@@ -1086,7 +1114,7 @@ def project_analysis():
             "needs_generation": bool((project.get("title") or "").strip()) and LLM_PROVIDER != "mock",
         }
 
-    stale = (project.get("analysis_key") or "") != _analysis_key(project, ranked, stats)
+    stale = (project.get("analysis_key") or "") != _analysis_key(project, ranked, stats, questionnaires)
     return {
         "analysis": stored,
         "stats": stats,
@@ -1105,21 +1133,23 @@ async def project_analysis_refresh():
     conn = get_db()
     try:
         project = _ensure_project(conn)
+        pid = project["id"]
         ranked = _rank_studies(conn, project, limit=20)
         studies = _study_rows(conn)
+        questionnaires = conn.execute("SELECT id, title, construct, target_population, items_json FROM questionnaires").fetchall()
     finally:
         conn.close()
 
     stats = _analysis_stats(studies, ranked)
-    result = await _build_analysis(project, ranked, stats)
+    result = await _build_analysis(project, ranked, stats, questionnaires)
 
     if result["from_llm"]:
         stamp = _now()
         conn = get_db()
         try:
             conn.execute(
-                "UPDATE project SET analysis_json = ?, analysis_at = ?, analysis_key = ? WHERE id = 1",
-                [result["analysis"], stamp, _analysis_key(project, ranked, stats)],
+                "UPDATE project SET analysis_json = ?, analysis_at = ?, analysis_key = ? WHERE id = ?",
+                [result["analysis"], stamp, _analysis_key(project, ranked, stats, questionnaires), pid],
             )
             conn.commit()
         finally:
@@ -1211,6 +1241,7 @@ async def project_feedback_review():
     conn = get_db()
     try:
         project = _ensure_project(conn)
+        pid = project["id"]
         stored = (project.get("feedback_json") or "").strip()
         stored_key = project.get("feedback_key") or ""
         stored_at = project.get("feedback_at") or ""
@@ -1263,8 +1294,8 @@ async def project_feedback_review():
     conn = get_db()
     try:
         conn.execute(
-            "UPDATE project SET feedback_json = ?, feedback_at = ?, feedback_key = ? WHERE id = 1",
-            [json.dumps({"reviewer": reviewer}, ensure_ascii=False), stamp, key],
+            "UPDATE project SET feedback_json = ?, feedback_at = ?, feedback_key = ? WHERE id = ?",
+            [json.dumps({"reviewer": reviewer}, ensure_ascii=False), stamp, key, pid],
         )
         conn.commit()
     finally:
@@ -1748,25 +1779,84 @@ _TITLE_VAGUE = {
 }
 # Words that name who is studied. A title without one leaves the reader guessing.
 _POPULATION_WORDS = {
-    "adulți", "adulti", "adolescenți", "adolescenti", "copii", "studenți", "studenti",
-    "pacienți", "pacienti", "elevi", "tineri", "vârstnici", "varstnici", "părinți",
-    "parinti", "profesori", "angajați", "angajati", "femei", "bărbați", "barbati",
-    "mame", "tați", "tati", "persoane", "subiecți", "subiecti", "populație",
-    "populatie", "adulți", "adults", "children", "adolescents", "students", "patients",
-    "participants", "mice", "rats", "șoareci", "soareci",
+    "adulți", "adulti", "adult", "adulților", "adultilor", "adulții", "adultii", "adulte", "adultă", "adulta",
+    "adolescenți", "adolescenti", "adolescent", "adolescenților", "adolescentilor", "adolescenții", "adolescentii",
+    "copii", "copil", "copiilor", "copiii",
+    "studenți", "studenti", "student", "studenților", "studentilor", "studenții", "studentii",
+    "pacienți", "pacienti", "pacient", "pacienților", "pacientilor", "pacienții", "pacientii",
+    "elevi", "elev", "elevilor", "elevii",
+    "tineri", "tânăr", "tanar", "tinerilor", "tinerii", "tinere", "tineret",
+    "vârstnici", "varstnici", "vârstnic", "varstnic", "vârstnicilor", "varstnicilor",
+    "seniori", "seniorilor",
+    "părinți", "parinti", "părinte", "parinte", "părinților", "parintilor",
+    "profesori", "profesor", "profesorilor", "cadre", "cadrelor",
+    "angajați", "angajati", "angajat", "angajaților", "angajatilor",
+    "femei", "femeilor", "femeie", "bărbați", "barbati", "bărbat", "barbat", "bărbaților", "barbatilor",
+    "mame", "mamelor", "mamă", "mama", "tați", "tati", "taților", "tatilor", "tată", "tata",
+    "persoane", "persoanelor", "persoană", "persoana",
+    "subiecți", "subiecti", "subiect", "subiecților", "subiectilor",
+    "populație", "populatie", "populația", "populatia", "populației", "populatiei",
+    "eșantion", "esantion", "eșantionului", "esantionului",
+    "utilizatori", "utilizatorilor", "voluntari", "voluntarilor",
+    "adults", "children", "adolescents", "students", "patients", "participants", "workers", "teachers",
+    "women", "men", "elderly", "parents", "mothers", "fathers", "youth",
+    "mice", "rats", "șoareci", "soareci", "animale",
 }
 _ROMANIAN_DIACRITICS = "ăâîșțĂÂÎȘȚ"
+
+
+def _detect_population(lowered_words: list[str], full_lowered: str) -> list[str]:
+    found = [w for w in lowered_words if w in _POPULATION_WORDS]
+    if not found:
+        stems = {
+            "adult": "adulți",
+            "adolescent": "adolescenți",
+            "copi": "copii",
+            "student": "studenți",
+            "pacient": "pacienți",
+            "tiner": "tineri",
+            "varstnic": "vârstnici",
+            "vârstnic": "vârstnici",
+            "senior": "seniori",
+            "parint": "părinți",
+            "părint": "părinți",
+            "profesor": "profesori",
+            "angajat": "angajați",
+            "femei": "femei",
+            "barbat": "bărbați",
+            "bărbat": "bărbați",
+            "mama": "mame",
+            "mamă": "mame",
+            "tata": "tați",
+            "tată": "tați",
+            "persoan": "persoane",
+            "subiect": "subiecți",
+            "populat": "populație",
+            "populaț": "populație",
+            "esantion": "eșantion",
+            "eșantion": "eșantion",
+        }
+        for w in lowered_words:
+            for stem, canonical in stems.items():
+                if stem in w:
+                    found.append(canonical)
+        if not found:
+            for stem, canonical in stems.items():
+                if stem in full_lowered:
+                    found.append(canonical)
+    return list(dict.fromkeys(found))
 
 
 def _title_stats(title: str) -> dict:
     """The measurable shape of a title, computed without any model."""
     words = [w for w in re.split(r"\s+", (title or "").strip()) if w]
     lowered = [re.sub(r"[^\w\-]", "", w.lower()) for w in words]
+    full_lowered = (title or "").lower()
     return {
         "words": len(words),
         "chars": len((title or "").strip()),
         "vague": [w for w in lowered if w in _TITLE_VAGUE],
-        "population": [w for w in lowered if w in _POPULATION_WORDS],
+        "population": _detect_population(lowered, full_lowered),
         "has_question_mark": "?" in (title or ""),
         "acronyms": [w for w in words if w.isupper() and 2 <= len(w) <= 6],
         "has_colon": ":" in (title or "") or "—" in (title or "") or " - " in (title or ""),
@@ -1925,7 +2015,7 @@ STUDII DIN BIBLIOTECA LUI (pentru context, nu le cita ca dovezi):
 
 Răspunde în română, concis (maximum 250 de cuvinte), respectând cu strictețe aceste secțiuni:
 **Ce promite titlul** — ce așteptări metodologice și teoretice induce titlul unui comitet științific la prima lectură.
-**Ce nu spune** — variabile cheie neprecizate, populația/eșantionul vizat, delimitarea temporală sau mecanismul cauzal lipsă.
+**Ce nu spune** — ce lipsește cu adevărat (mecanismul cauzal concret, delimitarea contextuală sau variabilele de control). IMPORTANT: dacă titlul menționează deja populația (ex: adulți, adolescenți, etc.), confirmă explicit acest lucru și NU susține că populația lipsește!
 **Trei variante** — trei titluri alternative optimizate, numerotate clar:
 1. Varianta centrată pe relația de cauzalitate/mecanism empiric.
 2. Varianta cu subtitlu (cadru teoretic : aplicație/studiu empiric).
@@ -2163,14 +2253,15 @@ def project_topic_choose(body: TopicChoice):
     """Adopt a topic: it becomes the project title and research question."""
     conn = get_db()
     try:
-        _ensure_project(conn)
+        project = _ensure_project(conn)
+        pid = project["id"]
         fields = ["title = ?", "research_q = ?", "updated_at = ?"]
         params: list = [body.title.strip(), body.question.strip(), _now(), ]
         # A new topic invalidates whatever was generated for the old one.
         fields += ["analysis_json = ''", "analysis_at = ''", "analysis_key = ''"]
-        conn.execute(f"UPDATE project SET {', '.join(fields)} WHERE id = 1", params)
+        conn.execute(f"UPDATE project SET {', '.join(fields)} WHERE id = ?", [*params, pid])
         conn.commit()
-        row = conn.execute("SELECT * FROM project WHERE id = 1").fetchone()
+        row = conn.execute("SELECT * FROM project WHERE id = ?", (pid,)).fetchone()
         return _row_to_project(row)
     finally:
         conn.close()
@@ -2266,3 +2357,79 @@ Nu adăuga niciun text în afara JSON-ului."""
         "from_llm": bool(topics_out),
         "count": len(topics_out),
     }
+
+
+@router.get("/projects")
+def list_projects() -> dict:
+    """List all isolated research projects/theses."""
+    conn = get_db()
+    try:
+        _ensure_project(conn)
+        active_id = _get_active_project_id(conn)
+        rows = conn.execute("SELECT id, title, work_type, field, updated_at FROM project ORDER BY id ASC").fetchall()
+        projects = [dict(r) for r in rows]
+        return {"active_id": active_id, "projects": projects}
+    finally:
+        conn.close()
+
+
+@router.post("/projects", status_code=201)
+def create_project(body: dict) -> dict:
+    """Create a new isolated research project."""
+    title = (body.get("title") or "Proiect Nou").strip()
+    work_type = (body.get("work_type") or "licenta").strip()
+    field = (body.get("field") or "").strip()
+    description = (body.get("description") or "").strip()
+    research_q = (body.get("research_q") or "").strip()
+    methodology = (body.get("methodology") or "").strip()
+
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            """INSERT INTO project (title, work_type, field, description, research_q, methodology, structure_json, plan_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, '{}')""",
+            (title, work_type, field, description, research_q, methodology, json.dumps(_PLACEHOLDER_STRUCTURE, ensure_ascii=False)),
+        )
+        conn.commit()
+        pid = cur.lastrowid
+        _set_active_project_id(conn, pid)
+        row = conn.execute("SELECT * FROM project WHERE id = ?", (pid,)).fetchone()
+        return _row_to_project(row)
+    finally:
+        conn.close()
+
+
+@router.post("/projects/{pid}/activate")
+def activate_project(pid: int) -> dict:
+    """Switch the active research project."""
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM project WHERE id = ?", (pid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Proiectul nu a fost găsit")
+        _set_active_project_id(conn, pid)
+        return {"status": "ok", "active_id": pid, "project": _row_to_project(row)}
+    finally:
+        conn.close()
+
+
+@router.delete("/projects/{pid}")
+def delete_project(pid: int) -> dict:
+    """Delete an isolated research project (if more than one exists)."""
+    conn = get_db()
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM project").fetchone()[0]
+        if count <= 1:
+            raise HTTPException(400, "Nu poți șterge singurul proiect existent.")
+        row = conn.execute("SELECT id FROM project WHERE id = ?", (pid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Proiectul nu a fost găsit")
+        conn.execute("DELETE FROM project WHERE id = ?", (pid,))
+        conn.commit()
+
+        remaining = conn.execute("SELECT id FROM project ORDER BY id ASC LIMIT 1").fetchone()
+        if remaining:
+            _set_active_project_id(conn, remaining["id"])
+        return {"status": "ok", "deleted_id": pid}
+    finally:
+        conn.close()

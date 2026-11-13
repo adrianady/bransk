@@ -12,7 +12,7 @@ to less than it was before when the window is large.
 import pytest
 
 from app import llm
-from app.routers import chat
+import app.chat as chat
 from fastapi.testclient import TestClient
 from app.main import app
 

@@ -36,3 +36,9 @@ frontend/.contrast-*.mjs
 
 # build artefacts accidentally created at the repo root
 node_modules/
+
+# Test runner artefacts (Playwright/Vitest) — never part of the program
+frontend/test-results/
+frontend/playwright-report/
+frontend/.vitest/
+coverage/

@@ -3,6 +3,7 @@ Bransk — SQLite database setup with FTS5 full-text search.
 """
 import sqlite3
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +22,47 @@ def get_db() -> sqlite3.Connection:
     # background scheduler writes concurrently with other requests.
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+def _migrate_project_table(conn: sqlite3.Connection) -> None:
+    """Rebuild an old single-row `project` table without its CHECK constraint.
+
+    Older databases declared ``id INTEGER PRIMARY KEY CHECK (id = 1)``, which
+    SQLite cannot ALTER away. Multi-project support needs ordinary auto-
+    incrementing rows, so the table is rebuilt with the exact columns it has
+    now (including those added by later migrations) and its row copied over.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'project'"
+    ).fetchone()
+    old_sql = (row["sql"] if row else "") or ""
+    check = r"PRIMARY\s+KEY\s+CHECK\s*\(\s*id\s*=\s*1\s*\)"
+    if not re.search(check, old_sql, re.IGNORECASE):
+        return
+
+    new_sql = re.sub(check, "PRIMARY KEY AUTOINCREMENT", old_sql, count=1, flags=re.IGNORECASE)
+    new_sql = re.sub(
+        r"^CREATE\s+TABLE\s+(?:\"|`|\[)?project(?:\"|`|\])?",
+        "CREATE TABLE project__migration",
+        new_sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(project)").fetchall()]
+    quoted = ", ".join(f'"{column}"' for column in columns)
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute(new_sql)
+        conn.execute(
+            f"INSERT INTO project__migration ({quoted}) SELECT {quoted} FROM project"
+        )
+        conn.execute("DROP TABLE project")
+        conn.execute("ALTER TABLE project__migration RENAME TO project")
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def init_db():
@@ -140,6 +182,23 @@ def init_db():
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- Active multi-step chat task (research, batch download, screening,
+            -- thesis drafting). One row is 'active' at a time; the chat prompt
+            -- reads it every turn, so the assistant remembers what workflow it
+            -- was in the middle of even after a restart or history trimming.
+            CREATE TABLE IF NOT EXISTS chat_tasks (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind          TEXT NOT NULL DEFAULT 'task',
+                goal          TEXT NOT NULL DEFAULT '',
+                status        TEXT NOT NULL DEFAULT 'active'
+                              CHECK(status IN ('active','done','failed','cancelled')),
+                details       TEXT NOT NULL DEFAULT '',
+                progress_json TEXT NOT NULL DEFAULT '{}',
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_tasks_status ON chat_tasks(status, updated_at DESC);
+
             -- AI call observability (provider, latency, failures)
             CREATE TABLE IF NOT EXISTS ai_events (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -225,7 +284,7 @@ def init_db():
         # the text written into each section (structure_json).
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS project (
-                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 title          TEXT NOT NULL DEFAULT '',
                 work_type      TEXT NOT NULL DEFAULT 'licenta',
                 field          TEXT NOT NULL DEFAULT '',
@@ -383,6 +442,10 @@ def init_db():
             except sqlite3.OperationalError:
                 pass  # column already exists
 
+        # ── Migration: more than one project per database ──
+        # SQLite cannot drop the old CHECK (id = 1); rebuild the table in place.
+        _migrate_project_table(conn)
+
         # ── Migration: real bibliographic identifiers ──
         # The research pipeline produced plausible-but-wrong source URLs; a DOI
         # resolved against Crossref is the only trustworthy identifier, so it
@@ -428,6 +491,73 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_highlights_entry ON pdf_highlights(entry_id)"
         )
+        for col, ddl in [
+            ("start_offset", "INTEGER DEFAULT NULL"),
+            ("end_offset", "INTEGER DEFAULT NULL"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE pdf_highlights ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        # ── Migration: canonical page texts (slice 1, 2026-11) ──
+        # page_texts.text for (entry_id, page_number) is the single source of
+        # truth for anchoring; character offsets are defined relative to it.
+        # `quote` in pdf_highlights stays display/verification only.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS page_texts (
+                entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                page_number INTEGER NOT NULL,
+                text        TEXT NOT NULL DEFAULT '',
+                source      TEXT NOT NULL DEFAULT 'native',
+                status      TEXT NOT NULL DEFAULT 'native',
+                char_count  INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (entry_id, page_number)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_page_texts_entry ON page_texts(entry_id)"
+        )
+        # The number printed on the page (may differ from the PDF page index).
+        # Empty means "unknown" — never guessed from the index.
+        for col, ddl in [("printed_page", "TEXT DEFAULT ''")]:
+            try:
+                conn.execute(f"ALTER TABLE page_texts ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        # ── Migration: checked statements from study notes (2026-11) ──
+        # Every statement the researcher writes is checked against the source
+        # document before it is kept: verbatim quote + printed page + status,
+        # plus a correction row when the note misread the text. One row per
+        # statement; re-checking a note replaces its rows.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS note_checks (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                note_id      INTEGER NOT NULL REFERENCES study_notes(id) ON DELETE CASCADE,
+                entry_id     INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                statement    TEXT NOT NULL,
+                status       TEXT NOT NULL CHECK (status IN
+                             ('verificat','verificat_cu_nuanta','incomplet','subestimat',
+                              'corectat','depasit','neverificat')),
+                page_pdf     INTEGER,
+                page_printed TEXT DEFAULT '',
+                quote        TEXT DEFAULT '',
+                correction   TEXT DEFAULT '',
+                method       TEXT NOT NULL DEFAULT 'exact' CHECK (method IN ('exact','llm','manual')),
+                confidence   REAL,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_note_checks_note ON note_checks(note_id, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_note_checks_entry ON note_checks(entry_id, status)"
+        )
 
         # ── Migration: PRISMA screening decisions (2026-11) ──
         # The research pipeline produced protocol + PrismaFlow, but nobody
@@ -441,6 +571,117 @@ def init_db():
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS questionnaires (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id        INTEGER DEFAULT 1,
+                title             TEXT NOT NULL DEFAULT '',
+                description       TEXT NOT NULL DEFAULT '',
+                construct         TEXT NOT NULL DEFAULT '',
+                target_population TEXT NOT NULL DEFAULT '',
+                reliability_notes TEXT NOT NULL DEFAULT '',
+                items_json        TEXT NOT NULL DEFAULT '[]',
+                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
+        # ── Migration: PDF identity + reading progress + ISBN (2026-11) ──
+        # pdf_hash lets duplicate detection match identical files even when
+        # titles/DOIs differ; read_status tracks the reading workflow;
+        # isbn covers books (DOI is for papers).
+        for col, ddl in [
+            ("pdf_hash", "TEXT DEFAULT ''"),
+            ("read_status", "TEXT DEFAULT 'unread'"),
+            ("isbn", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE entries ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        # ── Migration: AI-extracted concepts & supporting evidence (2026-11) ──
+        # Concepts are factors/subfactors/constructs/mechanisms/outcomes mined
+        # from highlights, notes or a text selection; evidence pins each
+        # concept to the study entry + quote it came from.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS extracted_concepts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER,
+                name TEXT NOT NULL,
+                concept_type TEXT DEFAULT 'factor',
+                description TEXT DEFAULT '',
+                parent_concept_id INTEGER REFERENCES extracted_concepts(id) ON DELETE SET NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS concept_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                concept_id INTEGER REFERENCES extracted_concepts(id) ON DELETE CASCADE,
+                entry_id INTEGER REFERENCES entries(id) ON DELETE CASCADE,
+                quote TEXT NOT NULL,
+                page_number INTEGER,
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_concepts_project ON extracted_concepts(project_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_concept_evidence_concept ON concept_evidence(concept_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_concept_evidence_entry ON concept_evidence(entry_id)"
+        )
+
+        # ── Migration: claim hierarchy + stance edges (slice 5, 2026-11) ──
+        # `theories` already holds an arbitrary tree (parent_id); claims are
+        # leaves of that tree, marked by node_type instead of a new table.
+        for col, ddl in [
+            ("node_type", "TEXT DEFAULT 'theory'"),
+            ("statement", "TEXT DEFAULT ''"),
+            ("test_variable", "TEXT DEFAULT ''"),
+            ("test_condition", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE theories ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS claim_stance (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                claim_id          INTEGER NOT NULL REFERENCES theories(id) ON DELETE CASCADE,
+                entry_id          INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                direction         TEXT NOT NULL
+                                  CHECK (direction IN ('supports','contradicts','mixed','neutral')),
+                aspect            TEXT DEFAULT '',
+                highlight_id      INTEGER REFERENCES pdf_highlights(id) ON DELETE SET NULL,
+                evidence_page     INTEGER,
+                evidence_start    INTEGER,
+                evidence_end      INTEGER,
+                evidence_quote    TEXT NOT NULL,
+                reasoning         TEXT DEFAULT '',
+                confidence        REAL,
+                status            TEXT NOT NULL DEFAULT 'proposed'
+                                  CHECK (status IN ('proposed','accepted','rejected','insufficient')),
+                proposed_by       TEXT NOT NULL DEFAULT 'ai',
+                provider          TEXT DEFAULT '',
+                model             TEXT DEFAULT '',
+                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                decided_at        TEXT
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_claim_stance_claim ON claim_stance(claim_id, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_claim_stance_entry ON claim_stance(entry_id, status)"
+        )
         conn.commit()
     finally:
         conn.close()

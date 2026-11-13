@@ -25,6 +25,81 @@ export interface Entry {
   bib_title?: string;
   bib_authors?: string;
   bib_year?: string;
+  read_status?: 'unread' | 'reading' | 'read' | 'annotated';
+  isbn?: string;
+  pdf_hash?: string;
+}
+
+export interface DuplicateEntry {
+  id: number;
+  title: string;
+  doi?: string;
+  isbn?: string;
+  pdf_hash?: string;
+  study_type?: string;
+  read_status?: string;
+  has_pdf: boolean;
+  authors?: string;
+  created_at: string;
+}
+
+export interface DuplicateGroup {
+  reason: 'doi' | 'isbn' | 'pdf_hash' | 'title';
+  value?: string;
+  entries: DuplicateEntry[];
+}
+
+export interface DuplicatesResponse {
+  duplicate_groups: DuplicateGroup[];
+  count: number;
+  total_groups: number;
+  /** Extra rows beyond the first entry of each group (what merge removes). */
+  total_duplicates: number;
+}
+
+/** Suggested bibliographic fields read from an uploaded PDF. */
+export interface PdfMetadataSuggestion {
+  title: string;
+  authors: string;
+  year: string;
+  doi: string;
+  isbn: string;
+  study_type: string;
+  page_count: number;
+  has_text_layer: boolean;
+  source: string;
+}
+
+export interface MergeStudiesPayload {
+  keep_id: number;
+  duplicate_id: number;
+  preferred_title?: string;
+  merge_notes?: boolean;
+  merge_highlights?: boolean;
+  merge_evidence?: boolean;
+  merge_relations?: boolean;
+}
+
+export interface ExtractedConcept {
+  id: number;
+  project_id?: number | null;
+  name: string;
+  concept_type: 'factor' | 'subfactor' | 'construct' | 'mechanism' | 'outcome';
+  description?: string;
+  parent_concept_id?: number | null;
+  created_at: string;
+  evidence_count?: number;
+}
+
+export interface ConceptEvidence {
+  id: number;
+  concept_id: number;
+  entry_id: number;
+  quote: string;
+  page_number?: number | null;
+  note?: string;
+  study_title?: string;
+  created_at: string;
 }
 
 export interface ExternalStudyResult {
@@ -177,6 +252,10 @@ export interface GraphNode {
   degree: number;
   /** True when no relationship touches this entry. */
   isolated: boolean;
+  /** Entry kind ('' for plain notes, 'concept' for AI-extracted factors). */
+  study_type?: string;
+  /** For concept nodes: factor | subfactor | construct | mechanism | outcome. */
+  concept_type?: string;
 }
 
 export interface GraphEdge {
@@ -268,6 +347,17 @@ export interface ChatAction {
   [key: string]: any;
 }
 
+export interface ChatTask {
+  id: number;
+  kind: string;
+  goal: string;
+  status: 'active' | 'completed' | 'failed' | 'cancelled';
+  details: string;
+  progress: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
 // Research / Studies types
 export interface ResearchStudy {
   title: string;
@@ -339,6 +429,12 @@ export interface Theory {
   status: TheoryStatus;
   created_at: string;
   updated_at: string;
+  // Present on leaves created as claims (node_type='claim'); absent on plain
+  // theories, so they stay optional instead of pretending to be empty.
+  node_type?: 'theory' | 'claim';
+  statement?: string;
+  test_variable?: string;
+  test_condition?: string;
 }
 
 // Study QA + health check
@@ -979,4 +1075,330 @@ export interface ScreeningDecisionRow {
   decision: 'include' | 'exclude' | 'maybe';
   reason: string;
   updated_at: string;
+}
+export interface QuestionnaireItem {
+  id: string
+  text: string
+  type: string
+  options: string[]
+  subscale?: string
+}
+
+export interface Questionnaire {
+  id: number
+  project_id?: number
+  title: string
+  description: string
+  construct: string
+  target_population: string
+  reliability_notes: string
+  items: QuestionnaireItem[]
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectSummary {
+  id: number
+  title: string
+  work_type: string
+  field: string
+  updated_at: string
+}
+
+export interface ZoteroStatus {
+  installed: boolean;
+  path?: string;
+  storage_path?: string;
+  item_count?: number;
+  has_database?: boolean;
+  has_pdfs?: boolean;
+  pdf_count?: number;
+  message?: string;
+}
+
+export interface ZoteroImportResult {
+  imported_count: number;
+  skipped_count: number;
+  pdfs_copied: number;
+  errors?: string[];
+  skipped?: { title: string; doi: string; existing_id: number; reason: string }[];
+}
+
+// ── Claims, stance edges, note checks, page parse (slice 10a) ────────────────
+// Mirrors backend/app/routers/claims.py, analysis.py, note_check.py and
+// studies_parse.py. Response shapes follow the routers, not the design sketch:
+// where they differ the router wins, because that is what arrives over HTTP.
+
+export type StanceDirection = 'supports' | 'contradicts' | 'mixed' | 'neutral';
+export type StanceStatus = 'proposed' | 'accepted' | 'rejected' | 'insufficient';
+/** Verdict computed from accepted stance edges; `insufficient` means "not enough studies". */
+export type ClaimVerdict = StanceDirection | 'insufficient';
+
+/** One stance edge: a study's verdict on one claim, pinned to a page quote. */
+export interface ClaimStance {
+  id: number;
+  claim_id: number;
+  entry_id: number;
+  /** Added by the router's JOIN on entries.title. */
+  entry_title?: string;
+  direction: StanceDirection;
+  aspect: string;
+  highlight_id?: number | null;
+  evidence_page?: number | null;
+  evidence_start?: number | null;
+  evidence_end?: number | null;
+  evidence_quote: string;
+  reasoning: string;
+  confidence?: number | null;
+  status: StanceStatus;
+  proposed_by: 'ai' | 'user';
+  provider?: string;
+  model?: string;
+  created_at: string;
+  decided_at?: string | null;
+}
+
+/** Body for POST /claims/{id}/stances (backend ClaimStanceIn). */
+export interface ClaimStanceInput {
+  entry_id: number;
+  direction: StanceDirection;
+  aspect?: string;
+  highlight_id?: number | null;
+  evidence_page?: number | null;
+  evidence_start?: number | null;
+  evidence_end?: number | null;
+  evidence_quote?: string | null;
+  reasoning?: string;
+  confidence?: number | null;
+  proposed_by?: 'ai' | 'user';
+  provider?: string;
+  model?: string;
+}
+
+/**
+ * GET /claims/{id}/stances. Without `status` the router returns all four keys;
+ * with `status` it returns only that key — hence every bucket is optional.
+ */
+export interface ClaimStancesResponse {
+  claim_id: number;
+  proposed?: ClaimStance[];
+  accepted?: ClaimStance[];
+  rejected?: ClaimStance[];
+  insufficient?: ClaimStance[];
+}
+
+/** One accepted study inside a claim aggregate, as returned by claims.py. */
+export interface ClaimAggregateEntry {
+  entry_id: number;
+  entry_title?: string;
+  verdict: ClaimVerdict;
+  accepted_count: number;
+  /** Every accepted direction for this study (repeats allowed). */
+  directions: StanceDirection[];
+}
+
+/** One study inside the analysis rollup (app/stance/aggregate.py claim_rollup). */
+export interface ClaimAggregateStudyRef {
+  entry_id: number;
+  entry_title?: string;
+  verdict: ClaimVerdict;
+  sides?: StanceDirection[];
+}
+
+/**
+ * Aggregate over accepted edges. Two routers produce it:
+ * - GET /claims/{id}/aggregate → `per_entry` + `claim_verdict` (no confident/distribution);
+ * - the analysis rollup → `per_study` + `distribution` + `confident` + `explanation`.
+ * `verdict` is normalised by `api.claims.aggregate` from `claim_verdict`.
+ */
+export interface ClaimAggregate {
+  claim_id: number;
+  claim_name?: string;
+  verdict: ClaimVerdict;
+  claim_verdict?: ClaimVerdict;
+  studies_accepted: number;
+  /** Analysis rollup only. */
+  confident?: boolean;
+  /** Analysis rollup only: how many studies landed in each verdict bucket. */
+  distribution?: Record<ClaimVerdict, number>;
+  per_entry?: ClaimAggregateEntry[];
+  per_study?: ClaimAggregateStudyRef[];
+  explanation?: string;
+}
+
+/** Raw body of GET /claims/{id}/aggregate (before normalisation). */
+export interface ClaimAggregateResponse {
+  claim_id: number;
+  claim_name?: string;
+  per_entry: ClaimAggregateEntry[];
+  claim_verdict: ClaimVerdict;
+  studies_accepted: number;
+}
+
+/** One scored passage from POST /claims/{id}/analyze. */
+export interface ClaimAnalysisEvidence {
+  highlight_id: number;
+  page: number;
+  start: number;
+  end: number;
+  quote: string;
+  windows_scored: number;
+  any_assertive: boolean;
+  strong: boolean;
+}
+
+export interface ClaimAnalysisSkipped {
+  reason: string;
+  highlight_id?: number;
+}
+
+export interface ClaimAnalysisNli {
+  available: boolean;
+  scorer?: string;
+  model_dir?: string;
+  reason?: string;
+}
+
+/** Study-level dry-run block of the analysis panel (no edges are written). */
+export interface ClaimAnalysisStudy {
+  verdict: ClaimVerdict;
+  directions: StanceDirection[];
+  strong_windows: number;
+  source: string;
+}
+
+export interface ClaimAnalysis {
+  claim_id: number;
+  entry_id: number;
+  evidence: ClaimAnalysisEvidence[];
+  skipped: ClaimAnalysisSkipped[];
+  nli: ClaimAnalysisNli;
+  aggregate: {
+    study: ClaimAnalysisStudy;
+    claim: ClaimAggregate;
+  };
+}
+
+export interface AnalysisCapabilities {
+  nli: {
+    available: boolean;
+    scorer?: string;
+    reason?: string;
+    expected?: string;
+    model_dir?: string;
+  };
+  llm_rationale: { available: boolean; reason: string };
+}
+
+// ── Verified notes ──────────────────────────────────────────────────────────
+
+export type NoteCheckStatus =
+  | 'verificat'
+  | 'verificat_cu_nuanta'
+  | 'incomplet'
+  | 'subestimat'
+  | 'corectat'
+  | 'depasit'
+  | 'neverificat';
+
+/** A stored note_checks row (GET /studies/{id}/note-checks, PATCH /note-checks/{id}). */
+export interface NoteCheck {
+  id: number;
+  note_id: number;
+  entry_id: number;
+  statement: string;
+  status: NoteCheckStatus;
+  page_pdf?: number | null;
+  page_printed?: string;
+  quote: string;
+  correction: string;
+  method: string;
+  confidence?: number | null;
+}
+
+/** A statement from the dry check: no row id until it has been applied. */
+export interface NoteCheckStatement {
+  statement: string;
+  status: NoteCheckStatus;
+  page_pdf?: number | null;
+  page_printed?: string;
+  quote: string;
+  correction: string;
+  method: string;
+  confidence?: number | null;
+  coverage?: number;
+  /** Present only when the backend echoed a stored row. */
+  id?: number;
+  note_id?: number;
+  entry_id?: number;
+}
+
+export interface NoteCheckResult {
+  note_id: number;
+  statements: NoteCheckStatement[];
+  summary: { verificat: number; neverificat: number; total: number };
+}
+
+export interface NoteCheckListRow extends NoteCheck {
+  /** Added by the router's JOIN on study_notes. */
+  note_content?: string;
+  course_context?: string;
+  created_at?: string;
+}
+
+/**
+ * GET /studies/{id}/note-checks. The router returns `statements` plus the same
+ * rows bucketed by status; it does not repeat `entry_id` in the body.
+ */
+export interface NoteCheckList {
+  statements: NoteCheckListRow[];
+  by_status: Record<NoteCheckStatus, NoteCheckListRow[]>;
+}
+
+export interface VerifySummary {
+  statements: number;
+  by_status: Record<string, number>;
+  notes_total: number;
+  notes_fully_verified: number;
+  pages_with_printed_numbers: number;
+  pages_total: number;
+}
+
+// ── Per-page document parse ─────────────────────────────────────────────────
+
+export interface ParseSummaryPage {
+  page: number;
+  kind: string;
+  source: string;
+  status: string;
+  chars: number;
+}
+
+export interface ParseSummary {
+  entry_id: number;
+  pdf_path: string;
+  kind: 'native' | 'scanned' | 'mixed' | 'empty' | '';
+  pages: number;
+  pages_native: number;
+  pages_scanned: number;
+  pages_empty: number;
+  parsed: {
+    native: number;
+    vision_ok: number;
+    vision_uncertain: number;
+    manual: number;
+    error: number;
+    missing: number;
+  };
+  per_page: ParseSummaryPage[];
+}
+
+export interface PageTextResponse {
+  page: number;
+  text: string;
+  source: string;
+  status: string;
+  char_count: number;
+  /** Stored on page_texts but not part of the router's response model today. */
+  printed_page?: string;
 }

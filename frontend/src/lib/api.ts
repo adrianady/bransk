@@ -1,4 +1,20 @@
 import type {
+  AnalysisCapabilities,
+  ClaimAggregate,
+  ClaimAggregateResponse,
+  ClaimAnalysis,
+  ClaimStance,
+  ClaimStanceInput,
+  ClaimStancesResponse,
+  NoteCheck,
+  NoteCheckList,
+  NoteCheckResult,
+  NoteCheckStatus,
+  ParseSummary,
+  PageTextResponse,
+  StanceDirection,
+  StanceStatus,
+  VerifySummary,
   AiCustomModelsResponse,
   AiCustomProviderState,
   AiCustomSaveRequest,
@@ -15,8 +31,15 @@ import type {
   AiTestConnectionResponse,
   BulkImportResponse,
   ChatHistoryItem,
+  ChatTask,
   BibliographyResponse,
+  ConceptEvidence,
+  DuplicateEntry,
+  DuplicateGroup,
+  DuplicatesResponse,
+  ExtractedConcept,
   GlobalSearchResponse,
+  MergeStudiesPayload,
   PdfHighlight,
   ScreeningDecisionRow,
   ScreeningSummary,
@@ -61,6 +84,10 @@ import type {
   TodoItem,
   TopicBrainstormResponse,
   TopicsResponse,
+  Questionnaire,
+  ProjectSummary,
+  ZoteroStatus,
+  ZoteroImportResult,
 } from './types';
 
 // Dynamic API Base URL resolution with fallback to relative /api proxy
@@ -113,6 +140,16 @@ function notifyUnauthorized(): void {
   } catch {
     /* server-side rendering / tests without window */
   }
+}
+
+// Network-level failure hook. The offline sync layer registers a listener so
+// a failed fetch instantly marks the server unreachable (Tailscale off etc.)
+// without waiting for the next health probe. api.ts never imports sync.ts —
+// the listener is registered at startup, so there is no import cycle.
+let onNetworkFailure: (() => void) | null = null;
+
+export function setNetworkFailureListener(fn: (() => void) | null): void {
+  onNetworkFailure = fn;
 }
 
 /** Headers for calls that use fetch directly (streams, PDFs, and auth status). */
@@ -250,6 +287,49 @@ async function request<T>(path: string, options?: RequestInit & { timeoutMs?: nu
   } catch (err: any) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
+      // Our own timeout means the server did not answer — unreachable as far
+      // as this request is concerned. A caller-supplied signal is the
+      // caller's own cancel, not a reachability signal.
+      if (onNetworkFailure && !init.signal) onNetworkFailure();
+      throw new Error(`Request timed out after ${timeoutMs / 1000} seconds`);
+    }
+    if (onNetworkFailure && err instanceof TypeError) onNetworkFailure();
+    throw err;
+  }
+}
+
+export async function requestFormData<T>(path: string, formData: FormData, timeoutMs = 60000): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const token = getAuthToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method: 'POST',
+      body: formData,
+      credentials: 'include',
+      headers,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (res.status === 401 && path !== '/auth/login') notifyUnauthorized();
+
+    if (!res.ok) {
+      const { detail } = await readErrorBody(res);
+      throw new ApiError(readableError(detail, res.status), res.status, detail);
+    }
+    if (res.status === 204) return undefined as T;
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      return res.json();
+    }
+    return (await res.text()) as unknown as T;
+  } catch (err: unknown) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`Request timed out after ${timeoutMs / 1000} seconds`);
     }
     throw err;
@@ -347,6 +427,13 @@ export const api = {
       request<Entry>(`/entries/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     delete: (id: number) =>
       request<void>(`/entries/${id}`, { method: 'DELETE' }),
+    uploadPdf: (id: number, file: File) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      return requestFormData<Entry>(`/entries/${id}/pdf`, formData, 120000);
+    },
+    updateStatus: (id: number, read_status: string) =>
+      request<Entry>(`/entries/${id}/status`, { method: 'PATCH', body: JSON.stringify({ read_status }) }),
   },
 
   // Citations — BibTeX/RIS export and the thesis bibliography
@@ -431,7 +518,15 @@ export const api = {
       request<Relationship>('/relationships', { method: 'POST', body: JSON.stringify(data) }),
     delete: (id: number) =>
       request<void>(`/relationships/${id}`, { method: 'DELETE' }),
-    graph: () => request<GraphData>('/relationships/graph'),
+    graph: (params?: { project_id?: number; only_read?: boolean; only_project_evidence?: boolean; study_type?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.project_id != null) q.set('project_id', String(params.project_id));
+      if (params?.only_read) q.set('only_read', 'true');
+      if (params?.only_project_evidence) q.set('only_project_evidence', 'true');
+      if (params?.study_type) q.set('study_type', params.study_type);
+      const query = q.toString();
+      return request<GraphData>(`/relationships/graph${query ? `?${query}` : ''}`);
+    },
     labels: () => request<{ total: number; labels: RelationLabel[] }>('/relationships/labels'),
   },
 
@@ -472,6 +567,8 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ confirm_id: confirmId, approve }),
       }),
+    getTask: () => request<{ task: ChatTask | null }>('/chat/task'),
+    cancelTask: () => request<{ status: string }>('/chat/task', { method: 'DELETE' }),
   },
 
   // AI status and model choice. These lived in AiStatusModal as bare
@@ -640,6 +737,11 @@ export const api = {
           timeoutMs: 300000, // batch downloads can take minutes
         },
       ),
+    uploadPdf: (id: number, file: File) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      return requestFormData<Entry>(`/entries/${id}/pdf`, formData, 120000);
+    },
     // PDF.js supports request headers, so keep credentials out of URLs that
     // can be copied into browser history, logs, or referrer metadata.
     pdfUrl: (id: number) => `${BASE}/studies/${id}/pdf`,
@@ -673,6 +775,23 @@ export const api = {
         body: JSON.stringify({ identifier }),
         timeoutMs: 25000,
       }),
+    // Reads the PDF's own metadata + first page to prefill title/authors/DOI/
+    // ISBN and to suggest the study/book classification before upload.
+    extractPdfMetadata: (file: File) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      return requestFormData<{
+        title: string;
+        authors: string;
+        year: string;
+        doi: string;
+        isbn: string;
+        study_type: string;
+        page_count: number;
+        has_text_layer: boolean;
+        source: string;
+      }>('/studies/extract-pdf-metadata', formData, 60000);
+    },
     importBulk: (data: { studies?: any[]; raw_text?: string; auto_download_pdfs?: boolean }) =>
       request<BulkImportResponse>('/studies/import-bulk', {
         method: 'POST',
@@ -703,6 +822,9 @@ export const api = {
       }),
     clearScreening: (entryId: number) =>
       request<void>(`/studies/${entryId}/screening`, { method: 'DELETE' }),
+    getDuplicates: () => request<DuplicatesResponse>('/studies/duplicates'),
+    merge: (payload: MergeStudiesPayload) =>
+      request<{ success: boolean; keep_entry: Entry }>('/studies/merge', { method: 'POST', body: JSON.stringify(payload) }),
     // AI-assisted methodology: design / effect direction / quality proposal
     aiAppraisal: (entryId: number) =>
       request<{ entry_id: number; design: string; effect_direction: string; quality: number | null; justification: string }>(
@@ -748,6 +870,138 @@ export const api = {
       request<TheoryEvidence>(`/theories/${id}/evidence`, { method: 'POST', body: JSON.stringify(data) }),
     removeEvidence: (theoryId: number, evidenceId: number) =>
       request<void>(`/theories/${theoryId}/evidence/${evidenceId}`, { method: 'DELETE' }),
+  },
+
+  // Claim hierarchy + stance edges (slice 5). Claims are leaves of the theory
+  // tree; a stance edge pins one study's verdict to a verbatim page quote, so
+  // the backend rejects quotes that do not match the canonical page text.
+  claims: {
+    create: (body: { parent_id: number; name: string; statement: string; test_variable?: string; test_condition?: string }) =>
+      request<Theory>('/claims', { method: 'POST', body: JSON.stringify(body) }),
+    stances: (claimId: number, status?: StanceStatus) =>
+      request<ClaimStancesResponse>(
+        `/claims/${claimId}/stances${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+      ),
+    proposeStance: (claimId: number, body: ClaimStanceInput) =>
+      request<ClaimStance>(`/claims/${claimId}/stances`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    // The router speaks `action: 'accept' | 'reject'`; the UI speaks a status.
+    // Translate here so callers keep the accepted/rejected vocabulary.
+    decideStance: (stanceId: number, body: {
+      status: 'accepted' | 'rejected';
+      direction?: StanceDirection;
+      evidence_quote?: string;
+      correction?: string;
+    }) => {
+      const payload: Record<string, unknown> = {
+        action: body.status === 'accepted' ? 'accept' : 'reject',
+      };
+      if (body.direction !== undefined) payload.direction = body.direction;
+      if (body.evidence_quote !== undefined) payload.evidence_quote = body.evidence_quote;
+      // claim_stance has no `correction` column; the reviewer's wording is
+      // stored in `reasoning`, which is what the analysis panel shows.
+      if (body.correction !== undefined) payload.reasoning = body.correction;
+      return request<ClaimStance>(`/claims/stances/${stanceId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+    },
+    // GET /claims/{id}/aggregate names the verdict `claim_verdict` and the
+    // study list `per_entry`. Normalise both so one ClaimAggregate type serves
+    // this endpoint and the analysis rollup.
+    aggregate: async (claimId: number): Promise<ClaimAggregate> => {
+      const raw = await request<ClaimAggregateResponse>(`/claims/${claimId}/aggregate`);
+      return {
+        claim_id: raw.claim_id,
+        claim_name: raw.claim_name,
+        verdict: raw.claim_verdict,
+        claim_verdict: raw.claim_verdict,
+        studies_accepted: raw.studies_accepted,
+        per_entry: raw.per_entry,
+        per_study: raw.per_entry.map((entry) => ({
+          entry_id: entry.entry_id,
+          entry_title: entry.entry_title,
+          verdict: entry.verdict,
+          sides: entry.directions,
+        })),
+      };
+    },
+    // Claims touched by one study (entry): which claim_stance edges reference it.
+    forEntry: (entryId: number) =>
+      request<{
+        entry_id: number;
+        entry_title: string;
+        claims: Array<
+          ClaimStance & { claim_name?: string; statement?: string }
+        >;
+        bias: { available: boolean; reason: string };
+      }>(`/entries/${entryId}/analysis`),
+  },
+
+  // Stance analysis panel: deterministic dry run, no writes, no model.
+  analysis: {
+    run: (claimId: number, entryId: number) =>
+      request<ClaimAnalysis>(`/claims/${claimId}/analyze`, {
+        method: 'POST',
+        body: JSON.stringify({ entry_id: entryId }),
+        timeoutMs: 120000, // NLI windows score one by one
+      }),
+    capabilities: (claimId: number) =>
+      request<AnalysisCapabilities>(`/claims/${claimId}/analyze/capabilities`),
+  },
+
+  // Verified notes: deterministic check of note statements against page text.
+  notes: {
+    check: (entryId: number, noteId: number, apply = false) =>
+      request<NoteCheckResult>(
+        `/studies/${entryId}/notes/${noteId}/check${apply ? '?apply=true' : ''}`,
+        { method: 'POST', timeoutMs: 120000 },
+      ),
+    checks: (entryId: number) =>
+      request<NoteCheckList>(`/studies/${entryId}/note-checks`),
+    updateCheck: (id: number, body: {
+      status?: NoteCheckStatus;
+      quote?: string;
+      correction?: string;
+      page_printed?: string;
+    }) =>
+      request<NoteCheck>(`/note-checks/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    verifySummary: (entryId: number) =>
+      request<VerifySummary>(`/studies/${entryId}/verify/summary`),
+  },
+
+  // Per-page document parse (classification ledger, canonical text, renders).
+  parse: {
+    summary: (entryId: number) =>
+      request<ParseSummary>(`/studies/${entryId}/parse/summary`, { timeoutMs: 60000 }),
+    pageText: (entryId: number, page: number) =>
+      request<PageTextResponse>(`/studies/${entryId}/pages/${page}/text`),
+    // Image loads in <img src>, so it cannot carry an Authorization header;
+    // the session cookie is what authenticates it.
+    pageImageUrl: (entryId: number, page: number) =>
+      `${BASE}/studies/${entryId}/pages/${page}/image`,
+    // SSE endpoint — open with EventSource/fetch, not through request().
+    streamUrl: (entryId: number, opts?: {
+      pages?: string;
+      provider?: string;
+      model?: string;
+      force?: boolean;
+      dpi?: number;
+    }) => {
+      const q = new URLSearchParams();
+      if (opts?.pages) q.set('pages', opts.pages);
+      if (opts?.provider) q.set('provider', opts.provider);
+      if (opts?.model) q.set('model', opts.model);
+      if (opts?.force) q.set('force', 'true');
+      if (opts?.dpi != null) q.set('dpi', String(opts.dpi));
+      const query = q.toString();
+      return `${BASE}/studies/${entryId}/parse/stream${query ? `?${query}` : ''}`;
+    },
   },
 
   // Study QA + health check
@@ -900,5 +1154,69 @@ export const api = {
         signal?.removeEventListener('abort', onExternalAbort);
       });
     },
+  },
+
+  // Research Instruments & Questionnaires
+  questionnaires: {
+    list: (projectId?: number) =>
+      request<Questionnaire[]>(`/questionnaires${projectId ? `?project_id=${projectId}` : ''}`),
+    get: (id: number) => request<Questionnaire>(`/questionnaires/${id}`),
+    create: (data: Partial<Questionnaire>) =>
+      request<Questionnaire>('/questionnaires', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<Questionnaire>) =>
+      request<Questionnaire>(`/questionnaires/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: number) =>
+      request<{ status: string; deleted_id: number }>(`/questionnaires/${id}`, { method: 'DELETE' }),
+    aiGenerate: (id: number) =>
+      request<Questionnaire>(`/questionnaires/${id}/ai-generate`, { method: 'POST', timeoutMs: 180000 }),
+    aiCritique: (id: number) =>
+      request<{ questionnaire_id: number; title: string; critique: string }>(`/questionnaires/${id}/ai-critique`, {
+        method: 'POST',
+        timeoutMs: 180000,
+      }),
+  },
+
+  // Multi-Project Isolation
+  projects: {
+    list: () => request<{ active_id: number; projects: ProjectSummary[] }>('/projects'),
+    create: (data: { title: string; work_type?: string; field?: string; description?: string; research_q?: string; methodology?: string }) =>
+      request<Project>('/projects', { method: 'POST', body: JSON.stringify(data) }),
+    activate: (id: number) => request<{ status: string; active_id: number; project: Project }>(`/projects/${id}/activate`, { method: 'POST' }),
+    delete: (id: number) => request<{ status: string; deleted_id: number }>(`/projects/${id}`, { method: 'DELETE' }),
+  },
+
+  // Zotero Integration
+  zotero: {
+    status: (customPath?: string) =>
+      request<ZoteroStatus>(`/zotero/status${customPath ? `?path=${encodeURIComponent(customPath)}` : ''}`),
+    importLocal: (options?: {
+      collection?: string;
+      data_dir?: string;
+      storage_dir?: string;
+      dedup_by_doi?: boolean;
+      dedup_by_title?: boolean;
+    }) =>
+      request<ZoteroImportResult>('/zotero/import/local', {
+        method: 'POST',
+        body: JSON.stringify(options || {}),
+        timeoutMs: 180000,
+      }),
+    importFile: (formData: FormData) =>
+      requestFormData<ZoteroImportResult>('/zotero/import/file', formData, 120000),
+    syncApi: (apiKey: string, userId: string) =>
+      request<ZoteroImportResult>('/zotero/sync/api', {
+        method: 'POST',
+        body: JSON.stringify({ api_key: apiKey, user_id: userId }),
+        timeoutMs: 180000,
+      }),
+    export: () => `${(import.meta as any).env?.VITE_API_BASE_URL || '/api'}/zotero/export`,
+  },
+
+  // AI-extracted concepts (factors / subfactors / constructs) + evidence links
+  aiConcepts: {
+    extract: (payload: { entry_ids?: number[]; project_id?: number | null; text_selection?: string; quote?: string; page_number?: number; entry_id?: number }) =>
+      request<{ concepts: ExtractedConcept[]; relations?: any[] }>('/ai/extract-concepts', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 120000 }),
+    getProjectConcepts: (projectId: number) =>
+      request<{ concepts: ExtractedConcept[]; relations?: any[] }>(`/project/${projectId}/concepts`),
   },
 };

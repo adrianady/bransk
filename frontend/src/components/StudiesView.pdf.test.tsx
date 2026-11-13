@@ -78,7 +78,11 @@ describe('StudiesView PDF loading feedback', () => {
     expect(apiMock.studies.download).toHaveBeenCalledTimes(1)
 
     await act(async () => download.resolve({ pdf_path: '7-studiu.pdf', indexed_chunks: 4 }))
-    await waitFor(() => expect(button).toBeEnabled())
-    expect(button).toHaveAttribute('aria-busy', 'false')
+    // The returned path updates the row in place: no manual refresh, and the
+    // download button becomes the reader button immediately.
+    await waitFor(() =>
+      expect(screen.getByTitle('Deschide PDF-ul nativ în aplicație și adaugă notițe')).toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('button', { name: 'Descarcă PDF', exact: true })).not.toBeInTheDocument()
   })
 })

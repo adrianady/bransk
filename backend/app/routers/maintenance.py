@@ -76,7 +76,8 @@ def _merge_duplicate_studies(conn, report: dict) -> None:
     rows = [
         dict(r)
         for r in conn.execute(
-            """SELECT id, title, source, doi, pdf_path, authors, design, effect_direction,
+            """SELECT id, title, source, doi, pdf_path, pdf_hash, read_status, isbn,
+                      authors, design, effect_direction,
                       quality, entry_date, tags, content, study_type, importance,
                       url_validated, created_at
                FROM entries
@@ -114,6 +115,10 @@ def _merge_duplicate_studies(conn, report: dict) -> None:
                 ("reminders", "entry_id"),
                 ("spaced_repetition", "entry_id"),
                 ("documents", "entry_id"),
+                ("study_notes", "entry_id"),
+                ("pdf_highlights", "entry_id"),
+                ("project_claim_evidence", "entry_id"),
+                ("concept_evidence", "entry_id"),
             ):
                 if table in ("todos", "spaced_repetition"):
                     # both tables allow a single row per entry
@@ -149,9 +154,9 @@ def _merge_duplicate_studies(conn, report: dict) -> None:
 
             # Then fill whatever the surviving row was missing.
             fields = {}
-            for field in ("doi", "doi_source", "pdf_path", "authors", "design",
+            for field in ("doi", "doi_source", "pdf_path", "pdf_hash", "authors", "design",
                           "effect_direction", "entry_date", "bib_title", "bib_authors",
-                          "bib_year", "doi_checked_at"):
+                          "bib_year", "doi_checked_at", "isbn", "read_status"):
                 value = dup.get(field)
                 if value and not keep.get(field):
                     fields[field] = value
@@ -218,9 +223,9 @@ def _norm_updates(entry: dict) -> dict:
 
 def _extract_pdf_text(path, max_chars: int = 9000) -> str:
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
 
-        doc = fitz.open(str(path))
+        doc = pymupdf.open(str(path))
         try:
             return " ".join(page.get_text() for page in doc)[:max_chars]
         finally:

@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.db import get_db
 from app.main import app
-from app.routers import chat as chat_mod
+import app.chat as chat_mod
 from app.web_search import search_web
 
 
@@ -94,7 +94,7 @@ def test_download_study_action_parses():
 
 
 def test_detect_research_intent_extracts_topic():
-    from app.routers.chat import _detect_research_intent
+    from app.chat.task_manager import _detect_research_intent
 
     assert _detect_research_intent("research the history of physics") == "the history of physics"
     assert _detect_research_intent("i want you to make research for studies regarding the mind theories") == "the mind theories"
@@ -136,7 +136,7 @@ def test_chat_stream_accepts_long_history_messages():
 
 def test_history_item_extraction_clips_long_content():
     """LLM assembly truncates each history item to the 10k context budget."""
-    from app.routers.chat import _extract_history_item
+    from app.chat import _extract_history_item
 
     item = _extract_history_item({"role": "assistant", "content": "z" * 15000})
     assert item["role"] == "assistant"
@@ -732,7 +732,7 @@ def test_sse_keepalive_pings_during_silence():
     """Free models stall >40s mid-stream; the server must keep the link warm."""
     import asyncio
 
-    from app.routers.chat import _with_sse_keepalive
+    from app.chat import _with_sse_keepalive
 
     async def slow_source():
         await asyncio.sleep(1.2)
@@ -754,7 +754,7 @@ def test_sse_keepalive_pings_during_silence():
 def test_sse_keepalive_stops_cleanly():
     import asyncio
 
-    from app.routers.chat import _with_sse_keepalive
+    from app.chat import _with_sse_keepalive
 
     async def instant():
         yield "data: a\n\n"
@@ -770,3 +770,96 @@ async def _collect(agen):
     async for chunk in agen:
         out.append(chunk)
     return out
+
+
+# ── Search quality (2026-11 audit) ─────────────────────────────────────────
+
+def test_search_kb_matches_multiple_words_and_partial_tokens():
+    """A natural query must not be wrapped in one LIKE ('%a b c%')."""
+    with TestClient(app) as client:
+        client.post("/api/entries", json={
+            "title": "Sleep and memory",
+            "content": "Sleep supports memory consolidation in the hippocampus.",
+            "tags": "study",
+        })
+        acts = _parse("[SEARCH_KB: sleep consolidation hippocampus]")
+        found = next(a for a in acts if a["type"] == "search_results")
+        assert found["results"]
+        assert "hippocampus" in (found["results"][0].get("snippet") or "")
+
+        # Partial word: FTS tokenization cannot match, the LIKE fallback must.
+        partial = _parse("[SEARCH_KB: hippocamp]")
+        found_partial = next(a for a in partial if a["type"] == "search_results")
+        assert found_partial["results"]
+
+
+def test_search_timeline_matches_any_keyword_token():
+    with TestClient(app) as client:
+        client.post("/api/entries", json={
+            "title": "Consolidation study",
+            "content": "Memory replay during sleep.",
+            "entry_date": "2020-05-01",
+        })
+        acts = _parse("[SEARCH_TIMELINE: 2019-01-01 | 2021-01-01 | memory replay]")
+        found = next(a for a in acts if a["type"] == "timeline_results")
+        assert [r["title"] for r in found["results"]] == ["Consolidation study"]
+
+
+def test_download_study_accepts_doi_title_and_missing():
+    doi = _parse("[DOWNLOAD_STUDY: 10.1038/nrn.2016.44]")[0]
+    assert doi["type"] == "download_study_request" and doi["ref"] == "10.1038/nrn.2016.44"
+
+    title = _parse("[DOWNLOAD_STUDY: Sleep and memory]")[0]
+    assert title["type"] == "download_study_request" and title["ref"] == "Sleep and memory"
+
+    batch = _parse("[DOWNLOAD_STUDY: missing]")[0]
+    assert batch["type"] == "download_missing_request"
+
+
+# ── Active task persistence (2026-11 audit) ────────────────────────────────
+
+def test_active_task_persists_across_turns_and_can_be_cancelled():
+    with TestClient(app) as client:
+        client.post("/api/chat/stream", json={
+            "message": "screenează studiile din bibliotecă",
+            "history": [],
+        })
+        task = client.get("/api/chat/task").json()["task"]
+        assert task and task["kind"] == "screening" and task["status"] == "active"
+
+        # The prompt of the next turn must carry the task even though chat
+        # history itself is trimmed.
+        prompt = chat_mod._build_system_prompt([], "mock", "mock-model")
+        assert "ACTIVE CHAT TASK" in prompt and "screen the study library" in prompt
+
+        client.post("/api/chat/stream", json={"message": "continuă", "history": []})
+        assert client.get("/api/chat/task").json()["task"]["id"] == task["id"]
+
+        assert client.delete("/api/chat/task").status_code == 204
+        assert client.get("/api/chat/task").json()["task"] is None
+
+        client.post("/api/chat/stream", json={
+            "message": "screenează din nou studiile",
+            "history": [],
+        })
+        assert client.get("/api/chat/task").json()["task"]
+        client.delete("/api/chat/history")
+        assert client.get("/api/chat/task").json()["task"] is None
+
+
+def test_screen_study_records_prisma_decision():
+    with TestClient(app) as client:
+        entry = client.post("/api/entries", json={
+            "title": "Screening target", "content": "x", "tags": "study", "study_type": "paper",
+        }).json()
+        acts = _parse(f"[SCREEN_STUDY: {entry['id']} | exclude | wrong population]")
+        assert any(a["type"] == "study_screened" and a["decision"] == "exclude" for a in acts)
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT decision, reason FROM screening_decisions WHERE entry_id = ?",
+                [entry["id"]],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["decision"] == "exclude" and "population" in row["reason"]

@@ -7,7 +7,7 @@ error isolation in the chat parser, and request validation.
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.routers import chat as chat_mod
+import app.chat as chat_mod
 from app.routers import research as research_mod
 from app.routers.reminders import _next_future_occurrence, advance_overdue_recurring
 from app.studies_store import assert_public_download_url, is_valid_pdf_file

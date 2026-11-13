@@ -213,9 +213,11 @@ export function TodoList({ onSelectEntry }: Props) {
         <div className="space-y-2">
           {todos.map(todo => (
             <div key={todo.id} className={`card flex items-center gap-3 ${todo.completed ? 'opacity-60' : ''}`}>
-              <input type="checkbox" checked={todo.completed}
-                onChange={() => toggleTodo(todo)}
-                className="rounded w-5 h-5 shrink-0" />
+              <span className="touch-40-neg flex items-center justify-center shrink-0">
+                <input type="checkbox" checked={todo.completed}
+                  onChange={() => toggleTodo(todo)}
+                  className="rounded w-5 h-5 shrink-0" />
+              </span>
               <div className="flex-1 min-w-0">
                 {onSelectEntry && todo.entry ? (
                   <button
@@ -257,7 +259,7 @@ export function TodoList({ onSelectEntry }: Props) {
               </div>
               <div className="flex gap-1 shrink-0">
                 {editingId !== todo.id && (
-                  <button onClick={() => startEdit(todo)} className="icon-btn p-1" aria-label="Editează sarcina" title="Editează sarcina">
+                  <button onClick={() => startEdit(todo)} className="icon-btn p-1 touch-40-neg" aria-label="Editează sarcina" title="Editează sarcina">
                     <Pencil className="w-4 h-4" />
                   </button>
                 )}
@@ -269,7 +271,7 @@ export function TodoList({ onSelectEntry }: Props) {
                   } catch (err: any) {
                     toast.error('Sarcina nu s-a putut șterge: ' + (err?.message || 'eroare necunoscută'))
                   }
-                }} className="icon-btn p-1 text-madder" aria-label="Șterge sarcina" title="Șterge sarcina">
+                }} className="icon-btn p-1 touch-40-neg text-madder" aria-label="Șterge sarcina" title="Șterge sarcina">
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>

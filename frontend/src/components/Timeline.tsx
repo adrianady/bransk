@@ -321,7 +321,7 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
       </div>
 
       {/* Era presets: one click to the period that holds most of the entries. */}
-      <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1 mb-2">
+      <div className="flex flex-wrap gap-1.5 pb-1 mb-2">
         {([
           ['modern', 'Modern (1950–azi)'],
           ['21', 'Sec. XXI'],
@@ -339,7 +339,7 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
       </div>
 
       {/* Grouping: splitting into scientific domain lanes spreads studies evenly across time tracks */}
-      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 mb-2">
+      <div className="flex flex-wrap items-center gap-1.5 pb-1 mb-2">
         <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">Grupează:</span>
         {([
           ['domain', 'Domeniu'],
@@ -476,7 +476,7 @@ export function TimelineView({ onSelectEntry, onCreateEntry }: Props) {
             ))}
           </div>
           {/* Interactive Timeline Graph — fully responsive across desktop and mobile */}
-          <div className="card block overflow-hidden p-1 sm:p-3">
+          <div className="card block overflow-x-auto max-w-full p-1 sm:p-3">
             <div
               ref={containerRef}
               className="cg-timeline w-full"

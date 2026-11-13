@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 import app.db as db_module
 from app.db import get_db, init_db
 from app.main import app
-from app.routers.chat import _build_context, _parse_actions
+from app.chat import _build_context, _parse_actions
 
 
 @pytest.fixture

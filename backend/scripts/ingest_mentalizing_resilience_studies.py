@@ -357,8 +357,8 @@ def download_pdf_file(url: str, dest_path: Path) -> bool:
 
 def extract_pdf_fulltext(pdf_path: Path) -> str:
     try:
-        import fitz
-        doc = fitz.open(str(pdf_path))
+        import pymupdf
+        doc = pymupdf.open(str(pdf_path))
         text = " ".join(page.get_text() for page in doc)
         doc.close()
         return text

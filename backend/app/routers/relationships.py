@@ -277,30 +277,174 @@ def _edge_payload(row) -> dict:
 
 
 @router.get("/relationships/graph")
-def get_graph_data():
-    """Full graph (nodes + edges) for vis-network, with normalised labels."""
+def get_graph_data(
+    project_id: int | None = None,
+    only_read: bool = False,
+    only_project_evidence: bool = False,
+    study_type: str | None = None,
+    include_concept_sources: bool = True,
+):
+    """Full graph (nodes + edges) for vis-network, with normalised labels.
+
+    Optional filters (all combine with AND):
+    * ``project_id`` — with ``study_type=concept`` it scopes the map to that
+      project's mined concepts; otherwise the project scope applies through
+      its claim evidence (same as ``only_project_evidence``).
+    * ``only_read`` — keep nodes with ``read_status`` in ('read','annotated')
+      or with study notes / PDF highlights.
+    * ``only_project_evidence`` — keep nodes linked in
+      ``project_claim_evidence`` (for ``project_id`` when given, else any).
+    * ``study_type`` — keep nodes whose ``study_type`` matches exactly.
+    * ``include_concept_sources`` — with ``study_type=concept``, also keep the
+      studies each concept ``derives_from`` so the map stays grounded.
+    """
     conn = get_db()
     try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+        has_read = "read_status" in cols
+        has_type = "study_type" in cols
+        has_isbn = "isbn" in cols
+
+        evidence_ids: set[int] | None = None
+        project_concept_names: set[str] | None = None
+        if project_id is not None and study_type == "concept":
+            # In the concept map, "current project" means the concepts mined
+            # for that project — not only entries cited as claim evidence.
+            try:
+                project_concept_names = {
+                    (r["name"] or "").lower()
+                    for r in conn.execute(
+                        "SELECT name FROM extracted_concepts WHERE project_id = ?",
+                        [project_id],
+                    ).fetchall()
+                }
+            except Exception:  # noqa: BLE001 - pre-migration DBs lack the table
+                project_concept_names = set()
+        if only_project_evidence or project_id is not None:
+            try:
+                if project_id is not None:
+                    rows = conn.execute(
+                        """SELECT ce.entry_id AS eid FROM project_claim_evidence ce
+                           JOIN project_claims c ON c.id = ce.claim_id
+                           JOIN project p ON p.id = ?
+                           WHERE 1=1""",
+                        [project_id],
+                    ).fetchall()
+                    # project_claims has no project_id column: scope via the
+                    # section ids of the requested project instead.
+                    proj = conn.execute(
+                        "SELECT structure_json FROM project WHERE id = ?", [project_id]
+                    ).fetchone()
+                    import json as _json
+                    try:
+                        sections = _json.loads((proj["structure_json"] if proj else "[]") or "[]")
+                        section_ids = {str(s.get("id")) for s in sections if isinstance(s, dict)}
+                    except Exception:
+                        section_ids = set()
+                    if section_ids:
+                        ph = ",".join("?" for _ in section_ids)
+                        rows = conn.execute(
+                            f"""SELECT ce.entry_id AS eid FROM project_claim_evidence ce
+                                JOIN project_claims c ON c.id = ce.claim_id
+                                WHERE c.section_id IN ({ph})""",
+                            list(section_ids),
+                        ).fetchall()
+                    else:
+                        rows = []
+                else:
+                    rows = conn.execute("SELECT entry_id AS eid FROM project_claim_evidence").fetchall()
+                evidence_ids = {int(r["eid"]) for r in rows}
+            except Exception:
+                evidence_ids = set()
+
+        select_extra = ""
+        if has_read:
+            select_extra += ", read_status"
+        if has_isbn:
+            select_extra += ", isbn"
         entries = conn.execute(
-            "SELECT id, title, tags, importance, entry_date, content FROM entries WHERE archived = 0"
+            f"SELECT id, title, tags, importance, entry_date, content, study_type{select_extra} "
+            "FROM entries WHERE archived = 0"
         ).fetchall()
+
+        keep: dict[int, dict] = {}
+        for e in entries:
+            d = dict(e)
+            if study_type and (d.get("study_type") or "") != study_type:
+                continue
+            if evidence_ids is not None and d["id"] not in evidence_ids:
+                is_project_concept = (
+                    project_concept_names is not None
+                    and (d.get("study_type") or "") == "concept"
+                    and (d.get("title") or "").lower() in project_concept_names
+                )
+                if not is_project_concept:
+                    continue
+            if (
+                project_concept_names is not None
+                and (d.get("study_type") or "") == "concept"
+                and (d.get("title") or "").lower() not in project_concept_names
+            ):
+                continue
+            if only_read:
+                read_ok = has_read and (d.get("read_status") in ("read", "annotated"))
+                if not read_ok:
+                    has_note = conn.execute(
+                        "SELECT 1 FROM study_notes WHERE entry_id = ? LIMIT 1", [d["id"]]
+                    ).fetchone()
+                    has_hl = conn.execute(
+                        "SELECT 1 FROM pdf_highlights WHERE entry_id = ? LIMIT 1", [d["id"]]
+                    ).fetchone()
+                    if not (has_note or has_hl):
+                        continue
+            keep[d["id"]] = d
+
+        # A concept map is only readable when each concept keeps its grounding:
+        # include the studies reachable through ``derives_from`` edges.
+        if study_type == "concept" and include_concept_sources:
+            source_ids: set[int] = set()
+            for r in _visible_edges(conn):
+                code, _detail = parse_relation_label(r["label"])
+                if code == "derives_from" and r["from_id"] in keep:
+                    source_ids.add(r["to_id"])
+            source_ids -= set(keep)
+            if source_ids:
+                ph = ",".join("?" for _ in source_ids)
+                for e in conn.execute(
+                    f"SELECT id, title, tags, importance, entry_date, content, "
+                    f"study_type{select_extra} FROM entries "
+                    f"WHERE archived = 0 AND id IN ({ph})",
+                    list(source_ids),
+                ).fetchall():
+                    keep[e["id"]] = dict(e)
 
         degree: Counter = Counter()
         edges = []
         for r in _visible_edges(conn):
             payload = _edge_payload(r)
+            if payload["from"] not in keep or payload["to"] not in keep:
+                continue
             edges.append(payload)
             degree[payload["from"]] += 1
             degree[payload["to"]] += 1
 
         nodes = []
-        for e in entries:
-            d = dict(e)
+        concept_types: dict[str, str] = {}
+        if any((d.get("study_type") or "") == "concept" for d in keep.values()):
+            try:
+                for r in conn.execute(
+                    "SELECT name, concept_type FROM extracted_concepts"
+                ).fetchall():
+                    concept_types.setdefault((r["name"] or "").lower(), r["concept_type"] or "factor")
+            except Exception:  # noqa: BLE001 - pre-migration DBs lack the table
+                concept_types = {}
+        for eid, d in keep.items():
             # Color by importance
             colors = {1: "#8d99a9", 2: "#2f5fa8", 3: "#a8843c", 4: "#a2403f", 5: "#2c6f63"}
-            deg = degree.get(d["id"], 0)
+            deg = degree.get(eid, 0)
+            is_concept = (d.get("study_type") or "") == "concept"
             nodes.append({
-                "id": d["id"],
+                "id": eid,
                 # Full title — the frontend wraps it inside the node instead of
                 # truncating, so studies and theories keep readable names.
                 "label": d["title"],
@@ -313,6 +457,8 @@ def get_graph_data():
                 "content_preview": (d["content"] or "")[:300],
                 "degree": deg,
                 "isolated": deg == 0,
+                "study_type": d.get("study_type") or "",
+                "concept_type": concept_types.get((d["title"] or "").lower(), "") if is_concept else "",
             })
 
         return {"nodes": nodes, "edges": edges}

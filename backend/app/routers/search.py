@@ -69,26 +69,62 @@ def _execute_search(q: str, from_date: Optional[str], to_date: Optional[str], ta
 
         extra_sql = f" AND {' AND '.join(where_extra)}" if where_extra else ""
 
-        try:
-            rows = conn.execute(
+        def fts(query: str):
+            return conn.execute(
                 f"""SELECT e.*, rank FROM entries_fts
                     JOIN entries e ON entries_fts.rowid = e.id
                     WHERE entries_fts MATCH ?{extra_sql}
                     ORDER BY rank
                     LIMIT ?""",
-                [*params, limit]
+                [query, *params[1:], limit],
             ).fetchall()
+
+        rows = []
+        fts_failed = False
+        try:
+            rows = fts(safe_query)
         except sqlite3.OperationalError:
             # Fallback to phrase search if complex FTS syntax fails
             fallback_query = f'"{q.replace(chr(34), "")}"'
-            rows = conn.execute(
-                f"""SELECT e.*, rank FROM entries_fts
-                    JOIN entries e ON entries_fts.rowid = e.id
-                    WHERE entries_fts MATCH ?{extra_sql}
-                    ORDER BY rank
-                    LIMIT ?""",
-                [fallback_query, *params[1:], limit]
-            ).fetchall()
+            try:
+                rows = fts(fallback_query)
+            except sqlite3.OperationalError:
+                fts_failed = True
+                rows = []
+
+        # A natural multi-word query is an implicit AND in FTS5. If that found
+        # nothing, the user almost certainly meant "any of these terms"; OR
+        # ranking keeps useful hits instead of returning a blank screen.
+        tokens = [t for t in re.split(r"\W+", q) if len(t) > 2]
+        if not rows and not fts_failed and len(tokens) > 1:
+            or_query = " OR ".join(f'"{t}"' for t in tokens[:8])
+            try:
+                rows = fts(or_query)
+            except sqlite3.OperationalError:
+                rows = []
+
+        # Last resort: substring matching only when FTS failed or errored
+        if fts_failed and not rows:
+            seen_ids: set[int] = set()
+            fallback_rows = []
+            for token in tokens[:5] or [q]:
+                for row in conn.execute(
+                    f"""SELECT e.*, 0.0 AS rank FROM entries e
+                        WHERE 1=1{extra_sql}
+                          AND (e.title LIKE ? OR e.content LIKE ? OR e.tags LIKE ?)
+                        ORDER BY e.importance DESC, e.updated_at DESC
+                        LIMIT ?""",
+                    [*params[1:], f"%{token}%", f"%{token}%", f"%{token}%", limit],
+                ).fetchall():
+                    if row["id"] in seen_ids:
+                        continue
+                    seen_ids.add(row["id"])
+                    fallback_rows.append(row)
+                    if len(fallback_rows) >= limit:
+                        break
+                if len(fallback_rows) >= limit:
+                    break
+            rows = fallback_rows
 
         results = []
         for r in rows:
@@ -148,16 +184,35 @@ async def global_search(
     safe = _sanitize_fts5(query)
     conn = get_db()
     try:
-        entries = [
-            dict(r) for r in conn.execute(
-                """SELECT e.id, e.title, e.entry_date, e.tags, e.importance,
-                          substr(e.content, 1, 200) AS content_preview
-                     FROM entries_fts JOIN entries e ON entries_fts.rowid = e.id
-                    WHERE e.archived = 0 AND entries_fts MATCH ?
-                    ORDER BY rank LIMIT ?""",
-                [safe, limit],
-            ).fetchall()
-        ]
+        try:
+            entries = [
+                dict(r) for r in conn.execute(
+                    """SELECT e.id, e.title, e.entry_date, e.tags, e.importance,
+                              substr(e.content, 1, 200) AS content_preview
+                         FROM entries_fts JOIN entries e ON entries_fts.rowid = e.id
+                        WHERE e.archived = 0 AND entries_fts MATCH ?
+                        ORDER BY rank LIMIT ?""",
+                    [safe, limit],
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            entries = []
+        if not entries:
+            tokens = [t for t in re.split(r"\W+", query) if len(t) > 2]
+            if len(tokens) > 1:
+                try:
+                    entries = [
+                        dict(r) for r in conn.execute(
+                            """SELECT e.id, e.title, e.entry_date, e.tags, e.importance,
+                                      substr(e.content, 1, 200) AS content_preview
+                                 FROM entries_fts JOIN entries e ON entries_fts.rowid = e.id
+                                WHERE e.archived = 0 AND entries_fts MATCH ?
+                                ORDER BY rank LIMIT ?""",
+                            [" OR ".join(f'"{t}"' for t in tokens[:8]), limit],
+                        ).fetchall()
+                    ]
+                except sqlite3.OperationalError:
+                    entries = []
         studies = [
             dict(r) for r in conn.execute(
                 f"""SELECT id, title, authors, entry_date, doi, pdf_path,

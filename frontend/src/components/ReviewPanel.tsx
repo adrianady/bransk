@@ -16,7 +16,7 @@ export function ReviewPanel() {
           { id: 'sr' as const, label: '🔄 Repetiție spațiată', desc: 'Program de verificări (SM-2)' },
         ]).map(tab => (
           <button key={tab.id} onClick={() => setMode(tab.id)}
-            className={`px-3 sm:px-4 py-2 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+            className={`px-3 sm:px-4 py-3 touch-40 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 ${
               mode === tab.id
                 ? 'border-chrono-600 text-chrono-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
