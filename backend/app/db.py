@@ -682,6 +682,139 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_claim_stance_entry ON claim_stance(entry_id, status)"
         )
+
+        # ── Migration: verified note dossiers (2026-11) ──
+        # A dossier pins one project's researcher notes on one study entry to
+        # verbatim quotes from the canonical page text. A claim may only carry
+        # status `verificat` with a quote that normalizes to a substring of the
+        # declared (entry_id, page_pdf) page text. Codes A1..An are stable and
+        # never reused within a dossier.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS note_dossiers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'draft'
+                    CHECK (status IN ('draft','partial','verificat')),
+                title TEXT NOT NULL DEFAULT '',
+                source_sheet_json TEXT NOT NULL DEFAULT '{}',
+                summary TEXT NOT NULL DEFAULT '',
+                code_seq INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (project_id, entry_id)
+            );
+            CREATE TABLE IF NOT EXISTS note_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dossier_id INTEGER NOT NULL REFERENCES note_dossiers(id) ON DELETE CASCADE,
+                code TEXT NOT NULL,
+                raw_note TEXT NOT NULL DEFAULT '',
+                statement TEXT NOT NULL DEFAULT '',
+                quote TEXT NOT NULL DEFAULT '',
+                page_pdf INTEGER,
+                page_printed TEXT NOT NULL DEFAULT '',
+                engine TEXT NOT NULL DEFAULT '',
+                visual_check TEXT NOT NULL DEFAULT ''
+                    CHECK (visual_check IN ('','da','nu','necesar')),
+                vision_json TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'neverificat'
+                    CHECK (status IN ('verificat','verificat_cu_nuanta','incomplet',
+                                      'subestimat','corectat','depasit','neverificat')),
+                correction TEXT NOT NULL DEFAULT '',
+                method TEXT NOT NULL DEFAULT 'exact'
+                    CHECK (method IN ('exact','llm','manual')),
+                coverage REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                verified_at TEXT,
+                UNIQUE (dossier_id, code)
+            );
+            CREATE TABLE IF NOT EXISTS note_sections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dossier_id INTEGER NOT NULL REFERENCES note_dossiers(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL
+                    CHECK (kind IN ('fisa_sursei','ce_spune','continut','teza','corectii',
+                                    'lipsea','glosar','formulari','de_verificat')),
+                title TEXT NOT NULL DEFAULT '',
+                position INTEGER NOT NULL DEFAULT 0,
+                body_md TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (dossier_id, kind)
+            );
+            CREATE TABLE IF NOT EXISTS note_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dossier_id INTEGER NOT NULL REFERENCES note_dossiers(id) ON DELETE CASCADE,
+                from_code TEXT NOT NULL,
+                to_code TEXT NOT NULL,
+                motive TEXT NOT NULL,
+                page TEXT NOT NULL DEFAULT '',
+                claim_code TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                CHECK (length(trim(motive)) > 0)
+            );
+            CREATE TABLE IF NOT EXISTS note_rounds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dossier_id INTEGER NOT NULL REFERENCES note_dossiers(id) ON DELETE CASCADE,
+                summary TEXT NOT NULL,
+                changed_json TEXT NOT NULL DEFAULT '[]',
+                open_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_claims_dossier_status
+                ON note_claims(dossier_id, status);
+            CREATE INDEX IF NOT EXISTS idx_note_edges_dossier ON note_edges(dossier_id);
+            CREATE INDEX IF NOT EXISTS idx_note_dossiers_project ON note_dossiers(project_id);
+            CREATE TABLE IF NOT EXISTS note_concepts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                label TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (project_id, code)
+            );
+            CREATE TABLE IF NOT EXISTS note_concept_seq (
+                project_id INTEGER PRIMARY KEY,
+                seq INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS note_concept_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                concept_id INTEGER NOT NULL REFERENCES note_concepts(id) ON DELETE CASCADE,
+                dossier_id INTEGER NOT NULL REFERENCES note_dossiers(id) ON DELETE CASCADE,
+                claim_code TEXT NOT NULL,
+                note TEXT NOT NULL,
+                page TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                CHECK (length(trim(note)) > 0),
+                UNIQUE (concept_id, dossier_id, claim_code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_concepts_project
+                ON note_concepts(project_id);
+            CREATE INDEX IF NOT EXISTS idx_note_concept_links_concept
+                ON note_concept_links(concept_id);
+            CREATE INDEX IF NOT EXISTS idx_note_concept_links_dossier
+                ON note_concept_links(dossier_id);
+        """)
+        # Live databases created before `code_seq` need the monotonic counter
+        # for stable claim codes; fresh tables already carry it above.
+        try:
+            conn.execute(
+                "ALTER TABLE note_dossiers"
+                " ADD COLUMN code_seq INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Live databases created before visual confirmation need the audit
+        # sidecar for REQ-NOTE-10; fresh tables already carry it above.
+        try:
+            conn.execute(
+                "ALTER TABLE note_claims"
+                " ADD COLUMN vision_json TEXT NOT NULL DEFAULT ''"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
         conn.commit()
     finally:
         conn.close()

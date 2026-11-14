@@ -15,9 +15,12 @@ import { BibliographyPanel } from './BibliographyPanel'
 import { TitlePanel } from './TitlePanel'
 import { TopicPanel } from './TopicPanel'
 import { QuestionnairesPanel } from './QuestionnairesPanel'
+import { NotesPanel } from './NotesPanel'
+import { NoteMap } from './NoteMap'
 import type {
   Project, ProjectSection, ProjectStudyRecommendation, ProjectAnalysisResponse,
   ProjectFeedbackResponse, FeedbackItem, ProjectEvidenceMap, StudySource, ProjectSummary,
+  NoteProjectMap,
 } from '../lib/types'
 
 const ThesisEvidenceMap = lazy(() => import('./ThesisEvidenceMap').then(module => ({ default: module.ThesisEvidenceMap })))
@@ -40,7 +43,7 @@ interface Props {
   focusClaim?: { sectionId: string; claimId: number; token: number } | null
 }
 
-type Tab = 'structure' | 'map' | 'studies' | 'questionnaires' | 'readiness' | 'topic' | 'analysis' | 'feedback' | 'ideas' | 'bibliography'
+type Tab = 'structure' | 'map' | 'studies' | 'questionnaires' | 'readiness' | 'topic' | 'analysis' | 'feedback' | 'ideas' | 'bibliography' | 'notes'
 
 const WORK_TYPES: { value: string; label: string }[] = [
   { value: 'licenta', label: 'Licență' },
@@ -123,6 +126,10 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
   const [mapStudies, setMapStudies] = useState<ProjectStudyRecommendation[]>([])
   const [loadingEvidenceMap, setLoadingEvidenceMap] = useState(false)
   const [synthesizingConcepts, setSynthesizingConcepts] = useState(false)
+  // Project map (note dossiers)
+  const [projectMap, setProjectMap] = useState<NoteProjectMap | null>(null)
+  const [loadingProjectMap, setLoadingProjectMap] = useState(false)
+  const [projectMapOpen, setProjectMapOpen] = useState(true)
   // Recommendations / analysis / feedback
   const [studies, setStudies] = useState<ProjectStudyRecommendation[]>([])
   const [libraryTotal, setLibraryTotal] = useState(0)
@@ -234,6 +241,34 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
       toast.error('Harta tezei nu s-a putut încărca: ' + (err?.message || 'necunoscut'))
     } finally {
       setLoadingEvidenceMap(false)
+    }
+  }, [toast])
+
+  const loadProjectMap = useCallback(async () => {
+    setLoadingProjectMap(true)
+    try {
+      setProjectMap(await api.noteDossiers.projectMap())
+    } catch (err: any) {
+      toast.error('Harta proiectului nu s-a putut încărca: ' + (err?.message || 'eroare necunoscută'))
+    } finally {
+      setLoadingProjectMap(false)
+    }
+  }, [toast])
+
+  const regenerateProjectMap = useCallback(async () => {
+    const ok = window.confirm(
+      'Regenerează harta proiectului folosind doar afirmațiile verificate. ' +
+      'Concepte și muchile ve vor fi propuse de nou de către model. Continuă?',
+    )
+    if (!ok) return
+    setLoadingProjectMap(true)
+    try {
+      setProjectMap(await api.noteDossiers.regenerateProjectMap({ replace: true }))
+      toast.success('Harta proiectului a fost regenerată.')
+    } catch (err: any) {
+      toast.error('Regenerarea hărții proiectului a eșuat: ' + (err?.message || 'eroare necunoscută'))
+    } finally {
+      setLoadingProjectMap(false)
     }
   }, [toast])
 
@@ -367,6 +402,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
     if (tab === 'map' && !evidenceMap && !loadingEvidenceMap) loadEvidenceMap()
     if (tab === 'analysis' && !analysis && !loadingAnalysis) loadAnalysis()
     if (tab === 'feedback' && !feedback && !loadingFeedback) loadFeedback()
+    if (tab === 'notes' && !projectMap && !loadingProjectMap) loadProjectMap()
   }, [tab]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -771,7 +807,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
             { id: 'writing', label: '✍️ Structură & Redactare', defaultTab: 'structure', tabs: ['structure'] },
             { id: 'methodology', label: '📋 Chestionare & Scale', defaultTab: 'questionnaires', tabs: ['questionnaires'] },
             { id: 'advisor', label: '🧭 Diagnostic & Literatură', defaultTab: 'readiness', tabs: ['readiness', 'analysis', 'feedback', 'studies', 'topic'] },
-            { id: 'evidence', label: '🗺️ Hartă Teză & Bibliografie', defaultTab: 'map', tabs: ['map', 'bibliography', 'ideas'] },
+            { id: 'evidence', label: '🗺️ Hartă Teză & Bibliografie', defaultTab: 'map', tabs: ['map', 'bibliography', 'ideas', 'notes'] },
           ] as const).map(pillar => {
             const isActive = (pillar.tabs as readonly string[]).includes(tab)
             return (
@@ -828,6 +864,7 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
               { id: 'map', label: '🗺️ Hartă Afirmații & Dovezi' },
               { id: 'bibliography', label: '📖 Bibliografie APA' },
               { id: 'ideas', label: '💡 Idei de Cercetare' },
+              { id: 'notes', label: '🗒️ Notițe' },
             ] as const).map(st => (
               <button
                 key={st.id}
@@ -1048,6 +1085,53 @@ export function ProjectView({ onSelectEntry, onOpenSource, onTitleChange, focusC
       {/* ── Ideas tab ── */}
       {tab === 'ideas' && <IdeasPanel />}
       {tab === 'bibliography' && <BibliographyPanel />}
+      {/* ── Notițe tab: harta proiectului + dosare ── */}
+      {tab === 'notes' && (
+        <div className="space-y-3">
+          <section
+            className="card p-3 sm:p-4 space-y-3"
+            onClick={() => setProjectMapOpen(!projectMapOpen)}
+            role="button" tabIndex={0} onKeyDown={e => {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setProjectMapOpen(!projectMapOpen) }
+            }}
+            style={{ cursor: 'pointer' }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <ChevronDown className={`w-4 h-4 shrink-0 ${projectMapOpen ? '' : '-rotate-90'} text-muted`} />
+                <h4 className="font-semibold text-sm text-ink">Harta proiectului</h4>
+              </div>
+              {loadingProjectMap && (
+                <Loader2 className="w-3 h-3 animate-spin text-chrono-500" />
+              )}
+            </div>
+            <p className="text-[11px] text-muted">
+              Documente și concepte transversale legate prin afirmațiile verificate. Apasă pentru a deschide/închide.
+            </p>
+            {projectMapOpen && (
+              <div className="space-y-2 pt-2 border-t border-line/40">
+                {loadingProjectMap && !projectMap ? (
+                  <div className="card text-center py-8 text-gray-500">
+                    <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" /> Se încarcă harta…
+                  </div>
+                ) : (
+                  <>
+                    <NoteMap scope="project" payload={projectMap ?? undefined} />
+                    {!projectMap && !loadingProjectMap && (
+                      <p className="text-[11px] text-muted">Fără date de hartă. Așteaptă verificarea afirmațiilor în dosare.</p>
+                    )}
+                    <button onClick={regenerateProjectMap} disabled={loadingProjectMap}
+                            className="btn-secondary text-xs sm:text-sm min-w-[40px] min-h-[40px] touch-40">
+                      {loadingProjectMap ? <><RefreshCw className="w-3 h-3 animate-spin" /> Regenerez…</> : <><RefreshCw className="w-3 h-3" /> Regenerează harta proiectului</>}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </section>
+          <NotesPanel />
+        </div>
+      )}
 
       {/* ── Studies tab ── */}
       {tab === 'studies' && (

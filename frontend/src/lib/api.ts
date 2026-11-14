@@ -10,6 +10,18 @@ import type {
   NoteCheckList,
   NoteCheckResult,
   NoteCheckStatus,
+  NoteClaim,
+  NoteClaimStatus,
+  NoteConcept,
+  NoteDossier,
+  NoteDossierMapPayload,
+  NoteDossierSummary,
+  NoteEdge,
+  NoteEdgeProposal,
+  NoteLink,
+  NoteProjectMap,
+  NoteRound,
+  NoteSection,
   ParseSummary,
   PageTextResponse,
   StanceDirection,
@@ -540,17 +552,17 @@ export const api = {
 
   // Chat
   chat: {
-    send: (message: string, history?: { role: string; content: string }[]) =>
+    send: (message: string, history?: { role: string; content: string }[], context?: { entry_id?: number | null; page?: number | null }) =>
       request<{ reply: string; provider: string; model: string; actions: any[] }>('/chat', {
         method: 'POST',
-        body: JSON.stringify({ message, history: history || [] }),
+        body: JSON.stringify({ message, history: history || [], ...context }),
       }),
-    stream: (message: string, history?: { role: string; content: string }[], signal?: AbortSignal) => {
+    stream: (message: string, history?: { role: string; content: string }[], signal?: AbortSignal, context?: { entry_id?: number | null; page?: number | null }) => {
       const pending = fetch(`${BASE}/chat/stream`, {
         method: 'POST',
         headers: requestHeaders(),
         credentials: 'include',
-        body: JSON.stringify({ message, history: history || [] }),
+        body: JSON.stringify({ message, history: history || [], ...context }),
         signal,
       });
       // A rejected token must reach the gate even on a streamed call.
@@ -973,6 +985,57 @@ export const api = {
       }),
     verifySummary: (entryId: number) =>
       request<VerifySummary>(`/studies/${entryId}/verify/summary`),
+  },
+
+  // Verified note dossiers: capture notes from the reader, verify them against
+  // page text, and review the resulting dossier of claims and sections.
+  noteDossiers: {
+    list: () => request<{ dossiers: NoteDossierSummary[] }>('/notes/dossiers'),
+    get: (id: number) => request<NoteDossier>(`/notes/dossiers/${id}`),
+    capture: (body: { entry_id: number; raw_note: string; page?: number | null }) =>
+      request<NoteDossier>('/notes/capture', {
+        method: 'POST',
+        body: JSON.stringify(body),
+        timeoutMs: 120000,
+      }),
+    verify: (id: number, body?: { page?: number | null; recheck?: boolean }) =>
+      request<NoteDossier>(`/notes/dossiers/${id}/verify`, {
+        method: 'POST',
+        body: JSON.stringify(body ?? {}),
+      }),
+    patchClaim: (id: number, body: Partial<NoteClaim>) =>
+      request<NoteClaim>(`/notes/claims/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    remove: (id: number) =>
+      request<void>(`/notes/dossiers/${id}`, { method: 'DELETE' }),
+    // ── Hartă (map) ──────────────────────────────────────────────────────
+    projectMap: () =>
+      request<NoteProjectMap>('/notes/project-map'),
+    regenerateProjectMap: (body?: { replace?: boolean }) =>
+      request<NoteProjectMap>('/notes/project-map', {
+        method: 'POST',
+        body: JSON.stringify(body ?? {}),
+      }),
+    regenerateMap: (id: number, body?: { replace?: boolean }) =>
+      request<NoteDossierMapPayload>(`/notes/dossiers/${id}/map`, {
+        method: 'POST',
+        body: JSON.stringify(body ?? {}),
+      }),
+    addEdge: (id: number, body: NoteEdgeProposal) =>
+      request<NoteLink>(`/notes/dossiers/${id}/edges`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    removeEdge: (id: number) =>
+      request<{ status: string; deleted_id: number }>(`/notes/edges/${id}`, {
+        method: 'DELETE',
+      }),
+    removeConcept: (id: number) =>
+      request<{ status: string; deleted_id: number }>(`/notes/concepts/${id}`, {
+        method: 'DELETE',
+      }),
   },
 
   // Per-page document parse (classification ledger, canonical text, renders).

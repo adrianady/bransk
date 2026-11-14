@@ -29,7 +29,7 @@ from app.routers import (
     tags, spaced_repetition, todos, reminders, thoughts,
     research, theory, maintenance, ai, study_qa, project, sources,
     citations, highlights, questionnaires, studies, ai_concepts,
-    studies_parse, claims, analysis, note_check
+    studies_parse, claims, analysis, note_check, notes
 )
 from app.routers import auth as auth_router
 from app.routers import zotero
@@ -192,6 +192,7 @@ app.include_router(studies.router, prefix="/api", tags=["studies"])
 app.include_router(studies_parse.router, prefix="/api", tags=["studies_parse"])
 app.include_router(ai_concepts.router, prefix="/api", tags=["ai_concepts"])
 app.include_router(note_check.router, prefix="/api", tags=["note_check"])
+app.include_router(notes.router, prefix="/api", tags=["notes"])
 app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
 
 

@@ -651,6 +651,70 @@ def _parse_actions_inner(reply: str) -> List[Dict[str, Any]]:
                     conn.close()
 
     # ─────────────────────────────────────────────────────────────────────────
+    # NOTE_CAPTURE / NOTE_VERIFY / LIST_NOTE_DOSSIERS — verified note dossiers
+    # (async dispatch by the endpoint; the parser never touches the dossiers)
+    # ─────────────────────────────────────────────────────────────────────────
+    for payload in _extract_line_tags(reply, "NOTE_CAPTURE"):
+        if not first_time("NOTE_CAPTURE", payload):
+            continue
+        if "|" in payload:
+            eid_raw, text = [p.strip() for p in payload.split("|", 1)]
+        else:
+            eid_raw, text = "", payload.strip()
+        eid = to_int(eid_raw) if eid_raw else None
+        if eid_raw and eid is None:
+            actions.append({"type": "error", "detail": "NOTE_CAPTURE needs a numeric entry id (or an empty one, meaning the entry in the reading context)"})
+            continue
+        if not text:
+            actions.append({"type": "error", "detail": "NOTE_CAPTURE needs the raw note text; expected format: [NOTE_CAPTURE: entry_id | raw note text]"})
+            continue
+        actions.append({"type": "note_capture_request", "entry_id": eid, "text": text, "page": None})
+
+    for payload in _extract_line_tags(reply, "NOTE_VERIFY"):
+        if not first_time("NOTE_VERIFY", payload):
+            continue
+        did = to_int(payload.strip())
+        if did is None:
+            actions.append({"type": "error", "detail": "NOTE_VERIFY needs a numeric dossier id; expected format: [NOTE_VERIFY: dossier_id]"})
+            continue
+        actions.append({"type": "note_verify_request", "dossier_id": did})
+
+    for payload in _extract_line_tags(reply, "NOTE_MAP"):
+        if not first_time("NOTE_MAP", payload):
+            continue
+        word = payload.strip()
+        if word.lower() == "project":
+            actions.append({"type": "note_map_request", "dossier_id": None, "project": True})
+            continue
+        did = to_int(word)
+        if did is None:
+            actions.append({"type": "error", "detail": "NOTE_MAP: lipsește dossier_id (sau scrie 'project')"})
+            continue
+        actions.append({"type": "note_map_request", "dossier_id": did})
+
+    for payload in _extract_line_tags(reply, "NOTE_EXPORT"):
+        if not first_time("NOTE_EXPORT", payload):
+            continue
+        parts = [p.strip() for p in payload.split("|", 1)]
+        ref = parts[0] if parts else ""
+        fmt = (parts[1] if len(parts) > 1 else "").strip().lower()
+        if fmt not in ("md", "html"):
+            fmt = "html"
+        if ref.lower() == "project":
+            actions.append({"type": "note_export_request", "dossier_id": None, "project": True, "format": fmt})
+            continue
+        did = to_int(ref)
+        if did is None:
+            actions.append({"type": "error", "detail": "NOTE_EXPORT: lipsește dossier_id (sau scrie 'project')"})
+            continue
+        actions.append({"type": "note_export_request", "dossier_id": did, "format": fmt})
+
+    for payload in _extract_line_tags(reply, "LIST_NOTE_DOSSIERS"):
+        if not first_time("LIST_NOTE_DOSSIERS", payload):
+            continue
+        actions.append({"type": "note_list_request"})
+
+    # ─────────────────────────────────────────────────────────────────────────
     # SCREEN_STUDY
     # ─────────────────────────────────────────────────────────────────────────
     from app.chat.task_manager import _update_task

@@ -287,3 +287,100 @@ def _search_pdf_chunks_like(query: str, limit: int = 5) -> list[dict]:
         return [{**dict(row), "score": 0.0, "mode": "keyword"} for row in rows]
     finally:
         conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Reading context (verified note dossiers)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def reading_context(conn, entry_id: int | None, page: int | None) -> str:
+    """Short Romanian block about the entry the user is currently reading.
+
+    Never raises: any DB problem yields ``""``.
+    """
+    try:
+        if entry_id is None:
+            return ""
+        row = conn.execute(
+            "SELECT id, title, authors, bib_year, entry_date, pdf_path "
+            "FROM entries WHERE id = ?",
+            [entry_id],
+        ).fetchone()
+        if row is None:
+            return ""
+        try:
+            data = dict(row)
+        except Exception:
+            return ""
+        title = (data.get("title") or "").strip() or f"Intrarea #{entry_id}"
+        authors = (data.get("authors") or "").strip()
+        year = (data.get("bib_year") or "").strip() or (data.get("entry_date") or "").strip()[:4]
+        header = f"Citești: {title}"
+        if authors:
+            header += f" — {authors}"
+        if year:
+            header += f" ({year})"
+        try:
+            npages = conn.execute(
+                "SELECT COUNT(*) FROM page_texts WHERE entry_id = ?", [entry_id]
+            ).fetchone()[0]
+        except Exception:
+            npages = 0
+        has_pdf = bool((data.get("pdf_path") or "").strip())
+        if npages:
+            pdf_line = f"PDF: {'da' if has_pdf else 'nu se știe'}, {npages} pagini extrase"
+        elif has_pdf:
+            pdf_line = "PDF: da, fără text extras încă"
+        else:
+            pdf_line = "PDF: nu"
+        lines = [header, pdf_line]
+
+        try:
+            from app.routers.project import _get_active_project_id
+
+            pid = _get_active_project_id(conn)
+            dossier = conn.execute(
+                "SELECT id FROM note_dossiers WHERE project_id = ? AND entry_id = ?",
+                [pid, entry_id],
+            ).fetchone()
+            if dossier is not None:
+                did = dossier["id"]
+                claim_rows = conn.execute(
+                    "SELECT code, status FROM note_claims WHERE dossier_id = ?",
+                    [did],
+                ).fetchall()
+                total = len(claim_rows)
+                ok = sum(1 for r in claim_rows if r["status"] == "verificat")
+                codes = ", ".join(f"{r['code']}={r['status']}" for r in claim_rows[:12])
+                if total > 12:
+                    codes += f", … (+{total - 12})"
+                lines.append(
+                    f"Dosar de notițe al proiectului (id {did}): "
+                    f"{codes or 'fără afirmații'} — verificate {ok}/{total}"
+                )
+        except Exception:
+            pass
+
+        if page is not None:
+            try:
+                prow = conn.execute(
+                    "SELECT text, printed_page FROM page_texts"
+                    " WHERE entry_id = ? AND page_number = ?",
+                    [entry_id, page],
+                ).fetchone()
+            except Exception:
+                prow = None
+            if prow is not None:
+                try:
+                    pdata = dict(prow)
+                except Exception:
+                    pdata = {}
+                label = (pdata.get("printed_page") or "").strip()
+                where = f"pag. tipărită {label}" if label else f"pag. PDF {page}"
+                lines.append(
+                    "Pagina citită (%s) — text-nesigur, neverificat, "
+                    "nu îl cita fără verificare:\n%s" % (where, (pdata.get("text") or "")[:1200])
+                )
+        return "\n".join(lines)
+    except Exception:
+        return ""

@@ -19,13 +19,15 @@ import {
   Highlighter,
   Brain,
   AlertTriangle,
+  TextQuote,
 } from 'lucide-react'
 import * as pdfjsLib from 'pdfjs-dist'
 import 'pdfjs-dist/web/pdf_viewer.css'
 import { api } from '../lib/api'
 import { getStudyDoi } from '../lib/doi'
+import { setReadingContext, getReadingContext, useReadingContext } from '../lib/readingContext'
 import { useToast } from './Toast'
-import type { Entry, ExtractedConcept, PdfHighlight, StudyNote, StudyQASource } from '../lib/types'
+import type { Entry, ExtractedConcept, PdfHighlight, StudyNote, StudyQASource, NoteDossier } from '../lib/types'
 import { useOfflineNotes, useOfflineHighlights, usePdfCache } from '../lib/idb/hooks'
 import { ConflictMergeDialog } from './ConflictMergeDialog'
 import { registerBackgroundSync, subscribeServerStatus, isServerReachable } from '../lib/idb/sync'
@@ -42,6 +44,17 @@ interface Props {
   onClose: () => void
   onNotesUpdated?: () => void
   sourceToOpen?: StudyQASource | null
+}
+
+// Status chips reused for capture previews (same vocabulary as StudyAnalysisPanel / NotesPanel).
+const CAPTURE_STATUS_COLOR: Record<string, string> = {
+  verificat: 'text-verdigris border-verdigris/20 bg-verdigris-soft',
+  verificat_cu_nuanta: 'text-chrono-600 border-chrono-300/40 bg-chrono-50 dark:bg-chrono-950/20',
+  incomplet: 'text-brass border-brass/20 bg-brass-soft',
+  subestimat: 'text-brass border-brass/20 bg-brass-soft',
+  corectat: 'text-madder border-madder/20 bg-madder-soft',
+  depasit: 'text-madder border-madder/20 bg-madder-soft',
+  neverificat: 'text-gray-500 border-gray-200/60 bg-gray-100 dark:bg-gray-800 dark:border-gray-700/60',
 }
 
 export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceToOpen }: Props) {
@@ -204,6 +217,10 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
   const [pageNumber, setPageNumber] = useState<string>('1')
   const [noteContent, setNoteContent] = useState('')
   const [savingNote, setSavingNote] = useState(false)
+
+  // Capture → verified dossier (TASK 4)
+  const [capturing, setCapturing] = useState(false)
+  const [captureResult, setCaptureResult] = useState<NoteDossier | null>(null)
 
   // Editing state
   const [editingNoteId, setEditingNoteId] = useState<number | null>(null)
@@ -388,15 +405,21 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
     drawHighlights()
   }, [highlights, currentPage, scale, pdfDoc, drawHighlights])
 
-  // Load notes and highlights when modal opens
+  // Load notes and highlights when modal opens; set the reading context so
+  // chat knows the source and page while the user reads.
   useEffect(() => {
     if (isOpen && study) {
       refreshNotes()
       refreshHighlights()
       setNoteContent('')
       setEditingNoteId(null)
+      setReadingContext(study.id, currentPage)
     }
-  }, [isOpen, study?.id, refreshNotes, refreshHighlights])
+    return () => {
+      // Modal unmounting / closing: clear the reading context.
+      setReadingContext(null, null)
+    }
+  }, [isOpen, study?.id, refreshNotes, refreshHighlights, currentPage])
 
   if (!isOpen || !study) return null
 
@@ -404,6 +427,7 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
     if (newPage >= 1 && newPage <= numPages) {
       setCurrentPage(newPage)
       setPageNumber(String(newPage))
+      if (study) setReadingContext(study.id, newPage)
     }
   }
 
@@ -499,6 +523,33 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
       toast.error('Salvarea notiței a eșuat: ' + (err?.message || 'eroare necunoscută'))
     } finally {
       setSavingNote(false)
+    }
+  }
+
+  // TASK 4: verify the current note text against the page and keep it in a dossier.
+  const handleCaptureNote = async () => {
+    if (!study || !noteContent.trim()) {
+      toast.info('Introduceți textul notiței înainte de verificare.')
+      return
+    }
+    setCapturing(true)
+    setCaptureResult(null)
+    try {
+      const pageNum = pageNumber.trim() ? parseInt(pageNumber.trim(), 10) : currentPage
+      const dossier = await api.noteDossiers.capture({
+        entry_id: study.id,
+        raw_note: noteContent.trim(),
+        page: isNaN(pageNum as any) ? null : pageNum,
+      })
+      setCaptureResult(dossier)
+      toast.success(
+        `Dosar creat: ${dossier.summary.verificat}/${dossier.summary.total} afirmații verificate.`,
+      )
+      // Keep the note text so the user can re-capture or save it normally.
+    } catch (err: any) {
+      toast.error('Verificarea notiței a eșuat: ' + (err?.message || 'eroare necunoscută'))
+    } finally {
+      setCapturing(false)
     }
   }
 
@@ -909,12 +960,51 @@ export function StudyPdfModal({ study, isOpen, onClose, onNotesUpdated, sourceTo
                   <label className="block text-[10px] uppercase font-semibold text-gray-500 mb-0.5">Notiță / Observație / Citat cheie *</label>
                   <textarea value={noteContent} onChange={e => setNoteContent(e.target.value)} placeholder="Notează ce este important..." rows={3} required className="input w-full text-xs leading-relaxed p-2" />
                 </div>
-                <div className="flex justify-end">
+                <div className="flex justify-end gap-2">
                   <button type="submit" disabled={savingNote || !noteContent.trim()} className="btn-primary text-xs py-1.5 px-3 flex items-center gap-1.5 shadow-sm">
                     {savingNote ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
                     Salvează notița
                   </button>
+                  <button
+                    type="button"
+                    onClick={handleCaptureNote}
+                    disabled={capturing || !noteContent.trim()}
+                    className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5"
+                  >
+                    {capturing ? <Loader2 className="w-3 h-3 animate-spin" /> : <TextQuote className="w-3.5 h-3.5" />}
+                    Verifică și păstrează în dosar
+                  </button>
                 </div>
+                {captureResult && (
+                  <div className="mt-3 p-3 rounded-lg border border-accent-soft bg-accent-soft/30 space-y-2">
+                    <div className="flex items-center gap-1">
+                      <FileText className="w-3 h-3 text-accent-strong shrink-0" />
+                      <span className="text-xs font-semibold text-accent-strong">Dosar creat</span>
+                    </div>
+                    <p className="text-[11px] text-muted">
+                      {captureResult.summary.verificat}/{captureResult.summary.total} afirmații verificate pe pagina {captureResult.dossier.entry_title ? '' : ''}
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {captureResult.claims.slice(0, 6).map(claim => (
+                        <div key={claim.id} className="flex items-center gap-1">
+                          <span className="font-mono text-[10px] font-semibold text-ink">{claim.code}</span>
+                          <span className={`text-[10px] font-semibold rounded-md px-2 py-0.5 ${CAPTURE_STATUS_COLOR[claim.status] ?? CAPTURE_STATUS_COLOR.neverificat}`}>
+                            {claim.status}
+                          </span>
+                          {claim.page_printed && (
+                            <span className="text-[10px] text-muted">p. {claim.page_printed}</span>
+                          )}
+                        </div>
+                      ))}
+                      {captureResult.claims.length > 6 && (
+                        <span className="text-[10px] text-muted">+{captureResult.claims.length - 6} alte…</span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted">
+                      Deschide dosarul din Proiect → 🗒️ Notițe pentru a revizui toate afirmațiile.
+                    </p>
+                  </div>
+                )}
               </form>
             </div>
           </div>

@@ -48,6 +48,7 @@ from app.chat.context import (
     _timeline_rows,
     _search_pdf_chunks_like,
     _context_char_budget,
+    reading_context,
 )
 from app.chat.parser import _parse_actions, _iso_entry_date
 from app.chat.executor import (
@@ -83,7 +84,15 @@ _WRITE_ACTION_TYPES = {
     "theory_updated", "todo_completed", "sr_reviewed", "pdf_indexed",
     "reanalysis_done", "study_pdf_downloaded", "study_note_added",
     "study_screened", "download_batch",
+    "note_dossier_updated", "note_dossiers_listed",
+    "note_map_updated", "note_export_ready",
 }
+
+# Note-dossier results also trigger the grounded second pass on their own.
+_NOTE_RESULT_TYPES = (
+    "note_dossier_updated", "note_dossiers_listed",
+    "note_map_updated", "note_export_ready",
+)
 
 
 # ── Provider health endpoint ────────────────────────────────────────────────
@@ -131,6 +140,7 @@ async def chat_health():
 async def chat(data: ChatRequest):
     """Non-streaming chat with auto-failover."""
     try:
+        reading = await anyio.to_thread.run_sync(_load_reading, data.entry_id, data.page)
         _detect_workflow_task(data.message)
         auto_topic = _detect_research_intent(data.message)
         if auto_topic:
@@ -181,7 +191,7 @@ async def chat(data: ChatRequest):
                     "task": _get_active_task(),
                 }
 
-        provider, model, reply = await _call_with_fallback(data.message, data.history)
+        provider, model, reply = await _call_with_fallback(data.message, data.history, reading)
         _save_chat("user", data.message, provider, model)
         actions = _parse_actions(reply)
 
@@ -251,6 +261,7 @@ async def chat(data: ChatRequest):
                 actions.append({"type": "error", "detail": f"SEARCH_DOCUMENTS failed: {type(exc).__name__}"})
 
         await _dispatch_download_actions(actions)
+        await _dispatch_note_actions(actions, entry_id=data.entry_id, page=data.page)
 
         for index_req in [a for a in actions if a["type"] == "index_pdf_request"]:
             actions.append(await _execute_index_pdf(index_req["entry_id"]))
@@ -262,10 +273,14 @@ async def chat(data: ChatRequest):
             if a["type"] in _READ_ACTION_TYPES
             and (a.get("entry") or a.get("results") or a["type"] in _EMPTY_READ_ACTION_TYPES)
         ]
-        if read_actions:
+        note_results = [
+            a for a in actions
+            if a["type"] in _NOTE_RESULT_TYPES
+        ]
+        if read_actions or note_results:
             try:
                 feedback = read_actions + [a for a in actions if a["type"] in _WRITE_ACTION_TYPES]
-                final = await _answer_with_tools(data.message, data.history, _build_context(data.message), reply, feedback)
+                final = await _answer_with_tools(data.message, data.history, _build_context(data.message), reply, feedback, reading)
                 reply = final
             except Exception as exc:
                 logger.error(f"Follow-up synthesis failed: {exc}")
@@ -320,6 +335,7 @@ async def chat_stream(data: ChatRequest, request: Request):
                 yield f"data: {json.dumps({'type': 'task', 'task': active_task})}\n\n"
             context = await anyio.to_thread.run_sync(_build_context, data.message)
             yield f"data: {json.dumps({'type': 'context', 'entries': len(context)})}\n\n"
+            reading = await anyio.to_thread.run_sync(_load_reading, data.entry_id, data.page)
 
             # Only run direct research shortcut if no workflow task was already detected
             if not active_task:
@@ -376,7 +392,7 @@ async def chat_stream(data: ChatRequest, request: Request):
                     )
                     yield f"data: {json.dumps({'type': 'progress', 'phase': 'search', 'message': 'Falling back to interactive chat agent...'})}\n\n"
 
-            stream_iter = _stream_with_fallback(data.message, data.history, context).__aiter__()
+            stream_iter = _stream_with_fallback(data.message, data.history, context, reading).__aiter__()
             while True:
                 try:
                     if await request.is_disconnected():
@@ -478,6 +494,7 @@ async def chat_stream(data: ChatRequest, request: Request):
             if any(a["type"] in ("download_study_request", "download_missing_request") for a in actions):
                 yield f"data: {json.dumps({'type': 'progress', 'phase': 'download', 'message': 'Downloading and indexing study PDFs...'})}\n\n"
             await _dispatch_download_actions(actions)
+            await _dispatch_note_actions(actions, entry_id=data.entry_id, page=data.page)
 
             for index_req in [a for a in actions if a["type"] == "index_pdf_request"]:
                 yield f"data: {json.dumps({'type': 'progress', 'phase': 'pdf', 'message': 'Re-indexing the study PDF...'})}\n\n"
@@ -491,14 +508,18 @@ async def chat_stream(data: ChatRequest, request: Request):
                 if a["type"] in _READ_ACTION_TYPES
                 and (a.get("entry") or a.get("results") or a["type"] in _EMPTY_READ_ACTION_TYPES)
             ]
+            note_results = [
+                a for a in actions
+                if a["type"] in _NOTE_RESULT_TYPES
+            ]
             final_reply = full_reply
-            if read_actions:
+            if read_actions or note_results:
                 yield f"data: {json.dumps({'type': 'reset_content'})}\n\n"
                 n_results = sum(len(a.get("results") or []) for a in read_actions) + sum(1 for a in read_actions if a.get("entry"))
                 yield f"data: {json.dumps({'type': 'tool', 'message': f'Read {n_results} records from scholarly databases / knowledge base to answer.', 'actions': [a['type'] for a in read_actions]})}\n\n"
                 try:
                     feedback = read_actions + [a for a in actions if a["type"] in _WRITE_ACTION_TYPES]
-                    final_reply = await _answer_with_tools(data.message, data.history, context, full_reply, feedback)
+                    final_reply = await _answer_with_tools(data.message, data.history, context, full_reply, feedback, reading)
                     for piece in _chunk_text(final_reply, 120):
                         yield f"data: {json.dumps({'type': 'chunk', 'content': piece})}\n\n"
                 except Exception as rexc:
@@ -622,6 +643,221 @@ async def cancel_chat_task():
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+def _load_reading(entry_id: Optional[int], page: Optional[int]) -> str:
+    """Build the reading-context block on a fresh connection (thread-safe)."""
+    conn = get_db()
+    try:
+        return reading_context(conn, entry_id, page)
+    finally:
+        conn.close()
+
+
+async def _dispatch_note_actions(
+    actions: list,
+    *,
+    entry_id: int | None = None,
+    page: int | None = None,
+) -> None:
+    """Execute verified-note-dossier requests, replacing each in place."""
+    from app.notes.service import capture, list_dossiers
+    from app.notes.engine import verify_dossier
+    from app.routers.project import _get_active_project_id
+
+    for pos, request in enumerate(list(actions)):
+        rtype = request.get("type")
+        if rtype not in ("note_capture_request", "note_verify_request", "note_list_request",
+                          "note_map_request", "note_export_request"):
+            continue
+        try:
+            if rtype == "note_capture_request":
+                eid = request.get("entry_id") or entry_id
+                if not eid:
+                    actions[pos] = {"type": "error", "detail": "NOTE_CAPTURE: lipsește entry_id"}
+                    continue
+                conn = get_db()
+                try:
+                    pid = _get_active_project_id(conn)
+                    payload = await capture(conn, pid, int(eid), request.get("text") or "", page)
+                finally:
+                    conn.close()
+                actions[pos] = {
+                    "type": "note_dossier_updated",
+                    "dossier_id": payload["dossier"]["id"],
+                    "entry_id": int(eid),
+                    "summary": payload.get("summary") or {},
+                    "claims": [
+                        {k: c.get(k) for k in ("code", "status", "quote", "page_printed", "page_pdf", "correction")}
+                        for c in (payload.get("claims") or [])[:30]
+                    ],
+                }
+            elif rtype == "note_verify_request":
+                conn = get_db()
+                try:
+                    pid = _get_active_project_id(conn)
+                    row = conn.execute(
+                        "SELECT project_id, entry_id FROM note_dossiers WHERE id = ?",
+                        [request.get("dossier_id")],
+                    ).fetchone()
+                    if row is None or int(row["project_id"]) != int(pid):
+                        actions[pos] = {"type": "error", "detail": "NOTE_VERIFY: dosarul nu există în proiectul activ"}
+                        continue
+                    entry_of_dossier = int(row["entry_id"])
+                    await verify_dossier(conn, int(request.get("dossier_id")), apply=True)
+                    from app.notes.service import dossier_payload
+
+                    payload = dossier_payload(conn, int(request.get("dossier_id")))
+                finally:
+                    conn.close()
+                actions[pos] = {
+                    "type": "note_dossier_updated",
+                    "dossier_id": int(request.get("dossier_id")),
+                    "entry_id": entry_of_dossier,
+                    "summary": payload.get("summary") or {},
+                    "claims": [
+                        {k: c.get(k) for k in ("code", "status", "quote", "page_printed", "page_pdf", "correction")}
+                        for c in (payload.get("claims") or [])[:30]
+                    ],
+                }
+            elif rtype == "note_list_request":
+                conn = get_db()
+                try:
+                    pid = _get_active_project_id(conn)
+                    dossiers = list_dossiers(conn, pid)
+                finally:
+                    conn.close()
+                actions[pos] = {
+                    "type": "note_dossiers_listed",
+                    "dossiers": [
+                        {k: d.get(k) for k in ("id", "title", "entry_id", "entry_title", "status", "claims_total", "claims_verificat")}
+                        for d in dossiers
+                    ],
+                }
+            elif rtype == "note_map_request":
+                from app.notes.map import generate_edges, generate_project_map, project_map
+                from app.notes.service import dossier_payload as _dossier_payload
+
+                conn = get_db()
+                try:
+                    pid = _get_active_project_id(conn)
+                    if request.get("project"):
+                        await generate_project_map(conn, pid)
+                        stats = project_map(conn, pid).get("stats", {})
+                        actions[pos] = {
+                            "type": "note_map_updated",
+                            "scope": "project",
+                            "stats": stats,
+                        }
+                    else:
+                        try:
+                            did = int(request.get("dossier_id") or 0)
+                        except (TypeError, ValueError):
+                            did = 0
+                        row = conn.execute(
+                            "SELECT project_id FROM note_dossiers WHERE id = ?",
+                            [did],
+                        ).fetchone()
+                        if not did or row is None or int(row["project_id"]) != int(pid):
+                            actions[pos] = {"type": "error", "detail": "NOTE_MAP: dosarul nu există în proiectul activ"}
+                            continue
+                        result = await generate_edges(conn, did)
+                        payload = _dossier_payload(conn, did)
+                        edges = payload.get("edges") or []
+                        actions[pos] = {
+                            "type": "note_map_updated",
+                            "scope": "dossier",
+                            "dossier_id": did,
+                            "edges": [dict(e) for e in edges[:30]],
+                            "accepted": int(result.get("accepted", 0)),
+                            "rejected": int(result.get("rejected", 0)),
+                        }
+                finally:
+                    conn.close()
+            else:  # note_export_request
+                fmt = (request.get("format") or "html").strip().lower()
+                if fmt not in ("md", "html"):
+                    fmt = "html"
+                want_project = bool(request.get("project"))
+                try:
+                    did = int(request.get("dossier_id") or 0)
+                except (TypeError, ValueError):
+                    did = 0
+
+                def _build_export():
+                    from app.db import get_db as _get_db
+                    from app.notes.export import (
+                        dossier_html, dossier_markdown, project_html, slugify,
+                    )
+                    from app.notes.map import project_map as _project_map
+                    from app.notes.service import dossier_payload as _payload, list_dossiers as _list
+                    from app.routers.project import _get_active_project_id as _pid
+
+                    conn = _get_db()
+                    try:
+                        pid = _pid(conn)
+                        if want_project:
+                            prow = conn.execute(
+                                "SELECT title FROM project WHERE id = ?", [pid]
+                            ).fetchone()
+                            project = dict(prow) if prow is not None else {}
+                            project["concepts"] = _project_map(conn, pid).get("concepts", [])
+                            payloads = []
+                            for item in _list(conn, pid):
+                                p = _payload(conn, item["id"])
+                                year = item.get("entry_year") or (item.get("entry_date") or "")[:4]
+                                p["entry"] = {
+                                    "title": item.get("entry_title") or "",
+                                    "authors": item.get("entry_authors") or "",
+                                    "year": year or "",
+                                }
+                                payloads.append(p)
+                            slug = slugify(project.get("title"))
+                            if fmt == "md":
+                                text = "\n\n---\n\n".join(dossier_markdown(p) for p in payloads)
+                            else:
+                                text = project_html(project, payloads)
+                            return text, f"{slug}.{fmt}", f"/api/notes/export?format={fmt}"
+                        row = conn.execute(
+                            "SELECT project_id FROM note_dossiers WHERE id = ?",
+                            [did],
+                        ).fetchone()
+                        if not did or row is None or int(row["project_id"]) != int(pid):
+                            raise LookupError("Dosarul nu există în proiectul activ.")
+                        payload = _payload(conn, did)
+                        entry = conn.execute(
+                            "SELECT title, authors, bib_year, entry_date FROM entries WHERE id = ?",
+                            [payload["dossier"].get("entry_id")],
+                        ).fetchone()
+                        if entry is not None:
+                            d = dict(entry)
+                            year = d.get("bib_year") or (d.get("entry_date") or "")[:4]
+                            payload["entry"] = {
+                                "title": d.get("title") or "",
+                                "authors": d.get("authors") or "",
+                                "year": year or "",
+                            }
+                        entry_title = (payload.get("entry") or {}).get("title") or payload.get("dossier", {}).get("title")
+                        slug = slugify(entry_title)
+                        text = dossier_markdown(payload) if fmt == "md" else dossier_html(payload)
+                        return text, f"{slug}.{fmt}", f"/api/notes/dossiers/{did}/export?format={fmt}"
+                    finally:
+                        conn.close()
+
+                text, filename, url = await anyio.to_thread.run_sync(_build_export)
+                actions[pos] = {
+                    "type": "note_export_ready",
+                    "format": fmt,
+                    "scope": "project" if want_project else "dossier",
+                    "url": url,
+                    "filename": filename,
+                    "bytes": len(text),
+                }
+        except LookupError as exc:
+            actions[pos] = {"type": "error", "detail": f"NOTE: {exc}"}
+        except Exception as exc:  # noqa: BLE001 - dispatch must never kill the reply
+            logger.error("Note dossier action failed: %s", exc)
+            actions[pos] = {"type": "error", "detail": f"NOTE failed: {type(exc).__name__}"}
+
+
 def _save_chat(role: str, content: str, provider: str = "", model: str = ""):
     """Save a chat message to the database."""
     try:
@@ -637,7 +873,7 @@ def _save_chat(role: str, content: str, provider: str = "", model: str = ""):
         conn.close()
 
 
-async def _call_with_fallback(message: str, history: list) -> tuple:
+async def _call_with_fallback(message: str, history: list, reading: str = "") -> tuple:
     """Build the prompt and complete via the shared provider layer."""
     context = await anyio.to_thread.run_sync(_build_context, message)
 
@@ -645,7 +881,7 @@ async def _call_with_fallback(message: str, history: list) -> tuple:
         log_ai_event("mock", "mock-model", "complete", True)
         return ("mock", "mock-model", _mock_reply(message))
 
-    messages = _build_messages(message, history, context)
+    messages = _build_messages(message, history, context, reading)
     try:
         return await llm_complete(messages, temperature=0.7, max_tokens=4096)
     except Exception as exc:
@@ -655,21 +891,21 @@ async def _call_with_fallback(message: str, history: list) -> tuple:
         raise RuntimeError("Both DeepSeek and Ollama unavailable") from exc
 
 
-async def _stream_with_fallback(message: str, history: list, context: list[dict]):
+async def _stream_with_fallback(message: str, history: list, context: list[dict], reading: str = ""):
     """Async generator yielding (provider, model, chunk) tuples."""
     if LLM_PROVIDER == "mock":
         for piece in _mock_stream_chunks(message):
             yield ("mock", "mock-model", piece)
         log_ai_event("mock", "mock-model", "stream", True)
         return
-    messages = _build_messages(message, history, context)
+    messages = _build_messages(message, history, context, reading)
     async for piece in stream_complete(messages, temperature=0.7, max_tokens=4096):
         yield piece
 
 
-def _build_messages(message: str, history: list, context: list[dict]) -> list:
+def _build_messages(message: str, history: list, context: list[dict], reading: str = "") -> list:
     """Assemble system + history + user messages for the LLM."""
-    system_prompt = _build_system_prompt(context, LLM_PROVIDER, "auto")
+    system_prompt = _build_system_prompt(context, LLM_PROVIDER, "auto", reading)
     messages = [{"role": "system", "content": system_prompt}]
     summary = _summarize_old_history(history)
     if summary:
@@ -736,9 +972,9 @@ def _extract_history_item(h: any) -> dict:
     return {"role": getattr(h, "role", "user"), "content": _clip(getattr(h, "content", str(h)))}
 
 
-async def _answer_with_tools(message: str, history: list, context: list[dict], first_reply: str, read_actions: list) -> str:
+async def _answer_with_tools(message: str, history: list, context: list[dict], first_reply: str, read_actions: list, reading: str = "") -> str:
     """Second-pass grounded answer using tool results (mini agent loop)."""
-    system_prompt = _build_system_prompt(context, "assistant", "tool-use")
+    system_prompt = _build_system_prompt(context, "assistant", "tool-use", reading)
     messages = [{"role": "system", "content": system_prompt}]
     summary = _summarize_old_history(history)
     if summary:
@@ -832,6 +1068,47 @@ def _tool_results_text(read_actions: list) -> str:
         elif a["type"] == "study_screened":
             lines.append(
                 f"- SCREENING #{a.get('entry_id')}: {a.get('decision')} — {a.get('reason') or 'no reason given'}"
+            )
+        elif a["type"] == "note_dossier_updated":
+            summary = a.get("summary") or {}
+            lines.append(
+                f"- DOSAR DE NOTIȚE #{a.get('dossier_id')} (intrarea #{a.get('entry_id')}): "
+                f"{summary.get('verificat', 0)}/{summary.get('total', 0)} verificate"
+            )
+            for c in (a.get("claims") or [])[:10]:
+                quote = (c.get("quote") or "")[:160]
+                pg = c.get("page_printed") or c.get("page_pdf") or "?"
+                lines.append(f"  {c.get('code')}: {c.get('status')} (pag. {pg}) {quote}")
+        elif a["type"] == "note_dossiers_listed":
+            dossiers = a.get("dossiers") or []
+            if not dossiers:
+                lines.append("- NO NOTE DOSSIERS in the active project")
+            for d in dossiers:
+                lines.append(
+                    f"- DOSAR #{d.get('id')}: {d.get('entry_title')} "
+                    f"[{d.get('status')}] {d.get('claims_verificat', 0)}/{d.get('claims_total', 0)} verificate"
+                )
+        elif a["type"] == "note_map_updated":
+            if a.get("scope") == "project":
+                stats = a.get("stats") or {}
+                lines.append(
+                    f"- HARTA PROIECTULUI: {stats.get('documents', 0)} dosare, "
+                    f"{stats.get('concepts', 0)} concepte, {stats.get('links', 0)} legături "
+                    f"({stats.get('bridged_concepts', 0)} concepte-punte)"
+                )
+            else:
+                lines.append(
+                    f"- HARTA DOSARULUI #{a.get('dossier_id')}: "
+                    f"{a.get('accepted', 0)} muchii validate, {a.get('rejected', 0)} respinse"
+                )
+                for e in (a.get("edges") or [])[:10]:
+                    pg = f" (p. {e.get('page')})" if (e.get("page") or "") else ""
+                    lines.append(f"  {e.get('from_code')} → {e.get('to_code')} — {e.get('motive')}{pg}")
+        elif a["type"] == "note_export_ready":
+            lines.append(
+                f"- EXPORT {a.get('scope')} ({a.get('format')}): {a.get('filename')} "
+                f"({a.get('bytes', 0)} caractere) — descarcă de aici: {a.get('url')}. "
+                f"Trimite utilizatorului linkul, nu conținutul fișierului."
             )
         elif a["type"] == "documents_results":
             if not a.get("results"):

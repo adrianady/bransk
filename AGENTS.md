@@ -14,6 +14,7 @@
 - **PDF RAG & Semantic Study QA**: Ingestion of paper PDFs into page-indexed text chunks, embedded with local llama.cpp or Ollama models for semantic search and grounded question answering with page citations.
 - **Multi-Provider LLM Resilience**: Dynamic failover cascade across DeepSeek, OpenAI-compatible APIs, local Ollama, and OpenCode direct endpoints, equipped with active context window detection and token-level event auditing.
 - **Chat Agent & Active Task Tracking**: Line-delimited bracketed tool tags (`[DOWNLOAD_STUDY: ...]`, `[SEARCH_DOCUMENTS: ...]`, etc.) with two-phase tool execution and persistent multi-step task tracking in SQLite (`chat_tasks`).
+- **Verified Note Dossiers**: Notes dictated while reading are split into statements, matched against the extracted page text, and kept in a per-`(project, resource)` dossier with stable claim codes, a corrections table, a justified map, and a print-ready HTML export.
 
 ---
 
@@ -131,6 +132,24 @@
 - **Two-Phase Loop**: Read/search actions execute first; tool output is fed back into a second model pass to produce a fully synthesized response with citations.
 - **Persistent Tasks**: Long-running actions (batch downloads, screening, research sweeps) are registered in the `chat_tasks` table (`kind`, `goal`, `status`, `details`, `progress_json`).
 - **UI Task Banner**: `ChatPanel.tsx` checks `GET /api/chat/task` and renders an interactive task banner with progress updates, cancel buttons, and dismiss controls.
+
+### 9. Verified Note Dossiers (`app/notes/`)
+While reading a PDF the user dictates a raw note (in the chat or in the reader); the server splits it into statements, finds each one in the source pages, and keeps the evidence. A dossier is the verified layer per `(project_id, entry_id)` — the same PDF in two projects yields two independent dossiers. `study_notes` stays as quick capture; the dossier absorbs notes on request.
+
+- **Invariants (server-enforced, not prompt-enforced)**:
+  - `verificat` requires a quote that normalizes to a substring of `page_texts.text` for the declared `(entry_id, page_pdf)`.
+  - Claim codes `A<n>` are stable and never reused: `note_dossiers.code_seq` is bumped atomically in `next_code`, reconciled with the largest suffix ever seen.
+  - `note_edges` needs a non-empty `motive` (≥ 12 chars), a `page`, and existing `from_code`/`to_code` in the same dossier; `note_edges` has `CHECK (length(trim(motive)) > 0)`.
+  - A concept (`note_concepts`) exists only while at least one link points to a `verificat`/`verificat_cu_nuanta` claim of the project.
+  - Pages whose `page_texts.source` is not `native`/`manual` cannot reach `verificat` until `visual_check = 'da'` (page image compared by the cloud vision model; see `app/notes/vision.py`).
+  - Re-verification never rewrites untouched claims; every run appends one `note_rounds` row.
+- **Tables**: `note_dossiers` (`code_seq`, `source_sheet_json`, unique on `(project_id, entry_id)`), `note_claims` (`raw_note`/`statement` kept side by side, `engine`, `visual_check`, `vision_json`, `correction`, `coverage`), `note_sections`, `note_edges`, `note_rounds`, `note_concepts` + `note_concept_seq` + `note_concept_links`.
+- **Modules**: `engine.py` (verification, `_page_index` built once per dossier), `service.py` (capture/dedup/payload), `map.py` (edges + project concepts), `compose.py` (prose sections), `vision.py` (OCR-page confirmation), `export.py` (pure Markdown/HTML renderers).
+- **Endpoints** (all project-scoped): `GET /notes/dossiers`, `GET /notes/dossiers/{id}`, `POST /notes/capture`, `POST /notes/dossiers/{id}/verify`, `PATCH /notes/claims/{id}`, `POST /notes/claims/{id}/visual-check`, `POST /notes/dossiers/{id}/compose`, `POST /notes/dossiers/{id}/map`, `POST /notes/dossiers/{id}/edges`, `GET /notes/project-map`, `POST /notes/project-map`, `DELETE /notes/edges/{id}`, `DELETE /notes/concepts/{id}`, `GET /notes/dossiers/{id}/export?format=md|html`, `GET /notes/export?format=md|html`.
+- **Chat tags**: `[NOTE_CAPTURE: entry_id | text]`, `[NOTE_VERIFY: dossier_id]`, `[NOTE_MAP: dossier_id|project]`, `[NOTE_EXPORT: dossier_id|project | md|html]`, `[LIST_NOTE_DOSSIERS: ]`. Results (`note_dossier_updated`, `note_map_updated`, `note_export_ready`, `note_dossiers_listed`) reach the second model pass; exports return a download URL, never the document body.
+- **Reading context**: `ChatRequest.entry_id` / `page` → `app/chat/context.py:reading_context` puts the open source, the page text and the dossier state in the prompt.
+- **Frontend**: `ProjectView` tab „Notițe" → `NotesPanel.tsx` (master–detail, corrections table, round journal) + `NoteMap.tsx` (data-driven SVG, small print under it); the reader's notes panel calls `api.noteDossiers.capture`; `lib/readingContext.ts` keeps the open source/page for the chat.
+- **Tests**: `tests/test_note_dossiers.py`, `test_note_map.py`, `test_note_export.py`, `test_note_vision.py`, `test_note_compose.py`, `test_chat_note_tags.py`.
 
 ---
 
@@ -320,6 +339,10 @@ npm run build
 | `chronokg/frontend/src/lib/api.ts` | Frontend HTTP client wrapper handling authentication headers and error toasts. |
 | `chronokg/frontend/src/lib/types.ts` | Core TypeScript interfaces across all domain entities. |
 | `chronokg/frontend/src/lib/libraryState.ts` | SessionStorage persistence for scroll offsets, active pills, and pagination. |
+| `chronokg/backend/app/notes/engine.py` | Dossier verification core: quote validation, page index, stable claim codes, OCR gate. |
+| `chronokg/backend/app/routers/notes.py` | Project-scoped `/api/notes` surface: capture, verify, visual check, map, compose, export. |
+| `chronokg/frontend/src/components/NotesPanel.tsx` | „Notițe" tab: dossier list + detail, claim cards, corrections table, round journal. |
+| `chronokg/frontend/src/components/NoteMap.tsx` | Data-driven SVG map (dossier edges and project concepts) with a small-print provenance list. |
 
 ---
 

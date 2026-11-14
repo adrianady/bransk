@@ -1364,6 +1364,89 @@ export interface VerifySummary {
   pages_total: number;
 }
 
+// ── Verified note dossiers ──────────────────────────────────────────────────
+
+export type NoteClaimStatus =
+  | 'verificat'
+  | 'verificat_cu_nuanta'
+  | 'incomplet'
+  | 'subestimat'
+  | 'corectat'
+  | 'depasit'
+  | 'neverificat';
+
+export interface NoteClaim {
+  id: number;
+  dossier_id: number;
+  code: string;
+  raw_note: string;
+  statement: string;
+  quote: string;
+  page_pdf: number | null;
+  page_printed: string;
+  engine: string;
+  /** 'da' | 'nu' | 'necesar' | null, per backend _VISUAL_VALUES. */
+  visual_check: string | null;
+  status: NoteClaimStatus;
+  correction: string;
+  method: string;
+  coverage: number | null;
+  created_at: string;
+  verified_at: string | null;
+}
+
+export interface NoteSection {
+  kind: 'fisa_sursei' | 'ce_spune' | 'continut' | 'teza' | 'corectii' | 'lipsea' | 'glosar' | 'formulari' | 'de_verificat';
+  title: string;
+  position: number;
+  body_md: string;
+}
+
+export interface NoteEdge {
+  id: number;
+  dossier_id: number;
+  from_code: string;
+  to_code: string;
+  motive: string;
+  page: number | null;
+  claim_code: string;
+}
+
+export interface NoteRound {
+  id: number;
+  summary: string;
+  changed_json: unknown;
+  open_json: unknown;
+  created_at: string;
+}
+
+export interface NoteDossierSummary {
+  id: number;
+  project_id: number;
+  entry_id: number;
+  status: 'draft' | 'partial' | 'verificat';
+  title: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  entry_title: string;
+  entry_authors: string;
+  entry_year: string | null;
+  claims_total: number;
+  claims_verificat: number;
+  by_status: Record<string, number>;
+}
+
+export interface NoteDossier {
+  dossier: NoteDossierSummary & { source_sheet_json: string };
+  claims: NoteClaim[];
+  sections: NoteSection[];
+  edges: NoteEdge[];
+  rounds: NoteRound[];
+  summary: { verificat: number; neverificat: number; total: number };
+  by_status: Record<string, number>;
+}
+
 // ── Per-page document parse ─────────────────────────────────────────────────
 
 export interface ParseSummaryPage {
@@ -1401,4 +1484,82 @@ export interface PageTextResponse {
   char_count: number;
   /** Stored on page_texts but not part of the router's response model today. */
   printed_page?: string;
+}
+
+// ── Note map (hartă de verifiere) ──────────────────────────────────────────
+
+export interface NoteLink {
+  id: number;
+  dossier_id: number;
+  from_code: string;
+  to_code: string;
+  motive: string;
+  page: number | null;
+  claim_code: string;
+}
+
+export interface NoteConceptLink {
+  dossier_id: number;
+  claim_code: string;
+  note: string;
+  page: string;
+  statement: string;
+  page_printed: string;
+}
+
+export interface NoteConcept {
+  id: number;
+  code: string;
+  label: string;
+  description: string;
+  links: NoteConceptLink[];
+}
+
+export interface NoteBridge {
+  concept_code: string;
+  dossier_ids: number[];
+}
+
+export interface NoteProjectMapStats {
+  documents: number;
+  concepts: number;
+  bridged_concepts: number;
+  links: number;
+}
+
+export interface NoteProjectMapDoc {
+  dossier_id: number;
+  entry_id: number | null;
+  title: string;
+  authors: string;
+  year: string;
+  status: string;
+  claims_total: number;
+  claims_verificat: number;
+}
+
+export interface NoteProjectMap {
+  documents: NoteProjectMapDoc[];
+  concepts: NoteConcept[];
+  bridges: NoteBridge[];
+  stats: NoteProjectMapStats;
+}
+
+export interface NoteEdgeProposal {
+  from_code: string;
+  to_code: string;
+  motive: string;
+  page: string | null;
+  claim_code?: string | null;
+}
+
+export interface NoteDossierMapPayload {
+  dossier_id: number;
+  entry_id: number | null;
+  title: string;
+  claims: NoteClaim[];
+  edges: NoteLink[];
+  concepts?: NoteConcept[];
+  bridges?: NoteBridge[];
+  stats?: NoteProjectMapStats;
 }

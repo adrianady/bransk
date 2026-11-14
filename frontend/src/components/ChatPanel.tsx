@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm'
 import { api } from '../lib/api'
 import { useToast } from './Toast'
 import { StudyPdfModal } from './StudyPdfModal'
+import { useReadingContext } from '../lib/readingContext'
 import type { ProviderHealth, ChatAction, ChatTask, Entry } from '../lib/types'
 interface Props {
   onClose: () => void
@@ -171,6 +172,7 @@ const MessageBubble = memo(function MessageBubble({
 
 export function ChatPanel({ onClose }: Props) {
   const toast = useToast()
+  const reading = useReadingContext()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -295,7 +297,15 @@ export function ChatPanel({ onClose }: Props) {
       const history = messages
         .slice(-MAX_HISTORY_MESSAGES)
         .map(m => ({ role: m.role, content: m.content.slice(0, MAX_HISTORY_LEN) }))
-      const response = await api.chat.stream(input.trim().slice(0, 100000), history, controller.signal)
+      const response = await api.chat.stream(
+        input.trim().slice(0, 100000),
+        history,
+        controller.signal,
+        {
+          entry_id: reading.entryId ?? undefined,
+          page: reading.page ?? undefined,
+        },
+      )
       if (!response.ok) {
         const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }))
         throw new Error(friendlyError(err) || `HTTP ${response.status}`)
