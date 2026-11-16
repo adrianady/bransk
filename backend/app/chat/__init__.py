@@ -338,75 +338,73 @@ async def chat_stream(data: ChatRequest, request: Request):
             reading = await anyio.to_thread.run_sync(_load_reading, data.entry_id, data.page)
 
             # Only run direct research shortcut if no workflow task was already detected
+            research_failed = False
             if not active_task:
                 auto_topic = _detect_research_intent(data.message)
-                research_failed = False
                 if auto_topic:
                     _begin_task("research", auto_topic, details=data.message)
-                yield f"data: {json.dumps({'type': 'provider', 'provider': 'chronokg', 'model': 'academic-researcher'})}\n\n"
-                msg_txt = f"Searching scholarly databases and acquiring studies for: {auto_topic}..."
-                yield f"data: {json.dumps({'type': 'progress', 'phase': 'research', 'message': msg_txt})}\n\n"
-                try:
-                    from app.routers.research import run_research
-                    result = await run_research(auto_topic, depth="quick")
-                    yield f"data: {json.dumps({'type': 'research', 'result': result.model_dump()})}\n\n"
-                    actions = [{"type": "research_done", "result": result.model_dump()}]
-                    studies = result.studies or []
-                    lines = [
-                        f"## Sinteză cercetare academică: {auto_topic}\n",
-                        f"{result.summary or ''}\n",
-                        f"### Studii științifice identificate și procesate ({len(studies)} lucrări):\n",
-                    ]
-                    for i, s in enumerate(studies, 1):
-                        lines.append(
-                            f"{i}. **{s.title}** ({s.year or 'n.d.'}) — DOI: `{s.doi or 'N/A'}` — Calitate metodologică: {s.quality}/5"
+                    yield f"data: {json.dumps({'type': 'provider', 'provider': 'chronokg', 'model': 'academic-researcher'})}\n\n"
+                    msg_txt = f"Searching scholarly databases and acquiring studies for: {auto_topic}..."
+                    yield f"data: {json.dumps({'type': 'progress', 'phase': 'research', 'message': msg_txt})}\n\n"
+                    try:
+                        from app.routers.research import run_research
+                        result = await run_research(auto_topic, depth="quick")
+                        yield f"data: {json.dumps({'type': 'research', 'result': result.model_dump()})}\n\n"
+                        actions = [{"type": "research_done", "result": result.model_dump()}]
+                        studies = result.studies or []
+                        lines = [
+                            f"## Sinteză cercetare academică: {auto_topic}\n",
+                            f"{result.summary or ''}\n",
+                            f"### Studii științifice identificate și procesate ({len(studies)} lucrări):\n",
+                        ]
+                        for i, s in enumerate(studies, 1):
+                            lines.append(
+                                f"{i}. **{s.title}** ({s.year or 'n.d.'}) — DOI: `{s.doi or 'N/A'}` — Calitate metodologică: {s.quality}/5"
+                            )
+                        if result.confidence:
+                            lines.append(f"\n**Nivel încredere (GRADE):** {result.confidence}")
+                        final_reply = "\n".join(lines)
+                        for piece in _chunk_text(final_reply, 80):
+                            yield f"data: {json.dumps({'type': 'chunk', 'content': piece})}\n\n"
+                        _finish_task(
+                            "done",
+                            kind="research",
+                            progress={
+                                "studies": len(studies),
+                                "entries_created": len(result.entries_created or []),
+                                "theories": len(result.theories or []),
+                                "confidence": result.confidence or "",
+                            },
                         )
-                    if result.confidence:
-                        lines.append(f"\n**Nivel încredere (GRADE):** {result.confidence}")
-                    final_reply = "\n".join(lines)
-                    for piece in _chunk_text(final_reply, 80):
-                        yield f"data: {json.dumps({'type': 'chunk', 'content': piece})}\n\n"
-                    _finish_task(
-                        "done",
-                        kind="research",
-                        progress={
-                            "studies": len(studies),
-                            "entries_created": len(result.entries_created or []),
-                            "theories": len(result.theories or []),
-                            "confidence": result.confidence or "",
-                        },
-                    )
-                    _save_chat("user", data.message, "chronokg", "academic-researcher")
-                    _save_chat("assistant", final_reply, "chronokg", "academic-researcher")
-                    yield f"data: {json.dumps({'type': 'actions', 'content': actions})}\n\n"
-                    yield f"data: {json.dumps({'type': 'task', 'task': _get_active_task()})}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
-                except Exception as rexc:
-                    logger.error(f"Direct research stream failed: {rexc}")
-                    research_failed = True
-                    _finish_task(
-                        "failed",
-                        kind="research",
-                        progress={"error": f"{type(rexc).__name__}: {str(rexc)[:300]}"},
-                    )
-                    yield f"data: {json.dumps({'type': 'progress', 'phase': 'search', 'message': 'Falling back to interactive chat agent...'})}\n\n"
+                        _save_chat("user", data.message, "chronokg", "academic-researcher")
+                        _save_chat("assistant", final_reply, "chronokg", "academic-researcher")
+                        yield f"data: {json.dumps({'type': 'actions', 'content': actions})}\n\n"
+                        yield f"data: {json.dumps({'type': 'task', 'task': _get_active_task()})}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                    except Exception as rexc:
+                        logger.error(f"Direct research stream failed: {rexc}")
+                        research_failed = True
+                        _finish_task(
+                            "failed",
+                            kind="research",
+                            progress={"error": f"{type(rexc).__name__}: {str(rexc)[:300]}"},
+                        )
+                        yield f"data: {json.dumps({'type': 'progress', 'phase': 'search', 'message': 'Falling back to interactive chat agent...'})}\n\n"
 
-            stream_iter = _stream_with_fallback(data.message, data.history, context, reading).__aiter__()
-            while True:
+            # A slow local CPU model can take >10 s to emit its first token.
+            # wait_for() would cancel __anext__() and close the generator, losing
+            # the whole answer. The keepalive wrapper waits without cancelling.
+            stream = _with_sse_keepalive(
+                _stream_with_fallback(data.message, data.history, context, reading)
+            )
+            async for piece in stream:
                 try:
                     if await request.is_disconnected():
                         logger.info("Chat stream: client disconnected, stopping generation")
                         return
                 except RuntimeError:
                     pass
-                try:
-                    piece = await asyncio.wait_for(stream_iter.__anext__(), timeout=10)
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
-                except StopAsyncIteration:
-                    break
                 if provider == "unknown":
                     provider, model = piece[0], piece[1]
                     yield f"data: {json.dumps({'type': 'provider', 'provider': provider, 'model': model})}\n\n"

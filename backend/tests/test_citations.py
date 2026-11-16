@@ -106,3 +106,45 @@ def test_bibliography_marks_cited_studies(client):
     assert cited["apa"].startswith("Smith, I., & Roe, J. (2021). Sleep and memory.")
     assert cited["apa"].endswith("https://doi.org/10.1000/sleep-01")
     assert cited["in_text"] == "(Smith & Roe, 2021)"
+
+
+def test_bibliography_uses_active_project_outline(client):
+    """A thesis in a non-default project must still detect its own citations.
+
+    Regression: the outline was read from `project WHERE id = 1`, so any other
+    project reported 0 cited works and exported the entire library.
+    """
+    _study(client, "Active project source", authors="Ioan Smith",
+           entry_date="2021-01-01", doi="10.1000/active-01")
+    default_id = client.get("/api/projects").json()["active_id"]
+    created = client.post("/api/projects", json={"title": "Proiect activ"}).json()
+    assert created["id"] != default_id  # creation switches the active project
+
+    client.put("/api/project", json={
+        "structure": [{
+            "id": "c1",
+            "title": "Introducere",
+            "content": "Conform Smith (2021), rezultatele sunt relevante pentru domeniu.",
+        }],
+    })
+    data = client.get("/api/citations/bibliography").json()
+    assert data["cited_count"] == 1
+    assert next(r for r in data["references"] if r["cited"])["title"] == "Active project source"
+
+    # The old project has no such paragraph: the same library must now report 0.
+    client.post(f"/api/projects/{default_id}/activate")
+    assert client.get("/api/citations/bibliography").json()["cited_count"] == 0
+
+
+def test_bibliography_does_not_pair_author_and_year_across_paragraphs(client):
+    """The surname and year must occur in the same paragraph, not just anywhere."""
+    _study(client, "Distant work", authors="Ioan Smith", entry_date="2021-01-01")
+    client.put("/api/project", json={
+        "structure": [{
+            "id": "c1",
+            "title": "Capitol",
+            "content": "Smith a publicat mai multe lucrări despre memorie.\n\nÎn 2021 au apărut și alte sinteze.",
+        }],
+    })
+    assert client.get("/api/citations/bibliography").json()["cited_count"] == 0
+

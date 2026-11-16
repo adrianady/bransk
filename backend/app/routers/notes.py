@@ -462,7 +462,7 @@ async def api_export_project(format: str = "html"):
     import anyio
     from fastapi.responses import HTMLResponse, PlainTextResponse
 
-    from app.notes.export import dossier_markdown, project_html, slugify
+    from app.notes.export import project_markdown, project_html, slugify
 
     fmt = _check_export_format(format)
 
@@ -478,7 +478,7 @@ async def api_export_project(format: str = "html"):
     project, payloads = await anyio.to_thread.run_sync(_load)
     slug = slugify(project.get("title"))
     if fmt == "md":
-        body = "\n\n---\n\n".join(dossier_markdown(p) for p in payloads)
+        body = project_markdown(project, payloads)
         return PlainTextResponse(
             body,
             media_type="text/markdown",

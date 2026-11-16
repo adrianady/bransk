@@ -61,6 +61,7 @@ from app.llm import (
     complete_with_images,
     model_supports_images,
 )
+from app.cpu_only import CPU_ONLY_MODE
 from app.page_text import ensure_page_texts, get_page_text
 
 logger = logging.getLogger("chronokg.document_parse")
@@ -678,6 +679,14 @@ def _cloud_verify(png: bytes, ocr_text: str, *, provider: str | None,
     when no verification happened (no model chosen, provider failed, or the
     reply was unusable); in every such case the page must stay uncertain.
     """
+    if CPU_ONLY_MODE:
+        return {
+            "verdict": "unavailable",
+            "text": "",
+            "provider": "",
+            "model": "",
+            "error": "cpu_only_vision_unavailable: OCR-ul local rămâne neverificat.",
+        }
     if not (provider or "").strip() or not (model or "").strip():
         return {
             "verdict": "unavailable",
@@ -744,6 +753,21 @@ def parse_scanned_page(png: bytes, *, provider: str | None = None,
     ocr_text = ocr["text"]
     gate_status, gate_reasons = _gate(ocr_text)
 
+    if CPU_ONLY_MODE:
+        return {
+            "text": ocr_text,
+            "source": "ocr",
+            "status": "vision-uncertain",
+            "reasons": [*gate_reasons, "cpu_only_vision_unavailable"],
+            "ocr_text": ocr_text,
+            "vision_text": "",
+            "verdict": "unavailable",
+            "lang": ocr["lang"],
+            "provider": "",
+            "model": "",
+            "ocr_elapsed_ms": ocr["elapsed_ms"],
+        }
+
     cloud = _cloud_verify(
         png, ocr_text, provider=provider, model=model,
     )
@@ -780,6 +804,7 @@ def parse_scanned_page(png: bytes, *, provider: str | None = None,
 
     return {
         "text": text,
+        "source": "vision",
         "status": status,
         "reasons": reasons,
         "ocr_text": ocr_text,
@@ -802,7 +827,7 @@ def _verify_vision_model(provider: str | None, model: str | None) -> None:
     not publish modalities (or is unreachable), so the call is attempted and
     ``llm`` raises a provider-specific error if the model really is text-only.
     """
-    if not provider or not model:
+    if CPU_ONLY_MODE or not provider or not model:
         return
     supported = _maybe_await(model_supports_images(provider, model))
     if supported is False:
@@ -853,7 +878,7 @@ def _page_is_anchored(conn, entry_id: int, page_number: int) -> bool:
 
 def _write_vision_row(conn, entry_id: int, page_number: int, text: str,
                       status: str, force: bool = False,
-                      anchored: bool = False) -> str:
+                      anchored: bool = False, source: str = "vision") -> str:
     """Store a vision row. Returns ``written``, ``rewritten`` or ``skipped``.
 
     ``force`` may replace a row that already holds vision text — including a
@@ -862,19 +887,19 @@ def _write_vision_row(conn, entry_id: int, page_number: int, text: str,
     overwritten, with or without ``force``: a human edit and an existing anchor
     both outrank any model output.
     """
-    source, existing_status, existing_text = _row_source(conn, entry_id, page_number)
-    if source == "manual" or anchored:
+    existing_source, existing_status, existing_text = _row_source(conn, entry_id, page_number)
+    if existing_source == "manual" or anchored:
         return "skipped"
-    if (not force and source == "vision" and existing_status == "vision-ok"
+    if (not force and existing_source == "vision" and existing_status == "vision-ok"
             and existing_text.strip()):
         return "skipped"
     conn.execute(
         """INSERT OR REPLACE INTO page_texts
            (entry_id, page_number, text, source, status, char_count)
-           VALUES (?, ?, ?, 'vision', ?, ?)""",
-        [entry_id, page_number, text, status, len(text)],
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        [entry_id, page_number, text, source, status, len(text)],
     )
-    return "rewritten" if source == "vision" else "written"
+    return "rewritten" if existing_source == "vision" else "written"
 
 
 def _normalize_pages(pages) -> set[int] | None:
@@ -988,12 +1013,14 @@ def parse_document(conn, entry_id: int, path, *, provider: str | None = None,
                         conn, entry_id, page_number,
                         parsed["text"], parsed["status"], force=force,
                         anchored=anchored,
+                        source=parsed.get("source", "vision"),
                     )
                     _write_verification(page_verification_path(entry_id, page_number), {
                         "entry_id": entry_id,
                         "page_number": page_number,
                         "ocr_text": parsed["ocr_text"],
                         "vision_text": parsed["vision_text"],
+                        "source": parsed.get("source", "vision"),
                         "verdict": parsed["verdict"],
                         "status": parsed["status"],
                         "reasons": parsed["reasons"],

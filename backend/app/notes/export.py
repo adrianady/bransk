@@ -88,6 +88,18 @@ def _page_md(claim: dict) -> str:
 def _cell(value) -> str:
     return _str(value).replace("|", "\\|").replace("\n", " ").strip()
 
+def project_markdown(project: dict, payloads: list[dict]) -> str:
+    """Whole project as one Markdown document; never empty, even with no dossiers."""
+    project = project if isinstance(project, dict) else {}
+    payloads = [p for p in (payloads or []) if isinstance(p, dict)]
+    title = _str(project.get("title")) or "Proiect"
+    body = "\n\n---\n\n".join(dossier_markdown(p) for p in payloads)
+    if not body.strip():
+        body = ("Nu există încă niciun dosar de notițe în acest proiect. "
+                "Deschide o sursă, notează ce ai citit, apoi verifică notița în dosar.")
+    return f"# {title}\n\n{body}\n"
+
+
 def dossier_markdown(payload: dict) -> str:
     """One dossier as Romanian Markdown (headings in the fixed order)."""
     dossier = payload.get("dossier") or {}

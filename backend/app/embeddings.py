@@ -19,6 +19,8 @@ import time
 import anyio
 import httpx
 
+from app.cpu_only import CPU_ONLY_MODE, is_loopback_url
+
 logger = logging.getLogger("chronokg.embeddings")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -73,6 +75,8 @@ _COOLDOWN_SECONDS = 30.0
 
 
 def _ollama_tags() -> list[str] | None:
+    if CPU_ONLY_MODE:
+        return None
     global _tags
     if _tags is not None:
         return _tags
@@ -90,6 +94,8 @@ def _ollama_tags() -> list[str] | None:
 def _resolve_model() -> str | None:
     """Return the embedding model to use, or None (disables embeddings)."""
     global _active_model, _tags, _cooldown_until
+    if CPU_ONLY_MODE:
+        return None
     if _active_model:
         return _active_model
     if time.monotonic() < _cooldown_until:
@@ -134,6 +140,8 @@ def embedding_available() -> bool:
     """
     if _llama_available():
         return True
+    if CPU_ONLY_MODE:
+        return False
     return _resolve_model() is not None
 
 
@@ -145,6 +153,8 @@ def embedding_model_installed() -> bool:
 def embedding_model() -> str | None:
     if _llama_available():
         return LLAMA_EMBED_MODEL
+    if CPU_ONLY_MODE:
+        return None
     return _active_model
 
 
@@ -169,6 +179,8 @@ def embedding_backend() -> str:
     """Which backend answers, so the UI can say the truth."""
     if _llama_available():
         return f"llama.cpp ({LLAMA_EMBED_URL})"
+    if CPU_ONLY_MODE:
+        return "none (CPU-only; Ollama fallback disabled)"
     if _resolve_model() is not None:
         return "ollama"
     return "none"
@@ -176,6 +188,8 @@ def embedding_backend() -> str:
 
 def available_embed_models() -> list[str]:
     """Names of installed models that look like embedding models."""
+    if CPU_ONLY_MODE:
+        return [LLAMA_EMBED_MODEL] if _llama_available() else []
     tags = _ollama_tags() or []
     keywords = ("embed", "minilm", "bge", "mxbai", "arctic", "paraphrase")
     candidates = [t for t in tags if any(k in t.lower() for k in keywords)]
@@ -211,13 +225,15 @@ def _llama_available() -> bool:
     server would disable semantic search until the next restart.
     """
     global _llama_checked, _llama_ok, _llama_failed_at
+    if CPU_ONLY_MODE and not is_loopback_url(LLAMA_EMBED_URL):
+        return False
     if _llama_ok:
         return True
     if _llama_checked and _llama_failed_at is not None:
         if time.monotonic() - _llama_failed_at < LLAMA_RECHECK_SECONDS:
             return False
     try:
-        with httpx.Client(timeout=3.0) as client:
+        with httpx.Client(timeout=3.0, trust_env=False) as client:
             resp = client.get(f"{LLAMA_EMBED_URL}/health")
             _llama_ok = resp.status_code == 200
     except Exception as exc:
@@ -235,8 +251,10 @@ def _llama_available() -> bool:
 def _batch_embed_llama(texts: list[str]) -> list[list[float]] | None:
     """Embed through llama.cpp's OpenAI-compatible /v1/embeddings."""
     global _dimension
+    if CPU_ONLY_MODE and not is_loopback_url(LLAMA_EMBED_URL):
+        return None
     try:
-        with httpx.Client(timeout=EMBED_TIMEOUT) as client:
+        with httpx.Client(timeout=EMBED_TIMEOUT, trust_env=False) as client:
             resp = client.post(
                 f"{LLAMA_EMBED_URL}/v1/embeddings",
                 json={"input": texts},
@@ -259,6 +277,8 @@ def _batch_embed(texts: list[str]) -> list[list[float]] | None:
         vectors = _batch_embed_llama(texts)
         if vectors:
             return vectors
+    if CPU_ONLY_MODE:
+        return None
     model = _resolve_model()
     if model is None:
         return None

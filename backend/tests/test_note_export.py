@@ -248,6 +248,22 @@ def test_export_isolation_and_bad_format():
         assert bad_one.status_code == 400, bad_one.text
 
 
+def test_project_export_is_never_empty():
+    """A project without dossiers still yields a titled document, not a 0-byte file."""
+    with TestClient(app) as client:
+        created = client.post("/api/projects", json={"title": "Proiect gol"})
+        assert created.status_code == 201, created.text
+
+        md = client.get("/api/notes/export?format=md")
+        assert md.status_code == 200, md.text
+        assert md.text.strip(), "markdown export must not be empty"
+        assert "Proiect gol" in md.text
+
+        html_res = client.get("/api/notes/export?format=html")
+        assert html_res.status_code == 200, html_res.text
+        assert "Proiect gol" in html_res.text
+
+
 def test_slugify_ascii_dashes_and_fallback():
     assert slugify("Dezvoltarea copilului în familie") == "dezvoltarea-copilului-in-familie"
     assert slugify("") == "dosar"

@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import PlainTextResponse
 
 from app.db import get_db
+from app.routers.project import _get_active_project_id
 
 router = APIRouter()
 
@@ -248,7 +249,11 @@ def _bibliography_references(conn) -> list[dict]:
     """APA references for the whole library, with the `cited` flag computed
     against the thesis chapter text."""
     studies = _fetch_studies(conn, None, doi_only=False)
-    row = conn.execute("SELECT structure_json FROM project WHERE id = 1").fetchone()
+    # The outline belongs to the ACTIVE project, not to project 1. Hardcoding
+    # id=1 made every other project report "0 citate în text" and dump the
+    # whole library into the exported bibliography.
+    pid = _get_active_project_id(conn)
+    row = conn.execute("SELECT structure_json FROM project WHERE id = ?", (pid,)).fetchone()
 
     thesis_text = ""
     if row:
@@ -262,7 +267,10 @@ def _bibliography_references(conn) -> list[dict]:
         except (TypeError, json.JSONDecodeError):
             thesis_text = ""
 
-    folded_text = thesis_text.lower()
+    # A citation pairs an author surname with a year inside the same paragraph.
+    # Matching the whole thesis lets a surname in chapter 2 pair with a year in
+    # chapter 5, falsely marking unrelated library entries as cited.
+    folded_chunks = [line.strip().lower() for line in thesis_text.splitlines() if line.strip()]
     references = []
     for s in studies:
         authors = _split_authors(_display_authors(s))
@@ -300,7 +308,9 @@ def _bibliography_references(conn) -> list[dict]:
         if apa.endswith(".."):
             apa = apa[:-1]
 
-        cited = bool(surname) and bool(year) and f"{surname.lower()}" in folded_text and year in folded_text
+        cited = bool(surname) and bool(year) and any(
+            surname.lower() in chunk and year in chunk for chunk in folded_chunks
+        )
         in_text = _in_text_citation(s)
         references.append({
             "entry_id": s["id"],

@@ -78,6 +78,20 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProj
   const [todoDraft, setTodoDraft] = useState<{ priority: string; effort: string; due_date: string }>({ priority: 'normal', effort: 'm', due_date: '' })
   const [srItem, setSrItem] = useState<SpacedRepetitionItem | null>(null)
   const [reminders, setReminders] = useState<Reminder[]>([])
+  // Lista (/api/entries) livrează conținutul trunchiat: `content` vine gol și
+  // doar `content_preview` e populat. Fără această completare, detaliul deschis
+  // direct din listă arăta „Fără conținut” deși textul exista în bază.
+  const [fullEntry, setFullEntry] = useState<Entry | null>(null)
+  useEffect(() => {
+    setFullEntry(null)
+    if (entry.content || !entry.content_preview) return
+    let cancelled = false
+    api.entries.get(entry.id)
+      .then(full => { if (!cancelled) setFullEntry(full) })
+      .catch(() => { /* rămânem pe varianta din listă */ })
+    return () => { cancelled = true }
+  }, [entry.id])
+  const entryView = fullEntry ?? entry
   const [showReminderForm, setShowReminderForm] = useState(false)
   const [reminderTitle, setReminderTitle] = useState('')
   const [reminderTrigger, setReminderTrigger] = useState('')
@@ -228,7 +242,18 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProj
             </div>
           </div>
           <div className="flex gap-1.5 shrink-0">
-            <button onClick={() => setShowEdit(true)} className="icon-btn" aria-label="Editează intrarea" title="Editează intrarea">
+            <button onClick={() => {
+              // Câmpul din listă are conținutul trunchiat; dacă încă nu a
+              // sosit versiunea completă, o cerem înainte de a deschide
+              // formularul, altfel salvarea ar suprascrie textul cu „”.
+              if (!entry.content && entry.content_preview && !fullEntry) {
+                api.entries.get(entry.id)
+                  .then(full => { setFullEntry(full); setShowEdit(true) })
+                  .catch(() => setShowEdit(true))
+                return
+              }
+              setShowEdit(true)
+            }} className="icon-btn" aria-label="Editează intrarea" title="Editează intrarea">
               <Pencil className="w-4 h-4" />
             </button>
             <button
@@ -367,8 +392,8 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProj
 
         {/* Content */}
         <div className="prose prose-sm dark:prose-invert max-w-none mt-4">
-          {entry.content ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={getMarkdownComponents(entry.title)}>{entry.content}</ReactMarkdown>
+          {entryView.content ? (
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={getMarkdownComponents(entryView.title)}>{entryView.content}</ReactMarkdown>
           ) : (
             <p className="text-gray-400 italic">Fără conținut</p>
           )}
@@ -771,7 +796,7 @@ export function EntryDetail({ entry, onBack, onUpdate, onSelectEntry, onOpenProj
       {/* Edit Modal */}
       {showEdit && (
         <EntryForm
-          editEntry={entry}
+          editEntry={entryView}
           onClose={() => setShowEdit(false)}
           onSaved={(updated) => { onUpdate(updated); setShowEdit(false) }}
         />

@@ -99,33 +99,33 @@ else
       exit 1
     fi
   fi
-
-  echo "Pornesc Bransk pe portul $PORT…"
-  LOG="/tmp/chronokg-$PORT.log"
-  # shellcheck disable=SC2086
-  setsid nohup "$ROOT/start.sh" $HOST_ARG "$PORT" >>"$LOG" 2>&1 &
-  echo "  log: $LOG"
-
-  echo -n "  aștept serverul"
-  started=0
-  for _ in $(seq 1 60); do
-    if curl -fsS -m 2 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
-      started=1
-      break
-    fi
-    echo -n "."
-    sleep 1
-  done
-  echo
-  if [ "$started" != "1" ]; then
-    echo "⚠ Serverul nu a răspuns în 60 s. Ultimele rânduri din log:" >&2
-    tail -20 "$LOG" >&2 || true
-    pause_if_window
-    exit 1
-  fi
-  server_state="pornit acum"
-  open_browser "$URL" || echo "Deschide manual: $URL"
 fi
+
+echo "Pornesc Bransk pe portul $PORT…"
+LOG="/tmp/chronokg-$PORT.log"
+# shellcheck disable=SC2086
+setsid nohup "$ROOT/start.sh" $HOST_ARG "$PORT" >>"$LOG" 2>&1 &
+echo "  log: $LOG"
+
+echo -n "  aștept serverul"
+started=0
+for _ in $(seq 1 60); do
+  if curl -fsS -m 2 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+    started=1
+    break
+  fi
+  echo -n "."
+  sleep 1
+done
+echo
+if [ "$started" != "1" ]; then
+  echo "⚠ Serverul nu a răspuns în 60 s. Ultimele rânduri din log:" >&2
+  tail -20 "$LOG" >&2 || true
+  pause_if_window
+  exit 1
+fi
+server_state="pornit acum"
+open_browser "$URL" || echo "Deschide manual: $URL"
 
 # ── 2. Modelul de embedding (llama.cpp pe CPU) răspunde? ───────────────────
 echo

@@ -74,6 +74,16 @@ export function LibraryView({ activeTab, onTabChange, onSelectEntry, onCreateEnt
   })
   const [duplicatesOpen, setDuplicatesOpen] = useState(false)
   useEffect(() => { writeStored('chronokg-library-quickfacet', quickFacet) }, [quickFacet])
+  // Normalizare la montare: facet-urile rapide aparțin listei de studii. Dacă
+  // sesiunea anterioară s-a oprit cu „Citite/Cărți” activ pe un filtru de
+  // intrări, lista de studii ar acoperi panoul de intrări la reîncărcare.
+  useEffect(() => {
+    setFilter(prev => {
+      if ((prev === 'all' || prev === 'notes') && quickFacet !== '') setQuickFacet('')
+      return prev
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const showingStudies = filter === 'studies' || filter === 'pdf' || filter === 'nopdf' || quickFacet !== ''
   const pdfFilter = filter === 'pdf' ? 'with' : filter === 'nopdf' ? 'without' : 'all'
@@ -91,6 +101,12 @@ export function LibraryView({ activeTab, onTabChange, onSelectEntry, onCreateEnt
   }, [showingStudies])
 
   const selectFilter = (next: LibraryFilter) => {
+    // „Cărți” și „Citite” sunt facet-uri ale listei de studii; pe intrări
+    // (Toate / Notițe) nu mai au sens, iar păstrarea lor bloca panoul de
+    // intrări (showingStudies rămânea true) sub un titlu de „Studii academice”.
+    // Se curăță înainte de guard-ul `next === filter`, altfel un click pe
+    // pilula deja activă nu reușește să scoată facet-ul blocant.
+    if ((next === 'all' || next === 'notes') && quickFacet !== '') setQuickFacet('')
     if (next === filter) return
     setFilter(next)
     const tab = tabForLibraryFilter(next)

@@ -16,7 +16,7 @@ import anyio
 from app.db import get_db
 from app.routers.relationships import RELATION_KINDS, parse_relation_label
 from app.llm import (
-    LLM_PROVIDER,
+    active_provider,
     check_deepseek,
     complete as llm_complete,
     log_ai_event,
@@ -1659,7 +1659,7 @@ async def _call_with_fallback(message: str, history: list) -> tuple:
     """Build the prompt and complete via the shared provider layer."""
     context = await anyio.to_thread.run_sync(_build_context, message)
 
-    if LLM_PROVIDER == "mock":
+    if active_provider() == "mock":
         log_ai_event("mock", "mock-model", "complete", True)
         return ("mock", "mock-model", _mock_reply(message))
 
@@ -1675,7 +1675,7 @@ async def _call_with_fallback(message: str, history: list) -> tuple:
 
 async def _stream_with_fallback(message: str, history: list, context: list[dict]):
     """Async generator yielding (provider, model, chunk) tuples."""
-    if LLM_PROVIDER == "mock":
+    if active_provider() == "mock":
         for piece in _mock_stream_chunks(message):
             yield ("mock", "mock-model", piece)
         log_ai_event("mock", "mock-model", "stream", True)
@@ -1687,7 +1687,7 @@ async def _stream_with_fallback(message: str, history: list, context: list[dict]
 
 def _build_messages(message: str, history: list, context: list[dict]) -> list:
     """Assemble system + history + user messages for the LLM."""
-    system_prompt = _build_system_prompt(context, LLM_PROVIDER, "auto")
+    system_prompt = _build_system_prompt(context, active_provider(), "auto")
     messages = [{"role": "system", "content": system_prompt}]
     summary = _summarize_old_history(history)
     if summary:
@@ -1904,7 +1904,7 @@ async def _answer_with_tools(message: str, history: list, context: list[dict], f
             ),
         }
     )
-    if LLM_PROVIDER == "mock":
+    if active_provider() == "mock":
         return "Based on the retrieved information, here is the answer to your question. The records were found in your knowledge base."
     _, _, text = await llm_complete(messages, temperature=0.4, max_tokens=2048)
     return text

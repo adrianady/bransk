@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db import get_db
-from app.llm import LLM_PROVIDER, complete as llm_complete
+from app.llm import LLM_PROVIDER, active_provider, complete as llm_complete
 
 logger = logging.getLogger("chronokg.questionnaires")
 
@@ -198,14 +198,21 @@ async def ai_generate_questionnaire_items(qid: int) -> Dict[str, Any]:
 
     system_prompt = (
         "Ești un expert metodolog în cercetare academică și psihometrie. "
-        "Sarcina ta este să generezi 5-8 itemi de chestionar riguroși (pe scală Likert 1-5 sau alt tip adecvat) "
+        "Sarcina ta este să generezi **44 de itemi** de chestionar riguroși (pe scală Likert 1-5) "
         "pentru constructul și titlul specificat, corelați cu întrebarea de cercetare a tezei.\n"
+        "Structura obligatorie: **4 subscale × 11 itemi fiecare** = 44 itemi total.\n"
+        "Subscalele obligatorii pentru Q-CSECC:\n"
+        "1. Suport și stimulare socială (11 itemi)\n"
+        "2. Resurse economice și materiale (11 itemi)\n"
+        "3. Context cultural și identitar (11 itemi)\n"
+        "4. Adversitate și risc perceput (11 itemi)\n"
+        "Include **itemi cu punctare inversă** (marcați cu `\"reverse\": true`) în fiecare subscală.\n"
         "Returnează DOAR un obiect JSON valid, fără markdown suplimentar, cu structura:\n"
         "{\n"
         '  "description": "Scurtă descriere metodologică a instrumentului și cum măsoară constructul",\n'
         '  "reliability_notes": "Note despre validitate, consistență internă așteptată (Alpha Cronbach) și mod de scorare",\n'
         '  "items": [\n'
-        '    {"id": "q1", "text": "Textul itemului...", "type": "likert", "options": ["Total dezacord", "Dezacord", "Neutru", "Acord", "Total acord"], "subscale": "Dimensiunea 1"}\n'
+        '    {"id": "q1", "text": "Textul itemului...", "type": "likert", "options": ["Total dezacord", "Dezacord", "Neutru", "Acord", "Total acord"], "subscale": "Suport și stimulare socială", "reverse": false}\n'
         "  ]\n"
         "}"
     )
@@ -224,7 +231,7 @@ async def ai_generate_questionnaire_items(qid: int) -> Dict[str, Any]:
         {"role": "user", "content": user_prompt},
     ]
 
-    if LLM_PROVIDER == "mock":
+    if active_provider() == "mock":
         generated = {
             "description": f"Instrument generat offline pentru {q['construct']}.",
             "reliability_notes": "Alpha Cronbach estimat > 0.80 pe eșantion țintă.",
@@ -235,7 +242,7 @@ async def ai_generate_questionnaire_items(qid: int) -> Dict[str, Any]:
         }
     else:
         try:
-            _, _, text = await llm_complete(messages, temperature=0.3, max_tokens=2000)
+            _, _, text = await llm_complete(messages, temperature=0.3, max_tokens=16384, json_mode=True)
             clean = text.strip()
             if clean.startswith("```json"):
                 clean = clean[7:]
@@ -305,11 +312,11 @@ async def ai_critique_questionnaire(qid: int) -> Dict[str, Any]:
         {"role": "user", "content": user_prompt},
     ]
 
-    if LLM_PROVIDER == "mock":
+    if active_provider() == "mock":
         critique = "### Analiză critică (Mod offline)\n- Chestionarul acoperă satisfăcător constructul de bază.\n- Se recomandă clarificarea opțiunilor de răspuns și testarea pe un eșantion pilot."
     else:
         try:
-            _, _, text = await llm_complete(messages, temperature=0.3, max_tokens=1500)
+            _, _, text = await llm_complete(messages, temperature=0.3, max_tokens=4096)
             critique = text.strip()
         except Exception as exc:
             logger.error("AI critique questionnaire failed: %s", exc)
