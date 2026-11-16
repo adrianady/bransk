@@ -62,9 +62,41 @@ QA-001 descrie starea dintr-o sesiune anterioară, care **a fost respinsă** de 
 - Retestare tehnică: `pytest tests/test_cloud_only_llm.py` → 11 passed. **Retestare în browser: în curs** (chat NVIDIA + verificare ordin fallback).
 - Severitate: blocant (încălca direct regula cloud-only).
 
+### QA-005 — Generare AI chestionar: răspuns valid, 0 itemi salvați tăcut
+- Etapă: proiectarea instrumentului (runda 1).
+- Reproducere: proiect de test → Chestionare & Scale → „Generează / Completează cu AI” pe Q-CSECC.
+- Așteptat/Obținut: așteptat 44 itemi; obținut 0 itemi, fără mesaj de eroare, deși `ai_events` arăta apel NVIDIA reușit (63 s, 1176 caractere).
+- Severitate: major (pierdere tăcută a rezultatului; utilizatorul crede că a salvat).
+- Dovadă UI: buton revene la activ, „Nu există itemi adăugați”; DB `items_json = []`.
+- Cauză: parserul accepta doar JSON curat cu cheia exactă `items`; un răspuns cloud lung/ambalat nu era recunoscut, iar fallback-ul la itemii existenți (goali) ascundea eșecul.
+- Remediere: `_parse_generated_questionnaire` — eliminare fence/proză, chei alternative, normalizare itemi, eroare explicită dacă nu rezultă niciun item.
+- Retestare: **VERIFICAT ÎN BROWSER** — după repornire, același buton a generat 44 itemi afișați în UI (4 subscale × 11, cu itemi inversați); critica AI a afișat un raport psihometric complet.
+
+### QA-006 — Prompturile AI citeau proiectul 1, nu proiectul activ
+- Etapă: generare itemi.
+- Cauză: `SELECT ... FROM project LIMIT 1` în `routers/questionnaires.py`.
+- Remediere: `_get_active_project_id(conn)` + `WHERE id = ?`, ca în celelalte domenii.
+- Severitate: major în multi-proiect. Retestare: generarea a folosit titlul/întrebarea proiectului de test activ.
+
+### QA-007 — Detectare mod mock regresată după trecerea la `active_provider()`
+- Simptom: 1 test backend eșua cu 503; `conftest` pune `LLM_PROVIDER=mock`, dar baza goală nu are provider explicit.
+- Remediere: verificare `LLM_PROVIDER == "mock" or active_provider() == "mock"` în `routers/chat.py` și `routers/questionnaires.py`.
+- Retestare: 45 teste țintă trecute.
+
+### QA-008 — Dependență `tokenizers` nedeclarată
+- Simptom: 2 teste de stance/NLI eșuau cu `No module named 'tokenizers'`.
+- Remediere: instalat `tokenizers` în venv-ul backend și adăugat în `requirements.txt`.
+- Retestare: 45 teste țintă trecute (inclusiv stance aggregate și stance signals).
+
 ## PROBLEME DESCHISE / ÎN LUCRU
 
-_(se completează pe măsură ce rulele end-to-end avansează)_
+- **UX-001 (minor)**: Bibliografia APA marchează eronat „He, N., Cao, R., & Mou, C. (2025)” drept citat în text — nume de familie scurt („He”) dintr-un paragraf cu anul 2025. Nu am modificat codul; necesită regulă de lungime minimă/filtrare a surnamelor.
+- **UX-002 (cosmetic)**: Unele referințe APA au autori parses greșit (ex. „Cicchetti, D, & Rogosch, et al.” în loc de „Cicchetti, D., Rogosch, F. A., et al.”).
+- **Constatare academică (nu defect)**: critica AI a arătat că cei 44 de itemi măsoară percepția contextului, dar nu și mentalizarea; documentată ca limitare în capitolele 4–6.
+
+## REGISTRU TESTE
+- Analiză subagent (înainte de reparații): backend 876 passed / 5 failed; frontend 96 passed; `tsc --noEmit` exit 0.
+- După reparații: 45/45 teste țintă trecute; 96 teste frontend trecute; build-ul și `tsc` rămân verzi de la acea rulare.
 
 ## REGISTRU RUNDE
 | Rundă | Dată | Scop | Rezultat |
