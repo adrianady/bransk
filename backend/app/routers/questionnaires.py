@@ -178,6 +178,64 @@ def delete_questionnaire(qid: int) -> Dict[str, Any]:
         conn.close()
 
 
+def _parse_generated_questionnaire(text: str) -> Dict[str, Any]:
+    """Parse a model reply into {description, reliability_notes, items}.
+
+    Cloud models occasionally wrap JSON in markdown, prepend a sentence, or nest
+    the item list under a different key. Be tolerant, but never silently accept
+    an empty item list: the caller must see a clear error instead of a form that
+    looks saved while holding zero items.
+    """
+    clean = (text or "").strip()
+    if clean.startswith("```"):
+        clean = clean[3:]
+        if clean[:4].lower() == "json":
+            clean = clean[4:]
+    if clean.endswith("```"):
+        clean = clean[:-3]
+    clean = clean.strip()
+    start, end = clean.find("{"), clean.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("Modelul nu a returnat un obiect JSON.")
+    data = json.loads(clean[start:end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("Modelul nu a returnat un obiect JSON valid.")
+
+    items = None
+    for key in ("items", "questionnaire_items", "questions", "scale_items"):
+        candidate = data.get(key)
+        if isinstance(candidate, list) and candidate:
+            items = candidate
+            break
+    if items is None:
+        # Last resort: a top-level list of dicts with a question text.
+        for value in data.values():
+            if (isinstance(value, list) and value
+                    and all(isinstance(x, dict) and ("text" in x or "question" in x) for x in value)):
+                items = value
+                break
+    if not items:
+        raise ValueError("Modelul nu a returnat niciun item; reîncearcă.")
+
+    normalised = []
+    for i, raw in enumerate(items, 1):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        item.setdefault("id", f"g{i}")
+        item.setdefault("text", item.get("question") or item.get("text_en") or "")
+        item.setdefault("type", "likert")
+        item.setdefault("options", ["Total dezacord", "Dezacord", "Neutru", "Acord", "Total acord"])
+        item.setdefault("subscale", "General")
+        if not str(item.get("text", "")).strip():
+            continue
+        normalised.append(item)
+    if not normalised:
+        raise ValueError("Itemii returnați nu au text; reîncearcă.")
+    data["items"] = normalised
+    return data
+
+
 @router.post("/{qid}/ai-generate")
 async def ai_generate_questionnaire_items(qid: int) -> Dict[str, Any]:
     """Ask AI to generate or expand questionnaire items based on project context and construct."""
@@ -188,7 +246,12 @@ async def ai_generate_questionnaire_items(qid: int) -> Dict[str, Any]:
             raise HTTPException(404, "Chestionarul nu a fost găsit")
         q = _row_to_dict(row)
 
-        proj = conn.execute("SELECT title, research_q, description, plan_json FROM project LIMIT 1").fetchone()
+        from app.routers.project import _get_active_project_id
+
+        pid = _get_active_project_id(conn)
+        proj = conn.execute(
+            "SELECT title, research_q, description, plan_json FROM project WHERE id = ?", (pid,)
+        ).fetchone()
         project_context = ""
         if proj:
             project_context = f"Titlu teză: {proj['title']}\nÎntrebare de cercetare: {proj['research_q']}\nDescriere: {proj['description']}"
@@ -231,7 +294,7 @@ async def ai_generate_questionnaire_items(qid: int) -> Dict[str, Any]:
         {"role": "user", "content": user_prompt},
     ]
 
-    if active_provider() == "mock":
+    if LLM_PROVIDER == "mock" or active_provider() == "mock":
         generated = {
             "description": f"Instrument generat offline pentru {q['construct']}.",
             "reliability_notes": "Alpha Cronbach estimat > 0.80 pe eșantion țintă.",
@@ -243,13 +306,9 @@ async def ai_generate_questionnaire_items(qid: int) -> Dict[str, Any]:
     else:
         try:
             _, _, text = await llm_complete(messages, temperature=0.3, max_tokens=16384, json_mode=True)
-            clean = text.strip()
-            if clean.startswith("```json"):
-                clean = clean[7:]
-            if clean.endswith("```"):
-                clean = clean[:-3]
-            clean = clean.strip()
-            generated = json.loads(clean)
+            generated = _parse_generated_questionnaire(text or "")
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.error("AI generate questionnaire failed: %s", exc)
             raise HTTPException(503, f"Eroare LLM generare chestionar: {exc}")
@@ -312,7 +371,7 @@ async def ai_critique_questionnaire(qid: int) -> Dict[str, Any]:
         {"role": "user", "content": user_prompt},
     ]
 
-    if active_provider() == "mock":
+    if LLM_PROVIDER == "mock" or active_provider() == "mock":
         critique = "### Analiză critică (Mod offline)\n- Chestionarul acoperă satisfăcător constructul de bază.\n- Se recomandă clarificarea opțiunilor de răspuns și testarea pe un eșantion pilot."
     else:
         try:

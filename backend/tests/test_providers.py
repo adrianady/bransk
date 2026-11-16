@@ -212,7 +212,7 @@ def test_saving_custom_provider_model_does_not_change_active_provider_model(fres
 
     with TestClient(app) as client:
         response = client.post("/api/ai/custom", json={
-            "base_url": "http://127.0.0.1:8099/v1",
+            "base_url": "https://mock.provider.test/v1",
             "api_key": "local-test-key",
             "model": "local-model",
             "label": "Local",
@@ -308,13 +308,13 @@ def test_custom_provider_fetching_models_and_chatting(fresh_settings, monkeypatc
     client = TestClient(app)
 
     fetched = client.post("/api/ai/custom/models", json={
-        "base_url": "http://127.0.0.1:8099/v1", "api_key": "my-key",
+        "base_url": "https://mock.provider.test/v1", "api_key": "my-key",
     })
     assert fetched.status_code == 200
     assert fetched.json()["models"][0]["id"] == "local-model"
 
     saved = client.post("/api/ai/custom", json={
-        "base_url": "http://127.0.0.1:8099/v1", "api_key": "my-key",
+        "base_url": "https://mock.provider.test/v1", "api_key": "my-key",
         "model": "local-model", "label": "Local", "activate": True,
     })
     assert saved.status_code == 200

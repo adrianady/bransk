@@ -13,3 +13,6 @@ pypdf>=5.0.0
 
 # Thesis export to .docx (Word) for the university
 python-docx>=1.1.0
+
+# Local CPU NLI for claim stance (tokenizer for the ONNX model)
+tokenizers>=0.20.0
