@@ -883,8 +883,6 @@ export interface AiModelsResponse {
 /** GET /ai/status: provider/embedding configuration as the server sees it. */
 export interface AiStatusResponse {
   provider_mode: string;
-  cpu_only?: boolean;
-  allowed_providers?: string[];
   deepseek_model: string;
   deepseek_model_env_default?: string;
   ollama_model: string;
@@ -916,9 +914,6 @@ export interface AiProviderInfo {
   label: string;
   /** true when the key (or local server) makes it usable right now */
   configured: boolean;
-  /** false when the runtime's CPU-only policy blocks this provider */
-  allowed: boolean;
-  block_reason?: string;
   model: string;
   active: boolean;
 }
@@ -929,7 +924,6 @@ export interface AiProvidersResponse {
   active: string;
   order: string[];
   configured: string[];
-  cpu_only: boolean;
 }
 
 export interface AiProviderChoiceResponse {

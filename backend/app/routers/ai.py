@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.db import get_db
-from app.cpu_only import CPU_ONLY_MODE, CPU_ONLY_PROVIDER_NOTICE, is_loopback_url
 from app.embeddings import embedding_status
 from app.llm import (
     DEEPSEEK_API_KEY,
@@ -22,7 +21,6 @@ from app.llm import (
     model_catalogue,
     provider_catalogue,
     provider_order,
-    provider_allowed,
     set_active_model,
     set_active_provider,
 )
@@ -66,9 +64,7 @@ async def ai_status():
     emb = await embedding_status()
     stats = await anyio.to_thread.run_sync(vector_stats)
     return {
-        "provider_mode": "CPU-only" if CPU_ONLY_MODE else LLM_PROVIDER,
-        "cpu_only": CPU_ONLY_MODE,
-        "allowed_providers": ["custom", "mock"] if CPU_ONLY_MODE else [],
+        "provider_mode": LLM_PROVIDER,
         "deepseek_model": active_model(),  # legacy key: the model /api/ai/model returns
         "active_provider": active_provider(),
         "deepseek_model_env_default": DEEPSEEK_MODEL,
@@ -222,8 +218,6 @@ async def ai_custom_models(body: CustomProvider):
     base = (body.base_url or "").strip().rstrip("/")
     if not base.startswith(("http://", "https://")):
         raise HTTPException(400, "URL-ul trebuie să înceapă cu http:// sau https://")
-    if CPU_ONLY_MODE and not is_loopback_url(base):
-        raise HTTPException(409, CPU_ONLY_PROVIDER_NOTICE)
     if not base.endswith(("/v1", "/chat/completions")):
         base = base + "/v1"
     url = _custom_models_url(base)
@@ -231,7 +225,7 @@ async def ai_custom_models(body: CustomProvider):
     if body.api_key:
         headers["Authorization"] = f"Bearer {body.api_key}"
     try:
-        async with httpx.AsyncClient(timeout=20.0, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.get(url, headers=headers)
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Nu am putut contacta {url}: {type(exc).__name__}") from exc
@@ -282,7 +276,6 @@ async def ai_providers():
         "active": active_provider(),
         "order": provider_order(),
         "configured": [p["id"] for p in providers if p["configured"]],
-        "cpu_only": CPU_ONLY_MODE,
     }
 
 
@@ -293,8 +286,6 @@ async def ai_provider_choose(body: ProviderChoice):
     wanted = body.provider.strip().lower()
     if wanted and wanted not in known:
         raise HTTPException(400, f"Provider necunoscut: {wanted}. Cunoscute: {', '.join(sorted(known))}")
-    if wanted and not provider_allowed(wanted):
-        raise HTTPException(409, CPU_ONLY_PROVIDER_NOTICE)
     if wanted in ("opencode_console", "opencode_go"):
         label = "OpenCode Go" if wanted == "opencode_go" else "OpenCode Console"
         if not next(
@@ -347,8 +338,6 @@ async def ai_model_choose(body: ModelChoice):
     known_providers = {provider_info["id"] for provider_info in provider_catalogue()}
     if provider not in known_providers:
         raise HTTPException(400, f"Provider necunoscut: {provider}")
-    if not provider_allowed(provider):
-        raise HTTPException(409, CPU_ONLY_PROVIDER_NOTICE)
     if wanted:
         if provider == "opencode_console":
             from app.opencode_console_provider import free_model_message, is_free_tier_model
@@ -382,8 +371,6 @@ async def ai_test_connection(body: TestConnectionRequest):
     known_providers = {p["id"] for p in provider_catalogue()}
     if provider not in known_providers:
         raise HTTPException(400, f"Provider necunoscut: {provider}")
-    if not provider_allowed(provider):
-        raise HTTPException(409, CPU_ONLY_PROVIDER_NOTICE)
 
     from app.llm import _call_openai_compatible, provider_model
 

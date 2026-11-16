@@ -40,7 +40,13 @@ const DIRECT_DEFAULT_URLS: Record<DirectService, string> = {
 }
 
 const PRESET_TEMPLATES = [
-  { label: 'llama.cpp local · CPU', url: 'http://127.0.0.1:8198/v1', model: 'qwen2.5-coder-7b-instruct-q4_k_m', provider: 'custom' },
+  { label: 'DeepSeek Direct', url: 'https://api.deepseek.com/v1', model: 'deepseek-chat', provider: 'deepseek' },
+  { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-3.5-sonnet', provider: 'openrouter' },
+  { label: 'Groq Cloud', url: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', provider: 'groq' },
+  { label: 'Ollama Local', url: 'http://localhost:11434/v1', model: 'qwen2.5:7b', provider: 'ollama' },
+  { label: 'OpenCode Console', url: 'https://opencode.ai/inference', model: 'deepseek-v4.1-flash', provider: 'opencode_console' },
+  { label: 'OpenCode Go', url: 'https://opencode.ai/inference/go', model: 'beam-free', provider: 'opencode_go' },
+  { label: 'LM Studio / Local', url: 'http://localhost:1234/v1', model: 'local-model', provider: 'custom' },
 ]
 
 type DirectServiceState = {
@@ -485,7 +491,6 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
     if (openCodeMethod === 'console' || openCodeMethod === 'go') {
       const service = openCodeMethod
       const config = direct[service].config
-      if (!directProviders[service]?.allowed) return
       if (config?.configured && !direct[service].models && !direct[service].busy) {
         const identity = config.base_url || `configured-${service}`
         if (autoTestedOpenCode.current[service] !== identity) {
@@ -495,8 +500,7 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
       }
     }
 
-    if (openCodeMethod === 'local' && openCodeLocalProvider?.allowed
-      && openCodeState?.configured && !openCodeModels && !openCodeBusy) {
+    if (openCodeMethod === 'local' && openCodeState?.configured && !openCodeModels && !openCodeBusy) {
       const identity = `${openCodeState.base_url}|${openCodeState.directory}`
       if (autoTestedOpenCode.current.local !== identity) {
         autoTestedOpenCode.current.local = identity
@@ -512,7 +516,6 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
     openCodeState?.directory,
     openCodeModels,
     openCodeBusy,
-    providers,
   ])
 
   useEffect(() => {
@@ -548,8 +551,6 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
         label: 'OpenCode',
         configured: Boolean(directProviders.console?.configured || directProviders.go?.configured
           || openCodeLocalProvider?.configured),
-        allowed: Boolean(directProviders.console?.allowed || directProviders.go?.allowed
-          || openCodeLocalProvider?.allowed),
         model: `Console: ${directProviders.console?.model || 'nesetat'} · Go: ${directProviders.go?.model || 'nesetat'} · local: ${openCodeLocalProvider?.model || 'nesetat'}`,
         active: Boolean(directProviders.console?.active || directProviders.go?.active
           || openCodeLocalProvider?.active),
@@ -622,7 +623,7 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={() => void saveAndTestDirect(service)}
-            disabled={state.busy || !provider?.allowed || !state.url.trim()}
+            disabled={state.busy || !state.url.trim()}
             className="btn-secondary text-xs px-2 py-1"
           >
             {state.busy ? <><Loader2 className="w-3 h-3 animate-spin" /> Testez…</> : 'Salvează și testează conexiunea'}
@@ -630,7 +631,7 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={() => void testDirectConnection(service)}
-            disabled={state.busy || !provider?.allowed || !state.config?.configured || Boolean(state.key.trim()) || state.url !== state.config?.base_url}
+            disabled={state.busy || !state.config?.configured || Boolean(state.key.trim()) || state.url !== state.config?.base_url}
             className="btn-secondary text-xs px-2 py-1"
           >
             Testează conexiunea
@@ -638,7 +639,7 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={() => void chooseProvider(DIRECT_PROVIDERS[service])}
-            disabled={choosing || !provider?.allowed || !provider?.configured || models?.active_supported === false}
+            disabled={choosing || !provider?.configured || models?.active_supported === false}
             className="btn-primary text-xs px-2 py-1"
           >
             {choosing ? 'Activez…' : (isGo ? 'Activează Go (abonament)' : 'Activează Console direct')}
@@ -733,11 +734,6 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
           {status && (
             <div>
               <Row label="Mod furnizor" value={status.provider_mode} />
-              {status.cpu_only && (
-                <div role="status" className="my-2 rounded-lg border border-chrono-300 bg-chrono-50 p-2.5 text-xs text-chrono-900 dark:border-chrono-800 dark:bg-chrono-950/40 dark:text-chrono-200">
-                  CPU/RAM only: doar endpointul local și Mock sunt permise. Dacă modelul local nu răspunde, cererea se oprește; nu există fallback online.
-                </div>
-              )}
 
               {/* Every backend provider is discoverable here; opening its card
                   edits only that provider, while activation remains explicit. */}
@@ -755,7 +751,6 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                         type="button"
                         key={p.id}
                         onClick={() => showProviderSettings(p.id)}
-                        disabled={!p.allowed}
                         aria-pressed={settingsProvider === p.id}
                         className={`rounded-lg border p-2.5 text-left transition-colors ${settingsProvider === p.id
                           ? 'border-chrono-500 bg-chrono-50 dark:border-chrono-600 dark:bg-chrono-950/30'
@@ -765,7 +760,6 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                           <span className="text-xs font-semibold">{p.label}</span>
                           <span className="flex shrink-0 gap-1">
                             {p.active && <span className="badge badge-verdigris">Activ</span>}
-                            {!p.allowed && <span className="badge bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300">Blocat</span>}
                             <span className={`badge ${p.configured ? 'badge-verdigris' : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
                               {p.configured ? 'Configurat' : 'Neconfigurat'}
                             </span>
@@ -773,7 +767,7 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                         </span>
                         <div className="mt-1 flex items-center justify-between gap-1">
                           <span className="truncate text-[10px] text-gray-500">Model: {p.model || 'nesetat'}</span>
-                          {p.configured && p.allowed && (
+                          {p.configured && (
                             <span
                               onClick={(e) => {
                                 e.stopPropagation()
@@ -803,10 +797,8 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                   <p className="text-xs text-gray-400 mt-1">Se încarcă furnizorii…</p>
                 )}
                 {providers && (
-                    <p className="text-[11px] text-gray-400 mt-1">
-                    {providers.cpu_only
-                      ? `Furnizor local permis: ${providers.order.join(' → ') || 'niciunul'}; dacă nu răspunde, cererea se oprește.`
-                      : `Ordinea de rezervă: ${providers.order.join(' → ')}. Un furnizor fără cheie e sărit automat.`}
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Ordinea de rezervă: {providers.order.join(' → ')}. Un furnizor fără cheie e sărit automat.
                   </p>
                 )}
                 {providerNote && (
@@ -835,11 +827,11 @@ export function AiStatusModal({ onClose }: { onClose: () => void }) {
                         ) : selected?.active ? (
                           <span className="badge badge-verdigris">Furnizor activ</span>
                         ) : (
-                          <button type="button" onClick={() => selected && void chooseProvider(selected.id)} disabled={choosing || !selected?.allowed || !selected?.configured} className="btn-primary text-xs px-2 py-1.5" aria-label={`Activează ${selectedLabel}`}>
+                          <button type="button" onClick={() => selected && void chooseProvider(selected.id)} disabled={choosing || !selected?.configured} className="btn-primary text-xs px-2 py-1.5" aria-label={`Activează ${selectedLabel}`}>
                             {choosing ? 'Activez…' : `Activează ${selectedLabel}`}
                           </button>
                         )}
-                        {selected?.configured && selected.allowed && (
+                        {selected?.configured && (
                           <button
                             type="button"
                             onClick={() => selected && void testConnection(selected.id, selected.model)}

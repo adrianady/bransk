@@ -11,18 +11,13 @@ import asyncio
 import base64
 import os
 import time
+from ipaddress import ip_address
 from pathlib import Path
 from typing import AsyncGenerator, Tuple
+from urllib.parse import urlsplit
 
 import httpx
 from dotenv import load_dotenv
-
-from app.cpu_only import (
-    CPU_ONLY_LOCAL_CONTEXT,
-    CPU_ONLY_MODE,
-    CPU_ONLY_PROVIDER_NOTICE,
-    is_loopback_url,
-)
 
 logger = logging.getLogger("chronokg.llm")
 
@@ -254,7 +249,6 @@ def _candidate_chain() -> list[str]:
 
 async def _call_provider(provider: str, messages: list, temperature: float,
                          json_mode: bool, max_tokens: int) -> tuple[str, dict]:
-    _require_provider_allowed(provider)
     if provider == "mock":
         return "[mock]", {}
     if provider == "ollama":
@@ -281,7 +275,6 @@ async def complete(
 ) -> Tuple[str, str, str]:
     """Single completion over the provider chain. Returns (provider, model, text)."""
     t0 = time.monotonic()
-    messages, max_tokens = _fit_local_context(messages, max_tokens)
     chars = _prompt_chars(messages)
     if LLM_PROVIDER == "mock":
         log_ai_event("mock", "mock-model", "complete", True, latency_ms=int((time.monotonic() - t0) * 1000), prompt_chars=chars, reply_chars=6)
@@ -324,7 +317,6 @@ async def complete(
 
 
 async def _stream_provider(provider: str, messages: list, temperature: float, max_tokens: int):
-    _require_provider_allowed(provider)
     if provider == "mock":
         yield "[mock]"
         return
@@ -354,7 +346,6 @@ async def stream_complete(
 ) -> AsyncGenerator[Tuple[str, str, str], None]:
     """Stream tokens over the provider chain. Yields (provider, model, chunk)."""
     t0 = time.monotonic()
-    messages, max_tokens = _fit_local_context(messages, max_tokens)
     chars = _prompt_chars(messages)
     reply_chars = 0
     provider, model = "", ""
@@ -409,8 +400,6 @@ async def stream_complete(
 
 
 async def ping_ollama() -> bool:
-    if CPU_ONLY_MODE:
-        return False
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
@@ -420,13 +409,11 @@ async def ping_ollama() -> bool:
 
 
 async def check_deepseek() -> bool:
-    if CPU_ONLY_MODE:
-        return False
     if not DEEPSEEK_API_KEY:
         return False
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(_provider_url("deepseek", models=True), headers=_provider_headers("deepseek"))
+            resp = await client.get(_provider_url(provider, models=True), headers=_provider_headers(provider))
             return resp.status_code == 200
     except Exception:
         return False
@@ -443,24 +430,6 @@ async def model_catalogue(for_provider: str | None = None) -> dict:
     """
     provider = (for_provider or active_provider()).strip().lower()
     current = _model_for(provider)
-    if not provider_allowed(provider):
-        return {
-            "models": [],
-            "active": current,
-            "provider": provider,
-            "from_provider": False,
-            "allowed": False,
-            "note": CPU_ONLY_PROVIDER_NOTICE,
-        }
-    if provider == "mock":
-        return {
-            "models": [],
-            "active": current,
-            "provider": provider,
-            "from_provider": False,
-            "allowed": True,
-            "note": "Mock offline nu necesită catalog de modele.",
-        }
     if provider == "opencode":
         from app.opencode_provider import OpenCodeError, model_catalogue as opencode_models
 
@@ -569,8 +538,6 @@ def set_active_model(model_id: str, provider: str | None = None) -> str:
     from app.db import get_db
 
     target = (provider or active_provider()).strip().lower()
-    if not provider_allowed(target):
-        raise ValueError(CPU_ONLY_PROVIDER_NOTICE)
     conn = get_db()
     try:
         conn.execute(
@@ -697,6 +664,29 @@ def _set_setting(key: str, value: str) -> None:
         conn.close()
 
 
+def is_local_endpoint(value: str) -> bool:
+    """True for loopback/private hosts — a local LLM must never be a fallback."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = urlsplit(value.strip())
+        _ = parsed.port  # validate a malformed port before trusting the host
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return not ip_address(host).is_global
+    except ValueError:
+        return False
+
+
+def custom_is_local() -> bool:
+    """Whether the saved custom endpoint would run a model on this machine."""
+    return is_local_endpoint(str((custom_provider() or {}).get("base_url", "")))
+
+
 def custom_provider() -> dict | None:
     """The user-defined provider, or None when it was not set up."""
     import json
@@ -708,69 +698,9 @@ def custom_provider() -> dict | None:
         data = json.loads(raw)
     except ValueError:
         return None
-    if not isinstance(data, dict) or not data.get("base_url"):
+    if not data.get("base_url"):
         return None
     return data
-
-
-def provider_allowed(provider: str) -> bool:
-    """Whether a provider may perform inference in this runtime."""
-    name = (provider or "").strip().lower()
-    if not CPU_ONLY_MODE:
-        return True
-    if name == "mock":
-        return True
-    if name == "custom":
-        data = custom_provider() or {}
-        return is_loopback_url(str(data.get("base_url") or ""))
-    return False
-
-
-def _require_provider_allowed(provider: str) -> None:
-    if not provider_allowed(provider):
-        raise LLMProviderError(CPU_ONLY_PROVIDER_NOTICE)
-
-
-def _fit_local_context(messages: list, max_tokens: int) -> tuple[list, int]:
-    """Keep the local model's prompt inside its real (bounded) CPU context.
-
-    The chat endpoint forwards up to ten history turns plus retrieved context.
-    On a 4096-token llama.cpp server that easily exceeds the window and the
-    request dies with HTTP 400. Trim deterministically — no second model call —
-    dropping the oldest turns first and never touching the final user message.
-    Cloud providers are untouched: this only applies to the loopback endpoint.
-    """
-    if not CPU_ONLY_MODE or active_provider() != "custom":
-        return messages, max_tokens
-    if not isinstance(messages, list) or not messages:
-        return messages, max_tokens
-
-    reply_budget = min(max_tokens, CPU_ONLY_LOCAL_CONTEXT // 4)
-    prompt_budget = CPU_ONLY_LOCAL_CONTEXT - reply_budget - 64
-
-    def cost(items: list) -> int:
-        return sum(
-            4 + len(str(m.get("content", ""))) // 3
-            for m in items if isinstance(m, dict)
-        )
-
-    fitted = [dict(m) if isinstance(m, dict) else m for m in messages]
-    while len(fitted) > 2 and cost(fitted) > prompt_budget:
-        # Index 1 is the oldest turn after the system prompt.
-        fitted.pop(1)
-    while cost(fitted) > prompt_budget:
-        candidates = [i for i, m in enumerate(fitted[:-1]) if isinstance(m, dict)]
-        if not candidates:
-            break
-        target = max(candidates, key=lambda i: len(str(fitted[i].get("content") or "")))
-        content = str(fitted[target].get("content") or "")
-        if len(content) <= 120:
-            fitted.pop(target)
-            continue
-        fitted[target]["content"] = (
-            content[: len(content) // 2] + " …[trunchiat pentru contextul local]"
-        )
-    return fitted, reply_budget
 
 
 def set_custom_provider(base_url: str, api_key: str, model: str = "", label: str = "Personalizat") -> dict:
@@ -780,8 +710,8 @@ def set_custom_provider(base_url: str, api_key: str, model: str = "", label: str
     base = (base_url or "").strip().rstrip("/")
     if not base.startswith(("http://", "https://")):
         raise ValueError("URL-ul trebuie să înceapă cu http:// sau https://")
-    if CPU_ONLY_MODE and not is_loopback_url(base):
-        raise ValueError(CPU_ONLY_PROVIDER_NOTICE + " URL-ul trebuie să indice localhost.")
+    if is_local_endpoint(base):
+        raise ValueError("Un model LLM local nu este permis; folosește un furnizor cloud configurat.")
     if not base.endswith("/chat/completions") and not base.endswith("/v1"):
         base = base + "/v1"
     data = {"base_url": base, "api_key": (api_key or "").strip(), "model": (model or "").strip(),
@@ -845,11 +775,7 @@ def provider_key(provider: str) -> str:
 
 
 def _provider_is_configured(provider: str) -> bool:
-    if not provider_allowed(provider):
-        return False
     if provider in ("ollama", "mock"):
-        return True
-    if provider == "custom":
         return True
     if provider == "opencode":
         from app.opencode_provider import is_configured
@@ -891,36 +817,7 @@ def active_provider() -> str:
 
     `auto` keeps the historical behaviour: DeepSeek when a key exists, Ollama
     otherwise — but an explicit choice always wins.
-
-    The database app_settings table is checked first (for UI-chosen provider),
-    then the environment variable LLM_PROVIDER (for tests and explicit overrides),
-    treating "auto" as not explicitly set.
     """
-    import os
-    if CPU_ONLY_MODE:
-        try:
-            from app.db import get_db
-
-            conn = get_db()
-            try:
-                row = conn.execute(
-                    "SELECT value FROM app_settings WHERE key = ?", [SETTING_PROVIDER]
-                ).fetchone()
-            finally:
-                conn.close()
-            selected = (row[0] or "").strip().lower() if row else ""
-        except Exception:  # noqa: BLE001
-            selected = ""
-        if selected and provider_allowed(selected):
-            return selected
-        env_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
-        if env_provider and env_provider != "auto" and provider_allowed(env_provider):
-            return env_provider
-        if provider_allowed("custom"):
-            return "custom"
-        return "mock"
-
-    # First, check the database for an explicit UI choice
     try:
         from app.db import get_db
 
@@ -935,10 +832,6 @@ def active_provider() -> str:
             return (row[0] or "").strip()
     except Exception:  # noqa: BLE001
         pass
-    # Fallback: check environment variable (for tests), but treat "auto" as unset
-    env_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
-    if env_provider and env_provider != "auto":
-        return env_provider
     # No explicit choice: keep the historical default (DeepSeek, whose model the
     # UI reads through active_model()); Ollama stays the failover, not the
     # default, so a saved model choice is never silently overridden.
@@ -951,9 +844,6 @@ def active_provider() -> str:
 
 
 def set_active_provider(provider: str) -> str:
-    normalized = (provider or "").strip().lower()
-    if normalized and not provider_allowed(normalized):
-        raise ValueError(CPU_ONLY_PROVIDER_NOTICE)
     from app.db import get_db
 
     conn = get_db()
@@ -963,7 +853,7 @@ def set_active_provider(provider: str) -> str:
                VALUES (?, ?, datetime('now'))
                ON CONFLICT(key) DO UPDATE SET value = excluded.value,
                                               updated_at = excluded.updated_at""",
-            [SETTING_PROVIDER, normalized],
+            [SETTING_PROVIDER, (provider or "").strip()],
         )
         conn.commit()
     finally:
@@ -979,13 +869,11 @@ def provider_order() -> list[str]:
     was a leftover, not a decision. Ollama still works when named explicitly
     in LLM_PROVIDERS or chosen in the screen.
     """
-    if CPU_ONLY_MODE:
-        return ["custom"] if provider_allowed("custom") else []
     raw = os.getenv("LLM_PROVIDERS", "").strip()
     if raw:
         return [p.strip().lower() for p in raw.split(",") if p.strip()]
     order = ["deepseek"]
-    if custom_provider():
+    if custom_provider() and not custom_is_local():
         order.append("custom")
     # NVIDIA is a cloud reserve like the providers named in LLM_PROVIDERS: it
     # joins the failover chain only when its key exists, and it never displaces
@@ -1006,7 +894,7 @@ def provider_catalogue() -> list[dict]:
         elif pid == "custom":
             data = custom_provider() or {}
             label, key, model = data.get("label") or "Personalizat", data.get("api_key", ""), data.get("model", "")
-            configured = bool(data.get("base_url"))
+            configured = bool(data.get("base_url")) and not custom_is_local()
         elif pid == "opencode":
             from app.opencode_provider import is_configured
 
@@ -1031,9 +919,6 @@ def provider_catalogue() -> list[dict]:
             "id": pid,
             "label": label,
             "configured": configured,
-            "allowed": provider_allowed(pid),
-            "block_reason": CPU_ONLY_PROVIDER_NOTICE
-            if CPU_ONLY_MODE and not provider_allowed(pid) else "",
             "model": model,
             "active": pid == active_provider(),
         })
@@ -1050,11 +935,10 @@ def _provider_headers(provider: str) -> dict:
 
 
 def _provider_url(provider: str, *, models: bool = False) -> str:
-    _require_provider_allowed(provider)
     if provider == "custom":
         data = custom_provider() or {}
         base = data.get("base_url", "")
-        if not base:
+        if not base or custom_is_local():
             return ""
         return _custom_models_url(base) if models else _custom_chat_url(base)
     if provider in OPENCODE_DIRECT_PROVIDERS:
@@ -1087,7 +971,8 @@ OPENAI_IPV4_LOCAL_ADDRESS = "0.0.0.0"
 # Appended when the provider truncated the answer (finish_reason=length).
 # Without a marker a half page looks like a complete one.
 TRUNCATION_NOTE = (
-    " [Notă: răspunsul este trunchiat — modelul a atins limita de tokeni (finish_reason=length)]"
+    "\n\n[Notă: răspunsul este trunchiat — modelul a atins limita de tokeni "
+    "(finish_reason=length), deci textul de mai sus este incomplet.]"
 )
 
 
@@ -1103,13 +988,10 @@ async def _request_openai(method: str, url: str, *, headers: dict | None = None,
     The retry only happens for a connection error (no HTTP response at all):
     a 4xx/5xx is a provider answer and is returned to the caller unchanged.
     """
-    if CPU_ONLY_MODE and not is_loopback_url(url):
-        raise LLMProviderError(CPU_ONLY_PROVIDER_NOTICE)
     async with httpx.AsyncClient(
         timeout=timeout,
         transport=_openai_transport(),
         follow_redirects=False,
-        trust_env=False,
     ) as client:
         try:
             return await client.request(method, url, headers=headers, json=json)
@@ -1177,7 +1059,8 @@ def _openai_message_text(data: dict, provider: str, model_id: str,
     if finish == "length":
         logger.warning("Răspuns trunchiat: providerul %s, modelul %s (%s), finish_reason=length",
                        provider, model_id, purpose)
-        # Don't append TRUNCATION_NOTE as it breaks JSON parsing
+        if text:
+            text = text + TRUNCATION_NOTE
 
     usage = data.get("usage") if isinstance(data, dict) else None
     return text, (usage if isinstance(usage, dict) else {}), finish
@@ -1185,7 +1068,6 @@ def _openai_message_text(data: dict, provider: str, model_id: str,
 
 async def _call_openai_compatible(provider: str, messages: list, temperature: float,
                                   json_mode: bool, max_tokens: int) -> tuple[str, dict]:
-    _require_provider_allowed(provider)
     model_id = provider_model(provider)
     service = ""
     if provider in OPENCODE_DIRECT_PROVIDERS:
@@ -1213,9 +1095,7 @@ async def _call_openai_compatible(provider: str, messages: list, temperature: fl
         # OpenCode Console/Go has its own transport contract (tests assert it
         # directly) and is not the cloud NVIDIA-style endpoint: keep the plain
         # client there, use the IPv4-pinned one everywhere else.
-        async with httpx.AsyncClient(
-            timeout=120.0, follow_redirects=False, trust_env=False
-        ) as client:
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
             resp = await client.post(url, headers=headers, json=body)
     else:
         resp = await _request_openai("POST", url, headers=headers, json=body)
@@ -1232,7 +1112,6 @@ async def _call_openai_compatible(provider: str, messages: list, temperature: fl
 
 
 async def _stream_openai_compatible(provider: str, messages: list, temperature: float, max_tokens: int):
-    _require_provider_allowed(provider)
     model_id = provider_model(provider)
     service = ""
     if provider in OPENCODE_DIRECT_PROVIDERS:
@@ -1259,9 +1138,7 @@ async def _stream_openai_compatible(provider: str, messages: list, temperature: 
     if service:
         # Console/Go keeps its own client contract; the IPv4-pinned transport is
         # for the cloud OpenAI-compatible endpoints (NVIDIA et al.).
-        async with httpx.AsyncClient(
-            timeout=120.0, follow_redirects=False, trust_env=False
-        ) as client:
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
             async with client.stream("POST", url, headers=headers, json=request_body) as resp:
                 from app.opencode_console_provider import validate_response
 
@@ -1274,7 +1151,6 @@ async def _stream_openai_compatible(provider: str, messages: list, temperature: 
         timeout=120.0,
         transport=_openai_transport(),
         follow_redirects=False,
-        trust_env=False,
     ) as client:
         async with client.stream("POST", url, headers=headers, json=request_body) as resp:
             raise_if_model_retired(resp, provider, model_id)
@@ -1286,7 +1162,6 @@ async def _stream_openai_compatible(provider: str, messages: list, temperature: 
 # ── DeepSeek ────────────────────────────────────────────────────────────────
 
 async def _call_deepseek(messages: list, temperature: float, json_mode: bool, max_tokens: int) -> tuple[str, dict]:
-    _require_provider_allowed("deepseek")
     body = {
         "model": active_model(),
         "messages": messages,
@@ -1310,7 +1185,6 @@ async def _call_deepseek(messages: list, temperature: float, json_mode: bool, ma
 
 
 async def _stream_deepseek(messages: list, temperature: float, max_tokens: int):
-    _require_provider_allowed("deepseek")
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
             "POST",
@@ -1332,7 +1206,6 @@ async def _stream_deepseek(messages: list, temperature: float, max_tokens: int):
 # ── Ollama ──────────────────────────────────────────────────────────────────
 
 async def _call_ollama(messages: list, temperature: float, max_tokens: int, json_mode: bool = False) -> tuple[str, dict]:
-    _require_provider_allowed("ollama")
     body = {
         "model": provider_model("ollama"),
         "messages": messages,
@@ -1355,7 +1228,6 @@ async def _call_ollama(messages: list, temperature: float, max_tokens: int, json
 
 
 async def _stream_ollama(messages: list, temperature: float, max_tokens: int):
-    _require_provider_allowed("ollama")
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
             "POST",
@@ -1526,7 +1398,6 @@ def _build_ollama_vision_messages(messages: list, encoded: list[tuple[str, str]]
 async def _call_openai_compatible_vision(provider: str, messages: list, temperature: float,
                                          json_mode: bool, max_tokens: int,
                                          model_override: str | None = None) -> tuple[str, dict]:
-    _require_provider_allowed(provider)
     model_id = (model_override or "").strip() or provider_model(provider)
     service = ""
     if provider in OPENCODE_DIRECT_PROVIDERS:
@@ -1577,7 +1448,6 @@ async def _call_openai_compatible_vision(provider: str, messages: list, temperat
 
 async def _call_deepseek_vision(messages: list, temperature: float, json_mode: bool,
                                 max_tokens: int, model_override: str | None = None) -> tuple[str, dict]:
-    _require_provider_allowed("deepseek")
     body = {
         "model": (model_override or "").strip() or active_model(),
         "messages": messages,
@@ -1603,7 +1473,6 @@ async def _call_deepseek_vision(messages: list, temperature: float, json_mode: b
 async def _call_ollama_vision(messages: list, temperature: float, max_tokens: int,
                               json_mode: bool = False,
                               model_override: str | None = None) -> tuple[str, dict]:
-    _require_provider_allowed("ollama")
     model_id = (model_override or "").strip() or provider_model("ollama")
     body: dict = {
         "model": model_id,
@@ -1627,7 +1496,6 @@ async def _call_ollama_vision(messages: list, temperature: float, max_tokens: in
 async def _call_vision_provider(provider: str, openai_messages: list, ollama_messages: list,
                                 temperature: float, json_mode: bool, max_tokens: int,
                                 model_override: str | None = None) -> tuple[str, dict]:
-    _require_provider_allowed(provider)
     if provider == "mock":
         return "[mock]", {}
     if provider == "ollama":
@@ -1668,18 +1536,6 @@ async def complete_with_images(
     openai_messages = _build_openai_vision_messages(messages if isinstance(messages, list) else [], encoded)
     ollama_messages = _build_ollama_vision_messages(messages if isinstance(messages, list) else [], encoded)
     model_override = (model or "").strip() or None
-
-    requested_provider = (provider or "").strip().lower()
-    if CPU_ONLY_MODE and requested_provider != "mock":
-        message = (
-            "Verificarea vizuală automată este dezactivată în modul CPU-only. "
-            "OCR-ul local rămâne păstrat ca neverificat."
-        )
-        log_ai_event(requested_provider or "blocked", model_override or "", "vision",
-                     False, error="cpu_only_vision_unavailable",
-                     latency_ms=int((time.monotonic() - t0) * 1000),
-                     prompt_chars=chars)
-        raise VisionUnsupportedError(message)
 
     if LLM_PROVIDER == "mock" and (provider is None or (provider or "").strip().lower() == "mock"):
         log_ai_event("mock", "mock-model", "vision", True,
@@ -1790,8 +1646,6 @@ async def model_supports_images(provider_name: str, model_id: str) -> bool | Non
     carries no modality information. Results are cached like the catalogue TTL
     cache; there is no hardcoded model allowlist.
     """
-    if CPU_ONLY_MODE:
-        return False
     key = ((provider_name or "").strip().lower(), (model_id or "").strip())
     now = time.monotonic()
     cached = _vision_support_cache.get(key)

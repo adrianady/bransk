@@ -47,6 +47,21 @@ Severitate: blocant | major | minor | cosmetic.
 
 ---
 
+## CORECȚIE — QA-001 (decizie inversată de utilizator, 2026-11-16)
+
+QA-001 descrie starea dintr-o sesiune anterioară, care **a fost respinsă** de utilizator în sesiunea curentă: regula obligatorie este acum **AI cloud-only**, iar execuția locală e permisă doar pentru embeddings și OCR pe CPU/RAM. Prin urmare, întreaga arhitectură „CPU-only, fără cloud, LLM local Qwen” a fost înlăturată; nu mai constituie stare validă sau dovadă de succes.
+
+### QA-004 — Arhitectură LLM locală / blocarea providerilor cloud (corecția QA-001)
+- Etapă: arhitectură AI / configurare (runda 1).
+- Reproducere: deschide „Stare și setări AI”; starea era `CPU-only`, provideri cloud cu eticheta „Blocat”, activ = „Personalizat” → `http://127.0.0.1:8198/v1` (Qwen 7B local, ~4,5 GB RAM).
+- Așteptat: numai provideri **cloud** pentru sarcinile LLM; niciun model LLM local instalat/încărcat/rulat; fallback automat local imposibil; embeddings/OCR locale rămân pe CPU/RAM.
+- Obținut (după remediere): modelul local oprit; `cpu_only.py`, `start-llm-cpu.sh`, `test_cpu_only_policy.py` și toate barierele cloud eliminate; preseturi cloud (DeepSeek, OpenRouter, Groq, OpenCode, etc.) restaurate în UI.
+- Dovadă UI: dialog „Furnizori AI și stare” — „Mod furnizor: auto”, DeepSeek/NVIDIA/OpenCode „Configurat”, fără etichete „Blocat”; test NVIDIA → „Conexiune confirmată (2175 ms)”; activare NVIDIA → `/api/ai/status` `active_provider: nvidia`.
+- Cauză: sesiune anterioară cu obiectiv opus (CPU-only, fără cloud).
+- Remediere: checkout fișiere AI de pe `master` + păstrarea reparațiilor UIUTILIE (LibraryView, EntryDetail, citări, chestionare, export notițe); checkpoint în commitul `e223686` (branch `cloud-only-realign`). Guard nou în `llm.py`: `is_local_endpoint` / `custom_is_local` — endpointurile loopback/private nu pot fi salvate ca „Personalizat”, nu intră în `provider_order()` și nu au URL de chat.
+- Retestare tehnică: `pytest tests/test_cloud_only_llm.py` → 11 passed. **Retestare în browser: în curs** (chat NVIDIA + verificare ordin fallback).
+- Severitate: blocant (încălca direct regula cloud-only).
+
 ## PROBLEME DESCHISE / ÎN LUCRU
 
 _(se completează pe măsură ce rulele end-to-end avansează)_
@@ -54,4 +69,5 @@ _(se completează pe măsură ce rulele end-to-end avansează)_
 ## REGISTRU RUNDE
 | Rundă | Dată | Scop | Rezultat |
 |-------|------|------|----------|
-| 0 | 2026-11-16 | Baseline & reluare sesiune | App sănătoasă, CPU-only verificat în browser; Qwen local răspunde (1266ms). |
+| 0 | 2026-11-16 | Baseline & reluare sesiune | App sănătoasă; starea CPU-only din sesiunea anterioară a fost respinsă de utilizator și înlocuită cu cloud-only (QA-004). |
+| 1 | 2026-11-16 | Alineare cloud-only + început audit browser | Local LLM oprit, bariere cloud eliminate, NVIDIA cloud activ (test 2175 ms în browser), guard anti-local cu 11 teste verzi. |
